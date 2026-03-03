@@ -16,7 +16,7 @@ use crate::engine::domain_plugins::{
 use crate::engine::pane_state::PayloadRegistry;
 use crate::engine::runtime::ProcessId;
 use crate::engine::topology::{
-    find_neighbor, Cardinal, DomainId, DomainNode, GlobalDomainTree, GlobalLeaf, GlobalTopology,
+    find_neighbor, DomainId, DomainNode, GlobalDomainTree, GlobalLeaf, GlobalTopology,
     Rect,
 };
 use crate::engine::transfer::{TransferOutcome, TransferPipeline};
@@ -32,7 +32,7 @@ pub enum ActionKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ActionRequest {
     pub kind: ActionKind,
-    pub direction: Cardinal,
+    pub direction: Direction,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -81,7 +81,7 @@ impl Orchestrator {
         }
     }
 
-    pub fn execute_focus<W>(&mut self, wm: &mut W, dir: Cardinal) -> Result<()>
+    pub fn execute_focus<W>(&mut self, wm: &mut W, dir: Direction) -> Result<()>
     where
         W: WindowManagerAdapter,
     {
@@ -141,7 +141,7 @@ impl Orchestrator {
         Ok(false)
     }
 
-    pub fn execute_move<W>(&mut self, wm: &mut W, dir: Cardinal) -> Result<()>
+    pub fn execute_move<W>(&mut self, wm: &mut W, dir: Direction) -> Result<()>
     where
         W: WindowManagerAdapter,
     {
@@ -489,7 +489,7 @@ impl Orchestrator {
     pub fn execute_resize<W>(
         &mut self,
         wm: &mut W,
-        dir: Cardinal,
+        dir: Direction,
         grow: bool,
         step: i32,
     ) -> Result<()>
@@ -522,7 +522,7 @@ impl Orchestrator {
         &mut self,
         source: &GlobalLeaf,
         target: &GlobalLeaf,
-        dir: Cardinal,
+        dir: Direction,
     ) -> Result<bool> {
         let Some(mut source_domain) = self.domains.remove(&source.domain) else {
             return Ok(false);
@@ -573,7 +573,7 @@ impl Orchestrator {
         &mut self,
         source: &GlobalLeaf,
         target: &GlobalLeaf,
-        dir: Cardinal,
+        dir: Direction,
     ) -> Result<bool> {
         let Some(domain) = self.domains.get_mut(&source.domain) else {
             return Ok(false);
@@ -615,7 +615,7 @@ impl Orchestrator {
     fn focused_and_target<'a>(
         &self,
         topology: &'a GlobalTopology,
-        dir: Cardinal,
+        dir: Direction,
     ) -> Option<(&'a GlobalLeaf, &'a GlobalLeaf)> {
         let focused_id = topology.focused_leaf?;
         let focused = topology.leaves.iter().find(|leaf| leaf.id == focused_id)?;
@@ -847,7 +847,7 @@ mod tests {
         fn merge_in(
             &mut self,
             _target_native_id: &[u8],
-            _dir: crate::engine::topology::Cardinal,
+            _dir: crate::engine::direction::Direction,
             _payload: Box<dyn PaneState>,
         ) -> Result<Vec<u8>> {
             self.counters.merge_calls.fetch_add(1, Ordering::Relaxed);
@@ -1017,7 +1017,7 @@ mod tests {
                 &mut wm,
                 ActionRequest {
                     kind: ActionKind::Move,
-                    direction: crate::engine::topology::Cardinal::East,
+                    direction: crate::engine::direction::Direction::East,
                 },
             )
             .expect("move should succeed");
@@ -1090,7 +1090,7 @@ mod tests {
                 &mut wm,
                 ActionRequest {
                     kind: ActionKind::Move,
-                    direction: crate::engine::topology::Cardinal::East,
+                    direction: crate::engine::direction::Direction::East,
                 },
             )
             .expect("move should still succeed via fallback");
@@ -1147,7 +1147,7 @@ mod tests {
                 &mut wm,
                 ActionRequest {
                     kind: ActionKind::Move,
-                    direction: crate::engine::topology::Cardinal::East,
+                    direction: crate::engine::direction::Direction::East,
                 },
             )
             .expect("move should merge within same domain");

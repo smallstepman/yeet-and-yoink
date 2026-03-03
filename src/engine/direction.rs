@@ -2,6 +2,12 @@ use clap::ValueEnum;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SplitAxis {
+    Horizontal,
+    Vertical,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, ValueEnum, Deserialize, Serialize)]
 pub enum Direction {
     #[serde(alias = "Left", alias = "left", alias = "west", alias = "W")]
@@ -21,6 +27,13 @@ impl Direction {
             Self::East => Self::West,
             Self::North => Self::South,
             Self::South => Self::North,
+        }
+    }
+
+    pub fn axis(self) -> SplitAxis {
+        match self {
+            Self::West | Self::East => SplitAxis::Horizontal,
+            Self::North | Self::South => SplitAxis::Vertical,
         }
     }
 }

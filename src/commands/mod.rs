@@ -9,7 +9,6 @@ use crate::adapters::window_managers::connect_selected;
 use crate::engine::direction::Direction;
 use crate::engine::domain_plugins;
 use crate::engine::orchestrator::{ActionKind, ActionRequest, Orchestrator};
-use crate::engine::topology::Cardinal;
 
 /// Shared runner for simple action commands (focus, move).
 pub(crate) fn run_action(kind: ActionKind, dir: Direction) -> Result<()> {
@@ -22,7 +21,7 @@ pub(crate) fn run_action(kind: ActionKind, dir: Direction) -> Result<()> {
         &mut wm,
         ActionRequest {
             kind,
-            direction: Cardinal::from(dir),
+            direction: dir,
         },
     )
 }

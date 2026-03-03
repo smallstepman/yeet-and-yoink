@@ -2,8 +2,9 @@ use std::any::TypeId;
 
 use anyhow::Result as AnyResult;
 
+use crate::engine::direction::Direction;
 use crate::engine::pane_state::PaneState;
-use crate::engine::topology::{Cardinal, DomainId, LeafId, Rect};
+use crate::engine::topology::{DomainId, LeafId, Rect};
 
 mod sealed {
     use std::marker::PhantomData;
@@ -46,12 +47,12 @@ pub trait TopologyProvider {
 
 pub trait TopologyModifierImpl: TopologyProvider {
     fn focus_impl(&mut self, id: &Self::NativeId) -> Result<(), Self::Error>;
-    fn move_impl(&mut self, id: &Self::NativeId, dir: Cardinal) -> Result<(), Self::Error>;
+    fn move_impl(&mut self, id: &Self::NativeId, dir: Direction) -> Result<(), Self::Error>;
     fn tear_off_impl(&mut self, id: &Self::NativeId) -> Result<Box<dyn PaneState>, Self::Error>;
     fn merge_in_impl(
         &mut self,
         target: &Self::NativeId,
-        dir: Cardinal,
+        dir: Direction,
         payload: Box<dyn PaneState>,
     ) -> Result<Self::NativeId, Self::Error>;
 }
@@ -65,7 +66,7 @@ pub trait TopologyModifier: TopologyModifierImpl {
     fn move_pane(
         &mut self,
         id: &Self::NativeId,
-        dir: Cardinal,
+        dir: Direction,
     ) -> Result<TopologyChanged, Self::Error> {
         self.move_impl(id, dir)?;
         Ok(sealed::TopologyChanged::new())
@@ -82,7 +83,7 @@ pub trait TopologyModifier: TopologyModifierImpl {
     fn merge_in(
         &mut self,
         target: &Self::NativeId,
-        dir: Cardinal,
+        dir: Direction,
         payload: Box<dyn PaneState>,
     ) -> Result<(Self::NativeId, TopologyChanged), Self::Error> {
         let id = self.merge_in_impl(target, dir, payload)?;
@@ -107,7 +108,7 @@ pub trait ErasedDomain: Send {
     fn merge_in(
         &mut self,
         target_native_id: &[u8],
-        dir: Cardinal,
+        dir: Direction,
         payload: Box<dyn PaneState>,
     ) -> AnyResult<Vec<u8>>;
 }

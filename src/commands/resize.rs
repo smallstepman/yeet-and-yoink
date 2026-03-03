@@ -5,7 +5,6 @@ use crate::adapters::window_managers::connect_selected;
 use crate::engine::direction::Direction;
 use crate::engine::domain_plugins;
 use crate::engine::orchestrator::{ActionKind, ActionRequest, Orchestrator};
-use crate::engine::topology::Cardinal;
 use crate::logging;
 
 const DEFAULT_RESIZE_STEP: i32 = 40;
@@ -31,7 +30,7 @@ pub fn run(dir: Direction, mode: ResizeMode) -> Result<()> {
                 grow,
                 step: DEFAULT_RESIZE_STEP,
             },
-            direction: Cardinal::from(dir),
+            direction: dir,
         },
     )
 }

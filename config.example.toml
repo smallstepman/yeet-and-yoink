@@ -1,5 +1,12 @@
 # <<directions>> == any of {N S W E North South West East L R U D Left Right Up Down}
 
+# Asteriks `*` below should be treated as wildcards, not literal characters.
+# In real config they will never appear. They only appear here to shorten the notation
+# and provide clearer (with less repetitions) explanation of config format.
+
+
+# ------------- config.toml
+
 # these settings apply to anything that starts with `app.`
 [app.*.*]
 # default: false, must be set to true to enable integration

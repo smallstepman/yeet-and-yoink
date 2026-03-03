@@ -1,8 +1,19 @@
-use anyhow::{bail, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use niri_ipc::socket::Socket;
 use niri_ipc::{Action, Request, Response, SizeChange, Window, Workspace, WorkspaceReferenceArg};
+use std::any::TypeId;
 
+use crate::adapters::window_managers::{
+    NiriAdapter, WindowManagerExecution, WindowManagerIntrospection,
+};
 use crate::engine::direction::Direction;
+use crate::engine::domain::{
+    DomainLeafSnapshot, DomainSnapshot, ErasedDomain, TilingDomain, TopologyModifierImpl,
+    TopologyProvider,
+};
+use crate::engine::domain_plugins::{decode_native_window_ref, encode_native_window_ref};
+use crate::engine::pane_state::PaneState;
+use crate::engine::topology::{DomainId, LeafId, Rect};
 use crate::logging;
 
 pub struct Niri {
@@ -193,5 +204,135 @@ impl Niri {
             self.send_action(Action::MoveWindowUp {})?;
         }
         Ok(())
+    }
+}
+
+pub struct NiriDomainPlugin {
+    domain_id: DomainId,
+    inner: NiriAdapter,
+}
+
+impl NiriDomainPlugin {
+    pub fn connect(domain_id: DomainId) -> Result<Self> {
+        Ok(Self {
+            domain_id,
+            inner: NiriAdapter::connect()?,
+        })
+    }
+
+    fn snapshot_leaves(&mut self) -> Result<Vec<DomainLeafSnapshot>> {
+        let windows = self.inner.windows()?;
+        Ok(windows
+            .iter()
+            .enumerate()
+            .map(|(index, window)| {
+                let x = (index as i32) * 1000;
+                DomainLeafSnapshot {
+                    id: (index as LeafId) + 1,
+                    native_id: encode_native_window_ref(window.id, window.pid),
+                    rect: Rect {
+                        x,
+                        y: 0,
+                        w: 900,
+                        h: 900,
+                    },
+                    focused: window.is_focused,
+                }
+            })
+            .collect())
+    }
+}
+
+impl TopologyProvider for NiriDomainPlugin {
+    type NativeId = Vec<u8>;
+    type Error = anyhow::Error;
+
+    fn domain_name(&self) -> &'static str {
+        "niri"
+    }
+
+    fn rect(&self) -> Rect {
+        Rect {
+            x: 0,
+            y: 0,
+            w: 10000,
+            h: 10000,
+        }
+    }
+
+    fn fetch_layout(&mut self) -> Result<(), Self::Error> {
+        let _ = self.inner.windows()?;
+        Ok(())
+    }
+}
+
+impl TopologyModifierImpl for NiriDomainPlugin {
+    fn focus_impl(&mut self, native_id: &Self::NativeId) -> Result<(), Self::Error> {
+        let target = decode_native_window_ref(native_id).context("invalid niri native id")?;
+        self.inner.focus_window_by_id(target.window_id)
+    }
+
+    fn move_impl(&mut self, native_id: &Self::NativeId, dir: Direction) -> Result<(), Self::Error> {
+        let target = decode_native_window_ref(native_id).context("invalid niri native id")?;
+        self.inner.focus_window_by_id(target.window_id)?;
+        self.inner.move_direction(dir)
+    }
+
+    fn tear_off_impl(&mut self, _id: &Self::NativeId) -> Result<Box<dyn PaneState>, Self::Error> {
+        Err(anyhow!("niri domain does not support payload tear-off"))
+    }
+
+    fn merge_in_impl(
+        &mut self,
+        _target: &Self::NativeId,
+        _dir: Direction,
+        _payload: Box<dyn PaneState>,
+    ) -> Result<Self::NativeId, Self::Error> {
+        Err(anyhow!("niri domain does not support payload merge-in"))
+    }
+}
+
+impl TilingDomain for NiriDomainPlugin {
+    fn supported_payload_types(&self) -> &'static [TypeId] {
+        &[]
+    }
+}
+
+impl ErasedDomain for NiriDomainPlugin {
+    fn domain_id(&self) -> DomainId {
+        self.domain_id
+    }
+
+    fn domain_name(&self) -> &'static str {
+        "niri"
+    }
+
+    fn rect(&self) -> Rect {
+        TopologyProvider::rect(self)
+    }
+
+    fn fetch_snapshot(&mut self) -> Result<DomainSnapshot> {
+        Ok(DomainSnapshot {
+            domain_id: self.domain_id,
+            rect: TopologyProvider::rect(self),
+            leaves: self.snapshot_leaves()?,
+        })
+    }
+
+    fn supported_payload_types(&self) -> Vec<TypeId> {
+        vec![]
+    }
+
+    fn tear_off(&mut self, native_id: &[u8]) -> Result<Box<dyn PaneState>> {
+        self.tear_off_impl(&native_id.to_vec())
+    }
+
+    fn merge_in(
+        &mut self,
+        target_native_id: &[u8],
+        dir: Direction,
+        payload: Box<dyn PaneState>,
+    ) -> Result<Vec<u8>> {
+        self.merge_in_impl(&target_native_id.to_vec(), dir, payload)
     }
 }

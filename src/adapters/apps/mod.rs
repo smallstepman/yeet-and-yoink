@@ -72,7 +72,7 @@ pub struct TearResult {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct WindowManagerCapabilities {
+pub struct AppCapabilities {
     pub probe: bool,
     pub focus: bool,
     pub move_internal: bool,
@@ -82,7 +82,7 @@ pub struct WindowManagerCapabilities {
     pub merge: bool,
 }
 
-impl WindowManagerCapabilities {
+impl AppCapabilities {
     pub const fn none() -> Self {
         Self {
             probe: false,
@@ -96,7 +96,7 @@ impl WindowManagerCapabilities {
     }
 }
 
-pub type AdapterCapabilities = WindowManagerCapabilities;
+pub type AdapterCapabilities = AppCapabilities;
 
 /// Trait for apps that support deep focus/move integration with the current WM domain.
 pub trait DeepApp: Send {
@@ -184,7 +184,7 @@ fn legacy_pid(pid: Option<ProcessId>) -> u32 {
     pid.map(ProcessId::get).unwrap_or(0)
 }
 /// Find descendant PIDs whose /proc/<pid>/comm matches `name`.
-pub fn find_descendants_by_comm(pid: u32, name: &str) -> Vec<u32> {
+pub(crate) fn find_descendants_by_comm(pid: u32, name: &str) -> Vec<u32> {
     runtime::find_descendants_by_comm(pid, name)
 }
 

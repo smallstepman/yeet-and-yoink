@@ -14,7 +14,7 @@ use niri_deep::engine::domain_plugins::{EDITOR_DOMAIN_ID, TERMINAL_DOMAIN_ID, WM
 use niri_deep::engine::orchestrator::{ActionKind, ActionRequest, Orchestrator};
 use niri_deep::engine::pane_state::PaneState;
 use niri_deep::engine::runtime::ProcessId;
-use niri_deep::engine::topology::{Cardinal, Rect};
+use niri_deep::engine::topology::Rect;
 
 #[derive(Clone, Default)]
 struct DomainCounters {
@@ -99,7 +99,7 @@ impl ErasedDomain for FakeDomain {
     fn merge_in(
         &mut self,
         _target_native_id: &[u8],
-        _dir: Cardinal,
+        _dir: Direction,
         _payload: Box<dyn PaneState>,
     ) -> Result<Vec<u8>> {
         self.counters.merge_calls.fetch_add(1, Ordering::Relaxed);
@@ -254,7 +254,7 @@ fn nvim_to_wezterm_cross_domain_move_uses_transfer_pipeline() {
             &mut wm,
             ActionRequest {
                 kind: ActionKind::Move,
-                direction: Cardinal::East,
+                direction: Direction::East,
             },
         )
         .expect("cross-domain move should execute");
@@ -311,7 +311,7 @@ fn wezterm_to_wm_cross_domain_move_falls_back_when_transfer_is_unsupported() {
             &mut wm,
             ActionRequest {
                 kind: ActionKind::Move,
-                direction: Cardinal::East,
+                direction: Direction::East,
             },
         )
         .expect("cross-domain move should still succeed via wm fallback");

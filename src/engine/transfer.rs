@@ -2,9 +2,9 @@ use std::any::TypeId;
 
 use anyhow::Result;
 
+use crate::engine::direction::Direction;
 use crate::engine::domain::ErasedDomain;
 use crate::engine::pane_state::{PaneState, PayloadRegistry, TransferError};
-use crate::engine::topology::Cardinal;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TransferOutcome {
@@ -27,7 +27,7 @@ impl<'a> TransferPipeline<'a> {
         source_native_id: &[u8],
         target: &mut dyn ErasedDomain,
         target_native_id: &[u8],
-        dir: Cardinal,
+        dir: Direction,
     ) -> Result<TransferOutcome> {
         let payload = source.tear_off(source_native_id)?;
         let source_type = payload.as_ref().type_id();
@@ -55,7 +55,7 @@ impl<'a> TransferPipeline<'a> {
         domain: &mut dyn ErasedDomain,
         source_native_id: &[u8],
         target_native_id: &[u8],
-        dir: Cardinal,
+        dir: Direction,
     ) -> Result<TransferOutcome> {
         let payload = domain.tear_off(source_native_id)?;
         let source_type = payload.as_ref().type_id();
@@ -197,7 +197,7 @@ mod tests {
         fn merge_in(
             &mut self,
             _target_native_id: &[u8],
-            _dir: crate::engine::topology::Cardinal,
+            _dir: crate::engine::direction::Direction,
             payload: Box<dyn PaneState>,
         ) -> Result<Vec<u8>> {
             self.merged_payload_type = Some(payload.as_ref().type_id());
@@ -221,7 +221,7 @@ mod tests {
                 &[1],
                 &mut target,
                 &[2],
-                crate::engine::topology::Cardinal::East,
+                crate::engine::direction::Direction::East,
             )
             .expect("transfer should succeed");
 
@@ -249,7 +249,7 @@ mod tests {
                 &[1],
                 &mut target,
                 &[2],
-                crate::engine::topology::Cardinal::East,
+                crate::engine::direction::Direction::East,
             )
             .expect("fallback path should succeed");
 
@@ -271,7 +271,7 @@ mod tests {
                 &mut domain,
                 &[1],
                 &[2],
-                crate::engine::topology::Cardinal::West,
+                crate::engine::direction::Direction::West,
             )
             .expect("within-domain transfer should succeed");
 

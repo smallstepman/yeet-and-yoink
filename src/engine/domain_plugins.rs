@@ -8,9 +8,9 @@ use crate::adapters::apps::editor_backend::EditorBackend;
 use crate::adapters::apps::terminal_backend::TerminalBackend;
 use crate::adapters::apps::{self, AppKind, DeepApp, MergePreparation};
 use crate::adapters::window_managers::{
-    FocusedWindowView, NiriAdapter, WindowManagerAdapter, WindowManagerExecution,
-    WindowManagerIntrospection,
+    FocusedWindowView, WindowManagerAdapter,
 };
+use crate::adapters::window_managers::niri::NiriDomainPlugin;
 use crate::engine::direction::Direction;
 use crate::engine::domain::{
     DomainLeafSnapshot, DomainSnapshot, ErasedDomain, TilingDomain, TopologyModifierImpl,
@@ -18,7 +18,7 @@ use crate::engine::domain::{
 };
 use crate::engine::pane_state::PaneState;
 use crate::engine::runtime::ProcessId;
-use crate::engine::topology::{Cardinal, DomainId, LeafId, Rect};
+use crate::engine::topology::{DomainId, Rect};
 
 pub const WM_DOMAIN_ID: DomainId = 1;
 pub const TERMINAL_DOMAIN_ID: DomainId = 2;
@@ -120,143 +120,13 @@ impl ErasedDomain for UnsupportedDomainPlugin {
     fn merge_in(
         &mut self,
         _target_native_id: &[u8],
-        _dir: Cardinal,
+        _dir: Direction,
         _payload: Box<dyn PaneState>,
     ) -> Result<Vec<u8>> {
         Err(anyhow!(
             "domain '{}' does not support merge-in payload transfer",
             self.name
         ))
-    }
-}
-
-pub struct NiriDomainPlugin {
-    domain_id: DomainId,
-    inner: NiriAdapter,
-}
-
-impl NiriDomainPlugin {
-    pub fn connect(domain_id: DomainId) -> Result<Self> {
-        Ok(Self {
-            domain_id,
-            inner: NiriAdapter::connect()?,
-        })
-    }
-
-    fn snapshot_leaves(&mut self) -> Result<Vec<DomainLeafSnapshot>> {
-        let windows = self.inner.windows()?;
-        Ok(windows
-            .iter()
-            .enumerate()
-            .map(|(index, window)| {
-                let x = (index as i32) * 1000;
-                DomainLeafSnapshot {
-                    id: (index as LeafId) + 1,
-                    native_id: encode_native_window_ref(window.id, window.pid),
-                    rect: Rect {
-                        x,
-                        y: 0,
-                        w: 900,
-                        h: 900,
-                    },
-                    focused: window.is_focused,
-                }
-            })
-            .collect())
-    }
-}
-
-impl TopologyProvider for NiriDomainPlugin {
-    type NativeId = Vec<u8>;
-    type Error = anyhow::Error;
-
-    fn domain_name(&self) -> &'static str {
-        "niri"
-    }
-
-    fn rect(&self) -> Rect {
-        Rect {
-            x: 0,
-            y: 0,
-            w: 10000,
-            h: 10000,
-        }
-    }
-
-    fn fetch_layout(&mut self) -> Result<(), Self::Error> {
-        let _ = self.inner.windows()?;
-        Ok(())
-    }
-}
-
-impl TopologyModifierImpl for NiriDomainPlugin {
-    fn focus_impl(&mut self, native_id: &Self::NativeId) -> Result<(), Self::Error> {
-        let target = decode_native_window_ref(native_id).context("invalid niri native id")?;
-        self.inner.focus_window_by_id(target.window_id)
-    }
-
-    fn move_impl(&mut self, native_id: &Self::NativeId, dir: Cardinal) -> Result<(), Self::Error> {
-        let target = decode_native_window_ref(native_id).context("invalid niri native id")?;
-        self.inner.focus_window_by_id(target.window_id)?;
-        self.inner.move_direction(Direction::from(dir))
-    }
-
-    fn tear_off_impl(&mut self, _id: &Self::NativeId) -> Result<Box<dyn PaneState>, Self::Error> {
-        Err(anyhow!("niri domain does not support payload tear-off"))
-    }
-
-    fn merge_in_impl(
-        &mut self,
-        _target: &Self::NativeId,
-        _dir: Cardinal,
-        _payload: Box<dyn PaneState>,
-    ) -> Result<Self::NativeId, Self::Error> {
-        Err(anyhow!("niri domain does not support payload merge-in"))
-    }
-}
-
-impl TilingDomain for NiriDomainPlugin {
-    fn supported_payload_types(&self) -> &'static [TypeId] {
-        &[]
-    }
-}
-
-impl ErasedDomain for NiriDomainPlugin {
-    fn domain_id(&self) -> DomainId {
-        self.domain_id
-    }
-
-    fn domain_name(&self) -> &'static str {
-        "niri"
-    }
-
-    fn rect(&self) -> Rect {
-        TopologyProvider::rect(self)
-    }
-
-    fn fetch_snapshot(&mut self) -> Result<DomainSnapshot> {
-        Ok(DomainSnapshot {
-            domain_id: self.domain_id,
-            rect: TopologyProvider::rect(self),
-            leaves: self.snapshot_leaves()?,
-        })
-    }
-
-    fn supported_payload_types(&self) -> Vec<TypeId> {
-        vec![]
-    }
-
-    fn tear_off(&mut self, native_id: &[u8]) -> Result<Box<dyn PaneState>> {
-        self.tear_off_impl(&native_id.to_vec())
-    }
-
-    fn merge_in(
-        &mut self,
-        target_native_id: &[u8],
-        dir: Cardinal,
-        payload: Box<dyn PaneState>,
-    ) -> Result<Vec<u8>> {
-        self.merge_in_impl(&target_native_id.to_vec(), dir, payload)
     }
 }
 
@@ -318,12 +188,12 @@ impl TopologyModifierImpl for AppDomainPlugin {
         ))
     }
 
-    fn move_impl(&mut self, native_id: &Self::NativeId, dir: Cardinal) -> Result<(), Self::Error> {
+    fn move_impl(&mut self, native_id: &Self::NativeId, dir: Direction) -> Result<(), Self::Error> {
         let pid = Self::pid_from_native(native_id)
             .map(ProcessId::get)
             .context("move requires source pid in native id")?;
         self.adapter
-            .move_internal(Direction::from(dir), pid)
+            .move_internal(dir, pid)
             .with_context(|| format!("{} move_internal failed", self.adapter.adapter_name()))
     }
 
@@ -345,7 +215,7 @@ impl TopologyModifierImpl for AppDomainPlugin {
     fn merge_in_impl(
         &mut self,
         target_native_id: &Self::NativeId,
-        dir: Cardinal,
+        dir: Direction,
         payload: Box<dyn PaneState>,
     ) -> Result<Self::NativeId, Self::Error> {
         let target_window_id =
@@ -366,7 +236,7 @@ impl TopologyModifierImpl for AppDomainPlugin {
         };
         self.adapter
             .merge_into_target(
-                Direction::from(dir),
+                dir,
                 merge_payload.source_pid,
                 target_pid,
                 preparation,
@@ -418,7 +288,7 @@ impl ErasedDomain for AppDomainPlugin {
     fn merge_in(
         &mut self,
         target_native_id: &[u8],
-        dir: Cardinal,
+        dir: Direction,
         payload: Box<dyn PaneState>,
     ) -> Result<Vec<u8>> {
         self.merge_in_impl(&target_native_id.to_vec(), dir, payload)
