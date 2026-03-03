@@ -1,10 +1,11 @@
 use anyhow::{bail, Context, Result};
 
 use crate::adapters::apps::{
-    unsupported_operation, AdapterCapabilities, AppKind, DeepApp, MoveDecision, TearResult,
+    unsupported_operation, AdapterCapabilities, AppKind, DeepApp, MergeExecutionMode,
+    MergePreparation, MoveDecision, TearResult,
 };
+use crate::engine::runtime::{self, CommandContext, ProcessId};
 use crate::engine::topology::Direction;
-use crate::engine::runtime::{self, CommandContext};
 
 pub struct EditorBackend;
 pub const ADAPTER_NAME: &str = "editor";
@@ -258,9 +259,11 @@ impl DeepApp for EditorBackend {
                     (ws (and (fboundp '+workspace-current-name) (+workspace-current-name)))) \
                (delete-window) \
                (let* ((f (make-frame)) \
-                      (tmp-ws (and ws (with-selected-frame f (+workspace-current-name))))) \
-                 (when ws (with-selected-frame f (+workspace/switch-to ws))) \
-                 (set-window-buffer (frame-selected-window f) buf) \
+                       (tmp-ws (and ws (with-selected-frame f (+workspace-current-name))))) \
+                 (with-selected-frame f \
+                   (when ws (+workspace/switch-to ws)) \
+                   (delete-other-windows) \
+                   (set-window-buffer (selected-window) buf)) \
                  (when (and tmp-ws (not (equal tmp-ws ws)) (+workspace-exists-p tmp-ws)) \
                    (+workspace-kill tmp-ws t))))",
         )?;
@@ -271,20 +274,127 @@ impl DeepApp for EditorBackend {
 
     fn merge_into(&self, dir: Direction, _source_pid: u32) -> Result<()> {
         let side = Self::split_side(dir.opposite());
-        // All from the source frame's focused window context:
-        // 1. Grab buffer
-        // 2. Find the other visible frame (the merge target)
-        // 3. In the target frame, create a split and show the buffer
-        // 4. Delete the source frame
+        let (overlap, ahead, distance, offset) = match dir {
+            Direction::West => (
+                "(and (< src-top cand-bottom) (> src-bottom cand-top))",
+                "(<= cand-right src-left)",
+                "(- src-left cand-right)",
+                "(abs (- cand-top src-top))",
+            ),
+            Direction::East => (
+                "(and (< src-top cand-bottom) (> src-bottom cand-top))",
+                "(>= cand-left src-right)",
+                "(- cand-left src-right)",
+                "(abs (- cand-top src-top))",
+            ),
+            Direction::North => (
+                "(and (< src-left cand-right) (> src-right cand-left))",
+                "(<= cand-bottom src-top)",
+                "(- src-top cand-bottom)",
+                "(abs (- cand-left src-left))",
+            ),
+            Direction::South => (
+                "(and (< src-left cand-right) (> src-right cand-left))",
+                "(>= cand-top src-bottom)",
+                "(- cand-top src-bottom)",
+                "(abs (- cand-left src-left))",
+            ),
+        };
+        // Merge source buffer into the closest visible frame in the requested
+        // direction, matching by directional overlap/distance.
         let expr = format!(
             "(let* ((buf (window-buffer)) \
                     (src (selected-frame)) \
-                    (target (car (delq src (filtered-frame-list #'frame-visible-p))))) \
-               (when target \
-                 (with-selected-frame target \
-                   (let ((new-win (split-window nil nil '{side}))) \
-                     (set-window-buffer new-win buf) \
-                     (select-window new-win))) \
+                    (src-pos (frame-position src)) \
+                    (src-left (car src-pos)) \
+                    (src-top (cdr src-pos)) \
+                    (src-right (+ src-left (frame-pixel-width src))) \
+                    (src-bottom (+ src-top (frame-pixel-height src))) \
+                    (target nil) \
+                    (best-dist nil) \
+                    (best-offset nil)) \
+               (dolist (f (delq src (filtered-frame-list #'frame-visible-p))) \
+                 (let* ((pos (frame-position f)) \
+                        (cand-left (car pos)) \
+                        (cand-top (cdr pos)) \
+                        (cand-right (+ cand-left (frame-pixel-width f))) \
+                        (cand-bottom (+ cand-top (frame-pixel-height f)))) \
+                   (when (and {overlap} {ahead}) \
+                     (let ((dist {distance}) \
+                           (offset {offset})) \
+                       (when (or (null best-dist) \
+                                 (< dist best-dist) \
+                                 (and (= dist best-dist) \
+                                      (or (null best-offset) (< offset best-offset)))) \
+                         (setq target f \
+                               best-dist dist \
+                               best-offset offset)))))) \
+               (unless target \
+                 (setq target (car (delq src (filtered-frame-list #'frame-visible-p))))) \
+               (unless target (error \"no merge target frame\")) \
+               (with-selected-frame target \
+                 (let ((new-win (split-window nil nil '{side}))) \
+                   (set-window-buffer new-win buf) \
+                   (select-window new-win))) \
+               (delete-frame src))"
+        );
+        Self::eval_in_frame_mut(&expr)?;
+        Ok(())
+    }
+
+    fn merge_execution_mode(&self) -> MergeExecutionMode {
+        MergeExecutionMode::TargetFocused
+    }
+
+    fn prepare_merge(&self, _source_pid: Option<ProcessId>) -> Result<MergePreparation> {
+        let frame_id = Self::eval_in_frame_mut(
+            "(let ((id (frame-parameter nil 'niri-deep-frame-id))) \
+               (unless id \
+                 (setq id (format \"niri-deep-%d-%d\" (emacs-pid) (random 1000000000))) \
+                 (set-frame-parameter nil 'niri-deep-frame-id id)) \
+               id)",
+        )?;
+        let frame_id = frame_id.trim().trim_matches('"').to_string();
+        if frame_id.is_empty() || frame_id == "nil" {
+            bail!("failed to capture emacs source frame id");
+        }
+        Ok(MergePreparation::EditorFrameSource { frame_id })
+    }
+
+    fn merge_into_target(
+        &self,
+        dir: Direction,
+        source_pid: Option<ProcessId>,
+        _target_pid: Option<ProcessId>,
+        preparation: MergePreparation,
+    ) -> Result<()> {
+        let frame_id = match preparation {
+            MergePreparation::EditorFrameSource { frame_id } => frame_id,
+            MergePreparation::None => bail!("source emacs frame id missing"),
+            other => bail!("unsupported emacs merge preparation: {:?}", other),
+        };
+        let frame_id_lit = frame_id.replace('\\', "\\\\").replace('\"', "\\\"");
+        let focused_is_source = Self::eval_in_frame(&format!(
+            "(equal (frame-parameter nil 'niri-deep-frame-id) \"{frame_id_lit}\")"
+        ))? == "t";
+        if focused_is_source {
+            return self.merge_into(dir, source_pid.map(ProcessId::get).unwrap_or(0));
+        }
+
+        let side = Self::split_side(dir.opposite());
+        let expr = format!(
+            "(let* ((target (selected-frame)) \
+                    (src-id \"{frame_id_lit}\") \
+                    (src nil)) \
+               (dolist (f (filtered-frame-list #'frame-visible-p)) \
+                 (when (and (not (eq f target)) \
+                            (equal (frame-parameter f 'niri-deep-frame-id) src-id)) \
+                   (setq src f))) \
+               (unless src (error \"source frame id not found\")) \
+               (let ((buf (with-selected-frame src (window-buffer (frame-selected-window src))))) \
+                 (let ((new-win (split-window nil nil '{side}))) \
+                   (set-window-buffer new-win buf) \
+                   (select-window new-win)) \
                  (delete-frame src)))"
         );
         Self::eval_in_frame_mut(&expr)?;

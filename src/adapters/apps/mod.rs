@@ -55,12 +55,15 @@ pub enum MergeExecutionMode {
     TargetFocused,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MergePreparation {
     None,
     TerminalMuxSourcePane {
         pane_id: u64,
         target_window_id: Option<u64>,
+    },
+    EditorFrameSource {
+        frame_id: String,
     },
 }
 

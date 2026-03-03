@@ -8,13 +8,13 @@ use niri_deep::adapters::window_managers::{
     FocusedWindowView, ResizeIntent, WindowManagerCapabilities, WindowManagerExecution,
     WindowManagerIntrospection, WindowManagerMetadata, WindowRecord,
 };
-use niri_deep::engine::topology::Direction;
 use niri_deep::engine::domain::{DomainLeafSnapshot, DomainSnapshot, ErasedDomain};
 use niri_deep::engine::domain::{EDITOR_DOMAIN_ID, TERMINAL_DOMAIN_ID, WM_DOMAIN_ID};
 use niri_deep::engine::orchestrator::{ActionKind, ActionRequest, Orchestrator};
-use niri_deep::engine::transfer::PaneState;
 use niri_deep::engine::runtime::ProcessId;
+use niri_deep::engine::topology::Direction;
 use niri_deep::engine::topology::Rect;
+use niri_deep::engine::transfer::PaneState;
 
 #[derive(Clone, Default)]
 struct DomainCounters {
@@ -174,6 +174,22 @@ impl WindowManagerIntrospection for FakeWindowManager {
 
 impl WindowManagerExecution for FakeWindowManager {
     fn focus_direction(&mut self, _direction: Direction) -> Result<()> {
+        if self.windows.len() < 2 {
+            return Ok(());
+        }
+        let focused_idx = self
+            .windows
+            .iter()
+            .position(|window| window.is_focused)
+            .ok_or_else(|| anyhow!("no focused window"))?;
+        let target_idx = if focused_idx + 1 < self.windows.len() {
+            focused_idx + 1
+        } else {
+            focused_idx.saturating_sub(1)
+        };
+        for (idx, window) in self.windows.iter_mut().enumerate() {
+            window.is_focused = idx == target_idx;
+        }
         Ok(())
     }
 
@@ -202,7 +218,19 @@ impl WindowManagerExecution for FakeWindowManager {
         Ok(())
     }
 
-    fn focus_window_by_id(&mut self, _id: u64) -> Result<()> {
+    fn focus_window_by_id(&mut self, id: u64) -> Result<()> {
+        let mut matched = false;
+        for window in &mut self.windows {
+            if window.id == id {
+                window.is_focused = true;
+                matched = true;
+            } else {
+                window.is_focused = false;
+            }
+        }
+        if !matched {
+            return Err(anyhow!("window id {id} not found"));
+        }
         Ok(())
     }
 }

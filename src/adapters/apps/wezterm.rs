@@ -1006,6 +1006,9 @@ impl DeepApp for TerminalBackend {
                 pane_id,
                 target_window_id,
             } => (pane_id, target_window_id),
+            MergePreparation::EditorFrameSource { .. } => {
+                bail!("unsupported merge preparation for wezterm")
+            }
             MergePreparation::None => bail!("source wezterm merge missing pane id"),
         };
         let target_pid = target_pid.context("target wezterm merge missing pid")?;

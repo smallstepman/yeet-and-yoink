@@ -8,17 +8,16 @@ use crate::adapters::window_managers::{
     plan_tear_out, CapabilitySupport, FocusedWindowView, ResizeIntent, ResizeKind,
     WindowManagerAdapter, WindowRecord,
 };
-use crate::engine::topology::Direction;
 use crate::engine::domain::ErasedDomain;
 use crate::engine::domain::{
     decode_native_window_ref, domain_id_for_window, domain_name_for_id, encode_native_window_ref,
 };
-use crate::engine::transfer::PayloadRegistry;
 use crate::engine::runtime::ProcessId;
+use crate::engine::topology::Direction;
 use crate::engine::topology::{
-    find_neighbor, DomainId, DomainNode, GlobalDomainTree, GlobalLeaf, GlobalTopology,
-    Rect,
+    DomainId, DomainNode, GlobalDomainTree, GlobalLeaf, GlobalTopology, Rect,
 };
+use crate::engine::transfer::PayloadRegistry;
 use crate::engine::transfer::{TransferOutcome, TransferPipeline};
 use crate::logging;
 
@@ -89,21 +88,7 @@ impl Orchestrator {
         if self.attempt_focused_app_focus(wm, fallback_dir)? {
             return Ok(());
         }
-        let topology = self.snapshot_from_wm(wm)?;
-        let Some((focused, target)) = self.focused_and_target(&topology, dir) else {
-            return wm.focus_direction(fallback_dir);
-        };
-
-        match self.route(focused, target) {
-            RoutingDecision::SameDomain => {
-                if let Some(target_ref) = decode_native_window_ref(&target.native_id) {
-                    wm.focus_window_by_id(target_ref.window_id)?;
-                    return Ok(());
-                }
-                wm.focus_direction(fallback_dir)
-            }
-            RoutingDecision::CrossDomain => wm.focus_direction(fallback_dir),
-        }
+        wm.focus_direction(fallback_dir)
     }
 
     fn attempt_focused_app_focus<W>(&mut self, wm: &mut W, dir: Direction) -> Result<bool>
@@ -149,15 +134,18 @@ impl Orchestrator {
         if self.attempt_focused_app_move(wm, fallback_dir)? {
             return Ok(());
         }
-        let topology = self.snapshot_from_wm(wm)?;
-        let Some((focused, target)) = self.focused_and_target(&topology, dir) else {
+
+        let focused = Self::focused_window_record(wm)?;
+        let Some(target_window) = self.probe_directional_target(wm, dir, focused.id)? else {
             return wm.move_direction(fallback_dir);
         };
+        let focused_leaf = Self::leaf_from_window(&focused, 1);
+        let target_leaf = Self::leaf_from_window(&target_window, 2);
 
-        match self.route(focused, target) {
+        match self.route(&focused_leaf, &target_leaf) {
             RoutingDecision::SameDomain => {
                 if self
-                    .attempt_same_domain_transfer(focused, target, dir)
+                    .attempt_same_domain_transfer(&focused_leaf, &target_leaf, dir)
                     .unwrap_or(false)
                 {
                     Ok(())
@@ -167,14 +155,14 @@ impl Orchestrator {
             }
             RoutingDecision::CrossDomain => {
                 if self
-                    .attempt_cross_domain_transfer(focused, target, dir)
+                    .attempt_cross_domain_transfer(&focused_leaf, &target_leaf, dir)
                     .unwrap_or(false)
                 {
                     Ok(())
                 } else {
                     let err = RoutingError::UnsupportedTransfer {
-                        source_domain: focused.domain,
-                        target_domain: target.domain,
+                        source_domain: focused_leaf.domain,
+                        target_domain: target_leaf.domain,
                     };
                     logging::debug(format!("orchestrator: {:?}", err));
                     wm.move_direction(fallback_dir)
@@ -397,12 +385,93 @@ impl Orchestrator {
         }
 
         match plan_tear_out(wm.capabilities(), dir) {
-            CapabilitySupport::Native | CapabilitySupport::Unsupported => Ok(()),
+            CapabilitySupport::Native => wm.move_direction(dir),
+            CapabilitySupport::Unsupported => Ok(()),
             CapabilitySupport::Composed => match dir {
                 Direction::West | Direction::East => wm.move_column(dir),
                 Direction::North | Direction::South => {
                     wm.consume_into_column_and_move(dir, source_tile_index)
                 }
+            },
+        }
+    }
+
+    fn focused_window_record<W>(wm: &mut W) -> Result<WindowRecord>
+    where
+        W: WindowManagerAdapter,
+    {
+        wm.with_focused_window(|window| {
+            Ok(WindowRecord {
+                id: window.id(),
+                app_id: window.app_id().map(|value| value.to_string()),
+                title: window.title().map(|value| value.to_string()),
+                pid: window.pid(),
+                is_focused: true,
+                original_tile_index: window.original_tile_index(),
+            })
+        })
+    }
+
+    fn probe_directional_target<W>(
+        &self,
+        wm: &mut W,
+        dir: Direction,
+        source_window_id: u64,
+    ) -> Result<Option<WindowRecord>>
+    where
+        W: WindowManagerAdapter,
+    {
+        if let Err(err) = wm.focus_direction(dir) {
+            logging::debug(format!(
+                "orchestrator: directional target probe failed dir={} err={:#}",
+                dir, err
+            ));
+            return Ok(None);
+        }
+
+        let target = match Self::focused_window_record(wm) {
+            Ok(window) => window,
+            Err(err) => {
+                let _ = wm.focus_window_by_id(source_window_id);
+                return Err(err.context("failed to read target window during directional probe"));
+            }
+        };
+
+        if target.id == source_window_id {
+            return Ok(None);
+        }
+
+        wm.focus_window_by_id(source_window_id)
+            .with_context(|| format!("failed to restore focus to window {}", source_window_id))?;
+        Ok(Some(target))
+    }
+
+    fn window_matches_adapter(adapter_name: &str, window: &WindowRecord) -> bool {
+        let owner_pid = window.pid.map(ProcessId::get).unwrap_or(0);
+        apps::resolve_chain(
+            window.app_id.as_deref().unwrap_or_default(),
+            owner_pid,
+            window.title.as_deref().unwrap_or_default(),
+        )
+        .into_iter()
+        .any(|adapter| adapter.adapter_name() == adapter_name)
+    }
+
+    fn leaf_from_window(window: &WindowRecord, leaf_id: u64) -> GlobalLeaf {
+        let domain = domain_id_for_window(
+            window.app_id.as_deref(),
+            window.pid,
+            window.title.as_deref(),
+        );
+        GlobalLeaf {
+            id: leaf_id,
+            domain,
+            native_id: encode_native_window_ref(window.id, window.pid),
+            rect: Rect {
+                x: leaf_id as i32,
+                y: 0,
+                w: 1,
+                h: 1,
             },
         }
     }
@@ -435,7 +504,16 @@ impl Orchestrator {
 
         match app.merge_execution_mode() {
             MergeExecutionMode::SourceFocused => {
-                match app.merge_into_target(dir, source_pid, None, preparation) {
+                let Some(target_window) =
+                    self.probe_directional_target(wm, dir, source_window_id)?
+                else {
+                    return Ok(false);
+                };
+                if !Self::window_matches_adapter(adapter_name, &target_window) {
+                    return Ok(false);
+                }
+
+                match app.merge_into_target(dir, source_pid, target_window.pid, preparation) {
                     Ok(()) => {
                         logging::debug(format!(
                             "orchestrator: app move handled by {adapter_name} decision=MergeSourceFocused"
@@ -460,13 +538,16 @@ impl Orchestrator {
                     return Ok(false);
                 }
 
-                let (target_window_id, target_pid) =
-                    wm.with_focused_window(|window| Ok((window.id(), window.pid())))?;
-                if target_window_id == source_window_id {
+                let target_window = Self::focused_window_record(wm)?;
+                if target_window.id == source_window_id {
+                    return Ok(false);
+                }
+                if !Self::window_matches_adapter(adapter_name, &target_window) {
+                    let _ = wm.focus_window_by_id(source_window_id);
                     return Ok(false);
                 }
 
-                match app.merge_into_target(dir, source_pid, target_pid, preparation) {
+                match app.merge_into_target(dir, source_pid, target_window.pid, preparation) {
                     Ok(()) => {
                         logging::debug(format!(
                             "orchestrator: app move handled by {adapter_name} decision=MergeTargetFocused"
@@ -612,17 +693,6 @@ impl Orchestrator {
         }
     }
 
-    fn focused_and_target<'a>(
-        &self,
-        topology: &'a GlobalTopology,
-        dir: Direction,
-    ) -> Option<(&'a GlobalLeaf, &'a GlobalLeaf)> {
-        let focused_id = topology.focused_leaf?;
-        let focused = topology.leaves.iter().find(|leaf| leaf.id == focused_id)?;
-        let target = find_neighbor(&topology.leaves, focused, dir)?;
-        Some((focused, target))
-    }
-
     fn snapshot_from_wm<W>(&self, wm: &mut W) -> Result<GlobalTopology>
     where
         W: WindowManagerAdapter,
@@ -709,12 +779,12 @@ mod tests {
         FocusedWindowView, WindowManagerCapabilities, WindowManagerExecution,
         WindowManagerIntrospection, WindowManagerMetadata, WindowRecord,
     };
-    use crate::engine::topology::Direction;
     use crate::engine::domain::{DomainLeafSnapshot, DomainSnapshot, ErasedDomain};
     use crate::engine::domain::{EDITOR_DOMAIN_ID, TERMINAL_DOMAIN_ID};
-    use crate::engine::transfer::PaneState;
     use crate::engine::runtime::ProcessId;
+    use crate::engine::topology::Direction;
     use crate::engine::topology::{GlobalLeaf, Rect};
+    use crate::engine::transfer::PaneState;
 
     #[test]
     fn route_distinguishes_same_and_cross_domain_targets() {
@@ -926,6 +996,22 @@ mod tests {
 
     impl WindowManagerExecution for FakeWindowManager {
         fn focus_direction(&mut self, _direction: Direction) -> Result<()> {
+            if self.windows.len() < 2 {
+                return Ok(());
+            }
+            let focused_idx = self
+                .windows
+                .iter()
+                .position(|window| window.is_focused)
+                .ok_or_else(|| anyhow!("no focused window"))?;
+            let target_idx = if focused_idx + 1 < self.windows.len() {
+                focused_idx + 1
+            } else {
+                focused_idx.saturating_sub(1)
+            };
+            for (idx, window) in self.windows.iter_mut().enumerate() {
+                window.is_focused = idx == target_idx;
+            }
             Ok(())
         }
 
@@ -960,7 +1046,19 @@ mod tests {
             Ok(())
         }
 
-        fn focus_window_by_id(&mut self, _id: u64) -> Result<()> {
+        fn focus_window_by_id(&mut self, id: u64) -> Result<()> {
+            let mut matched = false;
+            for window in &mut self.windows {
+                if window.id == id {
+                    window.is_focused = true;
+                    matched = true;
+                } else {
+                    window.is_focused = false;
+                }
+            }
+            if !matched {
+                return Err(anyhow!("window id {id} not found"));
+            }
             Ok(())
         }
     }
