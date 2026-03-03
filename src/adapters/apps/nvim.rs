@@ -6,8 +6,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::adapters::apps::wezterm::WeztermBackend;
 use crate::engine::contracts::{
-    AdapterCapabilities, AppKind, DeepApp, MoveDecision, TearResult, TopologyModifier,
-    TopologyProvider,
+    AdapterCapabilities, AppKind, DeepApp, MoveDecision, TearResult, TopologyHandler,
 };
 use crate::engine::runtime::{self, CommandContext};
 use crate::engine::topology::Direction;
@@ -117,31 +116,16 @@ impl Nvim {
         Self::remote_send_on(&self.server_addr, keys)
     }
 
-    fn winnr_at_edge(dir: Direction) -> &'static str {
-        match dir {
-            Direction::West => "winnr()==winnr('h')",
-            Direction::East => "winnr()==winnr('l')",
-            Direction::North => "winnr()==winnr('k')",
-            Direction::South => "winnr()==winnr('j')",
-        }
+    fn winnr_at_edge(dir: Direction) -> String {
+        format!("winnr()==winnr('{}')", dir.vim_key())
     }
 
-    fn wincmd_key(dir: Direction) -> &'static str {
-        match dir {
-            Direction::West => "h",
-            Direction::East => "l",
-            Direction::North => "k",
-            Direction::South => "j",
-        }
+    fn wincmd_key(dir: Direction) -> char {
+        dir.vim_key()
     }
 
     fn smart_splits_direction(dir: Direction) -> &'static str {
-        match dir {
-            Direction::West => "left",
-            Direction::East => "right",
-            Direction::North => "up",
-            Direction::South => "down",
-        }
+        dir.egocentric()
     }
 
     fn smart_mux_current_pane_id_expr() -> &'static str {
@@ -192,7 +176,7 @@ impl Nvim {
     }
 
     fn at_edge(&self, dir: Direction) -> Result<bool> {
-        Ok(self.remote_expr(Self::winnr_at_edge(dir))? == "1")
+        Ok(self.remote_expr(&Self::winnr_at_edge(dir))? == "1")
     }
 
     fn snapshot_expr() -> &'static str {
@@ -316,15 +300,20 @@ impl DeepApp for Nvim {
         }
     }
 
+    fn eval(
+        &self,
+        expression: &str,
+        _pid: Option<crate::engine::runtime::ProcessId>,
+    ) -> Result<String> {
+        self.remote_expr(expression)
+    }
+}
+
+impl TopologyHandler for Nvim {
     fn can_focus(&self, dir: Direction, _pid: u32) -> Result<bool> {
         let expr = Self::winnr_at_edge(dir);
-        let result = self.remote_expr(expr)?;
+        let result = self.remote_expr(&expr)?;
         Ok(result != "1")
-    }
-
-    fn focus(&self, dir: Direction, _pid: u32) -> Result<()> {
-        let key = Self::wincmd_key(dir);
-        self.remote_send(&format!("<C-w>{key}"))
     }
 
     fn move_decision(&self, dir: Direction, _pid: u32) -> Result<MoveDecision> {
@@ -336,11 +325,16 @@ impl DeepApp for Nvim {
         Ok(MoveDecision::Internal)
     }
 
+    fn focus(&self, dir: Direction, _pid: u32) -> Result<()> {
+        let key = Self::wincmd_key(dir);
+        self.remote_send(&format!("<C-w>{key}"))
+    }
+
     fn move_internal(&self, dir: Direction, pid: u32) -> Result<()> {
         if self.at_edge(dir)? {
             return self.tear_out_to_terminal_pane(dir, pid);
         }
-        let key = Self::wincmd_key(dir).to_uppercase();
+        let key = Self::wincmd_key(dir).to_ascii_uppercase();
         self.remote_send(&format!("<C-w>{key}"))
     }
 
@@ -349,9 +343,6 @@ impl DeepApp for Nvim {
         bail!("nvim move_out is unreachable; tear-out is handled in move_internal")
     }
 }
-
-impl TopologyProvider for Nvim {}
-impl TopologyModifier for Nvim {}
 
 #[cfg(test)]
 mod tests {
@@ -362,7 +353,7 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     use super::Nvim;
-    use crate::engine::contracts::{DeepApp, MoveDecision};
+    use crate::engine::contracts::{DeepApp, MoveDecision, TopologyHandler};
     use crate::engine::topology::Direction;
 
     static NEXT_ID: AtomicU64 = AtomicU64::new(1);

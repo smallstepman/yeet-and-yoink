@@ -2,8 +2,7 @@ use anyhow::{bail, Context, Result};
 
 use crate::adapters::apps::wezterm::WeztermBackend;
 use crate::engine::contracts::{
-    AdapterCapabilities, AppKind, DeepApp, MoveDecision, TearResult, TopologyModifier,
-    TopologyProvider,
+    AdapterCapabilities, AppKind, DeepApp, MoveDecision, TearResult, TopologyHandler,
 };
 use crate::engine::runtime::{self, CommandContext};
 use crate::engine::topology::Direction;
@@ -81,11 +80,12 @@ impl Tmux {
     }
 
     fn at_edge(&self, dir: Direction) -> Result<bool> {
-        let format = match dir {
-            Direction::West => "#{pane_at_left}",
-            Direction::East => "#{pane_at_right}",
-            Direction::North => "#{pane_at_top}",
-            Direction::South => "#{pane_at_bottom}",
+        let format = match dir.positional() {
+            "left" => "#{pane_at_left}",
+            "right" => "#{pane_at_right}",
+            "top" => "#{pane_at_top}",
+            "bottom" => "#{pane_at_bottom}",
+            _ => unreachable!("invalid positional direction"),
         };
         let val = self.tmux_query(format)?;
         Ok(val == "1")
@@ -97,12 +97,7 @@ impl Tmux {
     }
 
     fn pane_direction_flag(dir: Direction) -> &'static str {
-        match dir {
-            Direction::West => "-L",
-            Direction::East => "-R",
-            Direction::North => "-U",
-            Direction::South => "-D",
-        }
+        dir.tmux_flag()
     }
 }
 
@@ -126,9 +121,23 @@ impl DeepApp for Tmux {
             merge: false,
         }
     }
+}
 
+impl TopologyHandler for Tmux {
     fn can_focus(&self, dir: Direction, _pid: u32) -> Result<bool> {
         Ok(!self.at_edge(dir)?)
+    }
+
+    fn move_decision(&self, dir: Direction, _pid: u32) -> Result<MoveDecision> {
+        let panes = self.pane_count()?;
+        if panes <= 1 {
+            return Ok(MoveDecision::Passthrough);
+        }
+        if self.at_edge(dir)? {
+            Ok(MoveDecision::TearOut)
+        } else {
+            Ok(MoveDecision::Internal)
+        }
     }
 
     fn focus(&self, dir: Direction, _pid: u32) -> Result<()> {
@@ -143,18 +152,6 @@ impl DeepApp for Tmux {
             },
         )
         .with_context(|| format!("tmux select-pane {flag} failed"))
-    }
-
-    fn move_decision(&self, dir: Direction, _pid: u32) -> Result<MoveDecision> {
-        let panes = self.pane_count()?;
-        if panes <= 1 {
-            return Ok(MoveDecision::Passthrough);
-        }
-        if self.at_edge(dir)? {
-            Ok(MoveDecision::TearOut)
-        } else {
-            Ok(MoveDecision::Internal)
-        }
     }
 
     fn move_internal(&self, dir: Direction, _pid: u32) -> Result<()> {
@@ -203,9 +200,6 @@ impl DeepApp for Tmux {
         })
     }
 }
-
-impl TopologyProvider for Tmux {}
-impl TopologyModifier for Tmux {}
 
 #[cfg(test)]
 mod tests {

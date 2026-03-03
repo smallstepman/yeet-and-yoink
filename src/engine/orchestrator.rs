@@ -8,9 +8,7 @@ use crate::adapters::window_managers::{
     plan_tear_out, CapabilitySupport, FocusedWindowView, ResizeIntent, ResizeKind,
     WindowManagerAdapter, WindowRecord,
 };
-use crate::engine::contracts::{
-    AppAdapter, MergeExecutionMode, MoveDecision, TopologyModifier, TopologyProvider,
-};
+use crate::engine::contracts::{AppAdapter, MergeExecutionMode, MoveDecision, TopologyHandler};
 use crate::engine::domain::ErasedDomain;
 use crate::engine::domain::{domain_id_for_window, encode_native_window_ref};
 use crate::engine::domain::{PayloadRegistry, TransferOutcome, TransferPipeline};
@@ -116,10 +114,10 @@ impl Orchestrator {
                 continue;
             }
             let adapter_name = app.adapter_name();
-            if TopologyProvider::can_focus(app.as_ref(), dir, owner_pid)
+            if TopologyHandler::can_focus(app.as_ref(), dir, owner_pid)
                 .with_context(|| format!("{adapter_name} can_focus failed"))?
             {
-                TopologyModifier::focus(app.as_ref(), dir, owner_pid)
+                TopologyHandler::focus(app.as_ref(), dir, owner_pid)
                     .with_context(|| format!("{adapter_name} focus failed"))?;
                 logging::debug(format!("orchestrator: app focus handled by {adapter_name}"));
                 return Ok(true);
@@ -201,7 +199,7 @@ impl Orchestrator {
 
         for app in apps::resolve_chain(&app_id, owner_pid, &title) {
             let adapter_name = app.adapter_name();
-            let decision = TopologyProvider::move_decision(app.as_ref(), dir, owner_pid)
+            let decision = TopologyHandler::move_decision(app.as_ref(), dir, owner_pid)
                 .with_context(|| format!("{adapter_name} move_decision failed"))?;
             match decision {
                 MoveDecision::Passthrough => {
@@ -216,7 +214,7 @@ impl Orchestrator {
                     }
                 }
                 MoveDecision::Internal => {
-                    TopologyModifier::move_internal(app.as_ref(), dir, owner_pid)
+                    TopologyHandler::move_internal(app.as_ref(), dir, owner_pid)
                         .with_context(|| format!("{adapter_name} move_internal failed"))?;
                     logging::debug(format!(
                         "orchestrator: app move handled by {adapter_name} decision=Internal"
@@ -224,7 +222,7 @@ impl Orchestrator {
                     return Ok(true);
                 }
                 MoveDecision::Rearrange => {
-                    TopologyModifier::rearrange(app.as_ref(), dir, owner_pid)
+                    TopologyHandler::rearrange(app.as_ref(), dir, owner_pid)
                         .with_context(|| format!("{adapter_name} rearrange failed"))?;
                     logging::debug(format!(
                         "orchestrator: app move handled by {adapter_name} decision=Rearrange"
@@ -242,7 +240,7 @@ impl Orchestrator {
                             BTreeSet::new()
                         }
                     };
-                    let tear = TopologyModifier::move_out(app.as_ref(), dir, owner_pid)
+                    let tear = TopologyHandler::move_out(app.as_ref(), dir, owner_pid)
                         .with_context(|| format!("{adapter_name} move_out failed"))?;
                     let has_spawn_command = tear.spawn_command.is_some();
                     if let Some(command) = tear.spawn_command {
@@ -527,7 +525,7 @@ impl Orchestrator {
             return Ok(false);
         }
         let adapter_name = app.adapter_name();
-        let preparation = match TopologyModifier::prepare_merge(app, source_pid) {
+        let preparation = match TopologyHandler::prepare_merge(app, source_pid) {
             Ok(value) => value,
             Err(err) => {
                 logging::debug(format!(
@@ -538,7 +536,7 @@ impl Orchestrator {
             }
         };
 
-        match TopologyModifier::merge_execution_mode(app) {
+        match TopologyHandler::merge_execution_mode(app) {
             MergeExecutionMode::SourceFocused => {
                 let Some(target_window) = self.probe_directional_target_for_adapter(
                     wm,
@@ -551,7 +549,7 @@ impl Orchestrator {
                     return Ok(false);
                 };
 
-                match TopologyModifier::merge_into_target(
+                match TopologyHandler::merge_into_target(
                     app,
                     dir,
                     source_pid,
@@ -585,7 +583,7 @@ impl Orchestrator {
                     return Ok(false);
                 };
 
-                match TopologyModifier::merge_into_target(
+                match TopologyHandler::merge_into_target(
                     app,
                     dir,
                     source_pid,
@@ -663,10 +661,10 @@ impl Orchestrator {
                 continue;
             }
             let adapter_name = app.adapter_name();
-            if TopologyProvider::can_resize(app.as_ref(), dir, grow, owner_pid)
+            if TopologyHandler::can_resize(app.as_ref(), dir, grow, owner_pid)
                 .with_context(|| format!("{adapter_name} can_resize failed"))?
             {
-                TopologyModifier::resize_internal(app.as_ref(), dir, grow, step, owner_pid)
+                TopologyHandler::resize_internal(app.as_ref(), dir, grow, step, owner_pid)
                     .with_context(|| format!("{adapter_name} resize_internal failed"))?;
                 logging::debug(format!(
                     "orchestrator: app resize handled by {adapter_name}"

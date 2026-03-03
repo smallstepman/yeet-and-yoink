@@ -18,8 +18,8 @@ use wezterm::WeztermBackend;
 
 pub use crate::engine::contracts::{
     unsupported_operation, AdapterCapabilities, AppAdapter, AppCapabilities, AppKind, DeepApp,
-    MergeExecutionMode, MergePreparation, MoveDecision, TearResult, TopologyModifier,
-    TopologyProvider, TopologySnapshot,
+    MergeExecutionMode, MergePreparation, MoveDecision, TearResult, TopologyHandler,
+    TopologySnapshot,
 };
 
 /// Developer note for adding a new adapter:
@@ -87,16 +87,23 @@ impl DeepApp for PolicyBoundApp {
         capabilities
     }
 
+    fn eval(
+        &self,
+        expression: &str,
+        pid: Option<crate::engine::runtime::ProcessId>,
+    ) -> anyhow::Result<String> {
+        self.inner.eval(expression, pid)
+    }
 }
 
-impl TopologyProvider for PolicyBoundApp {
+impl TopologyHandler for PolicyBoundApp {
     fn can_focus(&self, dir: crate::engine::topology::Direction, pid: u32) -> anyhow::Result<bool> {
         if let Some(policy) = self.pane_policy() {
             if !policy.focus_allowed(dir) {
                 return Ok(false);
             }
         }
-        TopologyProvider::can_focus(self.inner.as_ref(), dir, pid)
+        TopologyHandler::can_focus(self.inner.as_ref(), dir, pid)
     }
 
     fn move_decision(
@@ -108,13 +115,13 @@ impl TopologyProvider for PolicyBoundApp {
             if !policy.move_allowed(dir) {
                 return Ok(MoveDecision::Passthrough);
             }
-            let decision = TopologyProvider::move_decision(self.inner.as_ref(), dir, pid)?;
+            let decision = TopologyHandler::move_decision(self.inner.as_ref(), dir, pid)?;
             if matches!(decision, MoveDecision::TearOut) && !policy.tear_out_capability() {
                 return Ok(MoveDecision::Passthrough);
             }
             return Ok(decision);
         }
-        TopologyProvider::move_decision(self.inner.as_ref(), dir, pid)
+        TopologyHandler::move_decision(self.inner.as_ref(), dir, pid)
     }
 
     fn can_resize(
@@ -128,18 +135,24 @@ impl TopologyProvider for PolicyBoundApp {
                 return Ok(false);
             }
         }
-        TopologyProvider::can_resize(self.inner.as_ref(), dir, grow, pid)
+        TopologyHandler::can_resize(self.inner.as_ref(), dir, grow, pid)
     }
-}
 
-impl TopologyModifier for PolicyBoundApp {
+    fn at_side(&self, dir: crate::engine::topology::Direction, pid: u32) -> anyhow::Result<bool> {
+        TopologyHandler::at_side(self.inner.as_ref(), dir, pid)
+    }
+
+    fn window_count(&self, pid: u32) -> anyhow::Result<u32> {
+        TopologyHandler::window_count(self.inner.as_ref(), pid)
+    }
+
     fn focus(&self, dir: crate::engine::topology::Direction, pid: u32) -> anyhow::Result<()> {
         if let Some(policy) = self.pane_policy() {
             if !policy.focus_allowed(dir) {
                 return Err(unsupported_operation(self.adapter_name(), "focus"));
             }
         }
-        TopologyModifier::focus(self.inner.as_ref(), dir, pid)
+        TopologyHandler::focus(self.inner.as_ref(), dir, pid)
     }
 
     fn move_internal(
@@ -152,7 +165,7 @@ impl TopologyModifier for PolicyBoundApp {
                 return Err(unsupported_operation(self.adapter_name(), "move_internal"));
             }
         }
-        TopologyModifier::move_internal(self.inner.as_ref(), dir, pid)
+        TopologyHandler::move_internal(self.inner.as_ref(), dir, pid)
     }
 
     fn resize_internal(
@@ -170,7 +183,7 @@ impl TopologyModifier for PolicyBoundApp {
                 ));
             }
         }
-        TopologyModifier::resize_internal(self.inner.as_ref(), dir, grow, step, pid)
+        TopologyHandler::resize_internal(self.inner.as_ref(), dir, grow, step, pid)
     }
 
     fn rearrange(&self, dir: crate::engine::topology::Direction, pid: u32) -> anyhow::Result<()> {
@@ -179,7 +192,7 @@ impl TopologyModifier for PolicyBoundApp {
                 return Err(unsupported_operation(self.adapter_name(), "rearrange"));
             }
         }
-        TopologyModifier::rearrange(self.inner.as_ref(), dir, pid)
+        TopologyHandler::rearrange(self.inner.as_ref(), dir, pid)
     }
 
     fn move_out(
@@ -192,7 +205,7 @@ impl TopologyModifier for PolicyBoundApp {
                 return Err(unsupported_operation(self.adapter_name(), "move_out"));
             }
         }
-        TopologyModifier::move_out(self.inner.as_ref(), dir, pid)
+        TopologyHandler::move_out(self.inner.as_ref(), dir, pid)
     }
 
     fn merge_into(
@@ -200,18 +213,18 @@ impl TopologyModifier for PolicyBoundApp {
         dir: crate::engine::topology::Direction,
         source_pid: u32,
     ) -> anyhow::Result<()> {
-        TopologyModifier::merge_into(self.inner.as_ref(), dir, source_pid)
+        TopologyHandler::merge_into(self.inner.as_ref(), dir, source_pid)
     }
 
     fn merge_execution_mode(&self) -> MergeExecutionMode {
-        TopologyModifier::merge_execution_mode(self.inner.as_ref())
+        TopologyHandler::merge_execution_mode(self.inner.as_ref())
     }
 
     fn prepare_merge(
         &self,
         source_pid: Option<crate::engine::runtime::ProcessId>,
     ) -> anyhow::Result<MergePreparation> {
-        TopologyModifier::prepare_merge(self.inner.as_ref(), source_pid)
+        TopologyHandler::prepare_merge(self.inner.as_ref(), source_pid)
     }
 
     fn augment_merge_preparation_for_target(
@@ -219,7 +232,7 @@ impl TopologyModifier for PolicyBoundApp {
         preparation: MergePreparation,
         target_window_id: Option<u64>,
     ) -> MergePreparation {
-        TopologyModifier::augment_merge_preparation_for_target(
+        TopologyHandler::augment_merge_preparation_for_target(
             self.inner.as_ref(),
             preparation,
             target_window_id,
@@ -233,7 +246,7 @@ impl TopologyModifier for PolicyBoundApp {
         target_pid: Option<crate::engine::runtime::ProcessId>,
         preparation: MergePreparation,
     ) -> anyhow::Result<()> {
-        TopologyModifier::merge_into_target(
+        TopologyHandler::merge_into_target(
             self.inner.as_ref(),
             dir,
             source_pid,
@@ -503,8 +516,7 @@ mod resolve_chain_tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     use crate::adapters::apps::{
-        emacs, librefox::Librefox, nvim::Nvim, tmux::Tmux, vscode::Vscode, wezterm,
-        TopologyModifier, TopologyProvider,
+        emacs, librefox::Librefox, nvim::Nvim, tmux::Tmux, vscode::Vscode, wezterm, TopologyHandler,
     };
 
     use super::resolve_chain;
@@ -545,7 +557,7 @@ mod resolve_chain_tests {
 
     #[test]
     fn adapters_implement_topology_traits() {
-        fn assert_topology_contracts<T: TopologyProvider + TopologyModifier>() {}
+        fn assert_topology_contracts<T: TopologyHandler>() {}
         assert_topology_contracts::<emacs::EmacsBackend>();
         assert_topology_contracts::<wezterm::WeztermBackend>();
         assert_topology_contracts::<Tmux>();

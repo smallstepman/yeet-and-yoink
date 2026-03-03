@@ -130,6 +130,11 @@ pub trait DeepApp: Send {
 
     /// Explicit capability declaration used by orchestrator routing.
     fn capabilities(&self) -> AdapterCapabilities;
+
+    /// Optional adapter-native expression evaluator.
+    fn eval(&self, _expression: &str, _pid: Option<ProcessId>) -> Result<String> {
+        Err(unsupported_operation(self.adapter_name(), "eval"))
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -140,8 +145,8 @@ pub struct TopologySnapshot {
     pub cross_domain_neighbors: Vec<Direction>,
 }
 
-/// Read/query contract for app topology.
-pub trait TopologyProvider: DeepApp {
+/// Unified query + mutation contract for app topology.
+pub trait TopologyHandler: DeepApp {
     /// Snapshot of the current in-app and cross-domain neighbor surface.
     fn topology_snapshot(&self, pid: u32) -> Result<TopologySnapshot> {
         let mut snapshot = TopologySnapshot::default();
@@ -166,19 +171,29 @@ pub trait TopologyProvider: DeepApp {
     }
 
     fn can_focus(&self, dir: Direction, pid: u32) -> Result<bool>;
+    fn focus(&self, dir: Direction, pid: u32) -> Result<()>;
     fn move_decision(&self, dir: Direction, pid: u32) -> Result<MoveDecision>;
+    fn move_internal(&self, dir: Direction, pid: u32) -> Result<()>;
+
+    /// Optional primitive for "edge in a direction" queries.
+    fn at_side(&self, dir: Direction, pid: u32) -> Result<bool> {
+        Ok(!self.can_focus(dir, pid)?)
+    }
+
+    /// Optional primitive for visible pane/window count in the app scope.
+    fn window_count(&self, _pid: u32) -> Result<u32> {
+        Ok(1)
+    }
+
     fn can_resize(&self, _dir: Direction, _grow: bool, _pid: u32) -> Result<bool> {
         Ok(false)
     }
-}
-
-/// Mutation contract for app topology.
-pub trait TopologyModifier: DeepApp {
-    fn focus(&self, dir: Direction, pid: u32) -> Result<()>;
-    fn move_internal(&self, dir: Direction, pid: u32) -> Result<()>;
 
     fn resize_internal(&self, _dir: Direction, _grow: bool, _step: i32, _pid: u32) -> Result<()> {
-        Err(unsupported_operation(self.adapter_name(), "resize_internal"))
+        Err(unsupported_operation(
+            self.adapter_name(),
+            "resize_internal",
+        ))
     }
 
     fn rearrange(&self, _dir: Direction, _pid: u32) -> Result<()> {
@@ -218,9 +233,9 @@ pub trait TopologyModifier: DeepApp {
     }
 }
 
-pub trait AppAdapter: DeepApp + TopologyProvider + TopologyModifier {}
+pub trait AppAdapter: DeepApp + TopologyHandler {}
 
-impl<T> AppAdapter for T where T: DeepApp + TopologyProvider + TopologyModifier {}
+impl<T> AppAdapter for T where T: DeepApp + TopologyHandler {}
 
 pub fn unsupported_operation(adapter: &str, operation: &str) -> anyhow::Error {
     anyhow!(

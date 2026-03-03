@@ -157,7 +157,7 @@ use serde::Deserialize;
 use crate::config::TerminalMuxBackend;
 use crate::engine::contracts::{
     AdapterCapabilities, AppKind, DeepApp, MergeExecutionMode, MergePreparation, MoveDecision,
-    TearResult, TopologyModifier, TopologyProvider,
+    TearResult, TopologyHandler,
 };
 use crate::engine::runtime::ProcessId;
 use crate::engine::topology::Direction;
@@ -708,20 +708,22 @@ impl WeztermBackend {
     }
 
     fn direction_name(dir: Direction) -> &'static str {
-        match dir {
-            Direction::West => "Left",
-            Direction::East => "Right",
-            Direction::North => "Up",
-            Direction::South => "Down",
+        match dir.egocentric() {
+            "left" => "Left",
+            "right" => "Right",
+            "up" => "Up",
+            "down" => "Down",
+            _ => unreachable!("invalid egocentric direction"),
         }
     }
 
     fn split_flag(dir: Direction) -> &'static str {
-        match dir {
-            Direction::West => "--left",
-            Direction::East => "--right",
-            Direction::North => "--top",
-            Direction::South => "--bottom",
+        match dir.positional() {
+            "left" => "--left",
+            "right" => "--right",
+            "top" => "--top",
+            "bottom" => "--bottom",
+            _ => unreachable!("invalid positional direction"),
         }
     }
 
@@ -810,25 +812,12 @@ impl DeepApp for WeztermBackend {
             merge: true,
         }
     }
+}
 
+impl TopologyHandler for WeztermBackend {
     fn can_focus(&self, dir: Direction, pid: u32) -> Result<bool> {
         let pane_id = Self::focused_pane_id(pid)?;
         Self::has_neighbor(pid, pane_id, dir)
-    }
-
-    fn focus(&self, dir: Direction, pid: u32) -> Result<()> {
-        let pane_id = Self::focused_pane_id(pid)?;
-        let pane_id_str = pane_id.to_string();
-        Self::cli_stdout(
-            pid,
-            &[
-                "activate-pane-direction",
-                Self::direction_name(dir),
-                "--pane-id",
-                &pane_id_str,
-            ],
-        )?;
-        Ok(())
     }
 
     fn move_decision(&self, dir: Direction, pid: u32) -> Result<MoveDecision> {
@@ -866,6 +855,25 @@ impl DeepApp for WeztermBackend {
         Ok(MoveDecision::TearOut)
     }
 
+    fn can_resize(&self, _dir: Direction, _grow: bool, _pid: u32) -> Result<bool> {
+        Ok(true)
+    }
+
+    fn focus(&self, dir: Direction, pid: u32) -> Result<()> {
+        let pane_id = Self::focused_pane_id(pid)?;
+        let pane_id_str = pane_id.to_string();
+        Self::cli_stdout(
+            pid,
+            &[
+                "activate-pane-direction",
+                Self::direction_name(dir),
+                "--pane-id",
+                &pane_id_str,
+            ],
+        )?;
+        Ok(())
+    }
+
     fn move_internal(&self, dir: Direction, pid: u32) -> Result<()> {
         let pane_id = Self::focused_pane_id(pid)?;
         let neighbor = Self::pane_in_direction(pid, pane_id, dir)?
@@ -884,10 +892,6 @@ impl DeepApp for WeztermBackend {
             ],
         )?;
         Ok(())
-    }
-
-    fn can_resize(&self, _dir: Direction, _grow: bool, _pid: u32) -> Result<bool> {
-        Ok(true)
     }
 
     fn resize_internal(&self, dir: Direction, grow: bool, step: i32, pid: u32) -> Result<()> {
@@ -1005,9 +1009,6 @@ impl DeepApp for WeztermBackend {
     }
 }
 
-impl TopologyProvider for WeztermBackend {}
-impl TopologyModifier for WeztermBackend {}
-
 #[cfg(test)]
 mod tests {
     use std::ffi::OsString;
@@ -1017,7 +1018,7 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     use super::WeztermBackend;
-    use crate::engine::contracts::{DeepApp, MoveDecision};
+    use crate::engine::contracts::{DeepApp, MoveDecision, TopologyHandler};
     use crate::engine::topology::Direction;
 
     static NEXT_ID: AtomicU64 = AtomicU64::new(1);

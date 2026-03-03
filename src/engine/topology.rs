@@ -14,13 +14,29 @@ pub enum Direction {
     West,
     #[serde(alias = "Right", alias = "right", alias = "east", alias = "E")]
     East,
-    #[serde(alias = "Up", alias = "up", alias = "north", alias = "N")]
+    #[serde(
+        alias = "Up",
+        alias = "up",
+        alias = "north",
+        alias = "N",
+        alias = "Above",
+        alias = "above"
+    )]
     North,
-    #[serde(alias = "Down", alias = "down", alias = "south", alias = "S")]
+    #[serde(
+        alias = "Down",
+        alias = "down",
+        alias = "south",
+        alias = "S",
+        alias = "Below",
+        alias = "below"
+    )]
     South,
 }
 
 impl Direction {
+    pub const ALL: [Self; 4] = [Self::West, Self::East, Self::North, Self::South];
+
     pub fn opposite(self) -> Self {
         match self {
             Self::West => Self::East,
@@ -36,16 +52,98 @@ impl Direction {
             Self::North | Self::South => SplitAxis::Vertical,
         }
     }
+
+    pub const fn cardinal(self) -> &'static str {
+        match self {
+            Self::West => "west",
+            Self::East => "east",
+            Self::North => "north",
+            Self::South => "south",
+        }
+    }
+
+    /// Positional terms: left/right/top/bottom.
+    pub const fn positional(self) -> &'static str {
+        match self {
+            Self::West => "left",
+            Self::East => "right",
+            Self::North => "top",
+            Self::South => "bottom",
+        }
+    }
+
+    /// Relational terms: left/right/above/below.
+    pub const fn relational(self) -> &'static str {
+        match self {
+            Self::West => "left",
+            Self::East => "right",
+            Self::North => "above",
+            Self::South => "below",
+        }
+    }
+
+    /// Egocentric terms: left/right/up/down.
+    pub const fn egocentric(self) -> &'static str {
+        match self {
+            Self::West => "left",
+            Self::East => "right",
+            Self::North => "up",
+            Self::South => "down",
+        }
+    }
+
+    #[allow(dead_code)]
+    pub const fn vectorial(self) -> &'static str {
+        match self {
+            Self::West => "backward",
+            Self::East => "forward",
+            Self::North => "upward",
+            Self::South => "downward",
+        }
+    }
+
+    #[allow(dead_code)]
+    pub const fn sequential(self) -> &'static str {
+        match self {
+            Self::West => "previous",
+            Self::East => "next",
+            Self::North => "higher",
+            Self::South => "lower",
+        }
+    }
+
+    #[allow(dead_code)]
+    pub const fn hierarchical(self) -> &'static str {
+        match self {
+            Self::West => "previous",
+            Self::East => "next",
+            Self::North => "parent",
+            Self::South => "child",
+        }
+    }
+
+    pub const fn vim_key(self) -> char {
+        match self {
+            Self::West => 'h',
+            Self::East => 'l',
+            Self::North => 'k',
+            Self::South => 'j',
+        }
+    }
+
+    pub const fn tmux_flag(self) -> &'static str {
+        match self {
+            Self::West => "-L",
+            Self::East => "-R",
+            Self::North => "-U",
+            Self::South => "-D",
+        }
+    }
 }
 
 impl fmt::Display for Direction {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::West => write!(f, "west"),
-            Self::East => write!(f, "east"),
-            Self::North => write!(f, "north"),
-            Self::South => write!(f, "south"),
-        }
+        write!(f, "{}", self.cardinal())
     }
 }
 
@@ -124,5 +222,25 @@ mod tests {
         };
         assert!(a.perp_overlap(b, Direction::East));
         assert!(!a.perp_overlap(b, Direction::South));
+    }
+
+    #[test]
+    fn direction_string_conversions_cover_reference_sets() {
+        assert_eq!(Direction::West.positional(), "left");
+        assert_eq!(Direction::East.positional(), "right");
+        assert_eq!(Direction::North.positional(), "top");
+        assert_eq!(Direction::South.positional(), "bottom");
+
+        assert_eq!(Direction::North.relational(), "above");
+        assert_eq!(Direction::South.relational(), "below");
+        assert_eq!(Direction::North.egocentric(), "up");
+        assert_eq!(Direction::South.egocentric(), "down");
+
+        assert_eq!(Direction::West.vectorial(), "backward");
+        assert_eq!(Direction::East.vectorial(), "forward");
+        assert_eq!(Direction::North.sequential(), "higher");
+        assert_eq!(Direction::South.sequential(), "lower");
+        assert_eq!(Direction::North.hierarchical(), "parent");
+        assert_eq!(Direction::South.hierarchical(), "child");
     }
 }

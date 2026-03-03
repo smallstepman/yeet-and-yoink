@@ -5,8 +5,7 @@ use std::io::Write;
 use std::process::{Command, Stdio};
 
 use crate::engine::contracts::{
-    AdapterCapabilities, AppKind, DeepApp, MoveDecision, TearResult, TopologyModifier,
-    TopologyProvider,
+    AdapterCapabilities, AppKind, DeepApp, MoveDecision, TearResult, TopologyHandler,
 };
 use crate::engine::topology::Direction;
 use crate::logging;
@@ -195,7 +194,9 @@ impl DeepApp for Librefox {
             merge: true,
         }
     }
+}
 
+impl TopologyHandler for Librefox {
     fn can_focus(&self, dir: Direction, _pid: u32) -> Result<bool> {
         let state = self.tab_state()?;
         let can = match dir {
@@ -211,6 +212,24 @@ impl DeepApp for Librefox {
                 .unwrap_or(state.vimium_available),
         };
         Ok(can)
+    }
+
+    fn move_decision(&self, dir: Direction, _pid: u32) -> Result<MoveDecision> {
+        let state = self.tab_state()?;
+        if state.tab_count <= 1 {
+            return Ok(MoveDecision::Passthrough);
+        }
+
+        match dir {
+            Direction::West | Direction::East => {
+                if Self::at_tab_edge(state, dir) {
+                    Ok(MoveDecision::TearOut)
+                } else {
+                    Ok(MoveDecision::Internal)
+                }
+            }
+            Direction::North | Direction::South => Ok(MoveDecision::Passthrough),
+        }
     }
 
     fn focus(&self, dir: Direction, _pid: u32) -> Result<()> {
@@ -232,24 +251,6 @@ impl DeepApp for Librefox {
             return Err(primary_err);
         }
         Ok(())
-    }
-
-    fn move_decision(&self, dir: Direction, _pid: u32) -> Result<MoveDecision> {
-        let state = self.tab_state()?;
-        if state.tab_count <= 1 {
-            return Ok(MoveDecision::Passthrough);
-        }
-
-        match dir {
-            Direction::West | Direction::East => {
-                if Self::at_tab_edge(state, dir) {
-                    Ok(MoveDecision::TearOut)
-                } else {
-                    Ok(MoveDecision::Internal)
-                }
-            }
-            Direction::North | Direction::South => Ok(MoveDecision::Passthrough),
-        }
     }
 
     fn move_internal(&self, dir: Direction, _pid: u32) -> Result<()> {
@@ -277,9 +278,6 @@ impl DeepApp for Librefox {
     }
 }
 
-impl TopologyProvider for Librefox {}
-impl TopologyModifier for Librefox {}
-
 #[cfg(test)]
 mod tests {
     use std::ffi::OsString;
@@ -289,7 +287,7 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     use super::{FirefoxRequest, Librefox};
-    use crate::engine::contracts::{DeepApp, MoveDecision};
+    use crate::engine::contracts::{DeepApp, MoveDecision, TopologyHandler};
     use crate::engine::topology::Direction;
 
     static NEXT_ID: AtomicU64 = AtomicU64::new(1);

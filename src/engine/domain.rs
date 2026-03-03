@@ -323,7 +323,9 @@ use anyhow::{anyhow, Context, Result};
 use crate::adapters::apps::{self};
 use crate::adapters::window_managers::niri::NiriDomainPlugin;
 use crate::adapters::window_managers::{FocusedWindowView, WindowManagerAdapter};
-use crate::engine::contracts::{AppAdapter, AppKind, DeepApp, MergePreparation};
+use crate::engine::contracts::{
+    AppAdapter, AppKind, MergePreparation, TopologyHandler as AppTopologyHandler,
+};
 use crate::engine::runtime::ProcessId;
 
 pub const WM_DOMAIN_ID: DomainId = 1;
@@ -505,7 +507,7 @@ impl TopologyModifierImpl for AppDomainPlugin {
         let pid = Self::pid_from_native(native_id)
             .map(ProcessId::get)
             .context("move requires source pid in native id")?;
-        DeepApp::move_internal(self.adapter.as_ref(), dir, pid)
+        AppTopologyHandler::move_internal(self.adapter.as_ref(), dir, pid)
             .with_context(|| format!("{} move_internal failed", self.adapter.adapter_name()))
     }
 
@@ -514,7 +516,7 @@ impl TopologyModifierImpl for AppDomainPlugin {
         native_id: &Self::NativeId,
     ) -> Result<Box<dyn PaneState>, Self::Error> {
         let source_pid = Self::pid_from_native(native_id);
-        let preparation = DeepApp::prepare_merge(self.adapter.as_ref(), source_pid)
+        let preparation = AppTopologyHandler::prepare_merge(self.adapter.as_ref(), source_pid)
             .with_context(|| format!("{} prepare_merge failed", self.adapter.adapter_name()))?;
         Ok(Box::new(AppMergePayload {
             source_pid,
@@ -535,12 +537,12 @@ impl TopologyModifierImpl for AppDomainPlugin {
         let merge_payload = payload_any
             .downcast::<AppMergePayload>()
             .map_err(|_| anyhow!("unsupported payload for '{}'", self.adapter.adapter_name()))?;
-        let preparation = DeepApp::augment_merge_preparation_for_target(
+        let preparation = AppTopologyHandler::augment_merge_preparation_for_target(
             self.adapter.as_ref(),
             merge_payload.preparation,
             target_window_id,
         );
-        DeepApp::merge_into_target(
+        AppTopologyHandler::merge_into_target(
             self.adapter.as_ref(),
             dir,
             merge_payload.source_pid,

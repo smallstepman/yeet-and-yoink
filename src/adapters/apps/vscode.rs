@@ -2,7 +2,7 @@ use anyhow::Result;
 
 use crate::engine::contracts::{
     unsupported_operation, AdapterCapabilities, AppKind, DeepApp, MoveDecision, TearResult,
-    TopologyModifier, TopologyProvider,
+    TopologyHandler,
 };
 use crate::engine::topology::Direction;
 
@@ -29,17 +29,19 @@ impl DeepApp for Vscode {
             merge: false,
         }
     }
+}
 
+impl TopologyHandler for Vscode {
     fn can_focus(&self, _dir: Direction, _pid: u32) -> Result<bool> {
         Ok(false)
     }
 
-    fn focus(&self, _dir: Direction, _pid: u32) -> Result<()> {
-        Err(unsupported_operation(self.adapter_name(), "focus"))
-    }
-
     fn move_decision(&self, _dir: Direction, _pid: u32) -> Result<MoveDecision> {
         Ok(MoveDecision::Passthrough)
+    }
+
+    fn focus(&self, _dir: Direction, _pid: u32) -> Result<()> {
+        Err(unsupported_operation(self.adapter_name(), "focus"))
     }
 
     fn move_internal(&self, _dir: Direction, _pid: u32) -> Result<()> {
@@ -50,9 +52,6 @@ impl DeepApp for Vscode {
         Err(unsupported_operation(self.adapter_name(), "move_out"))
     }
 }
-
-impl TopologyProvider for Vscode {}
-impl TopologyModifier for Vscode {}
 
 #[cfg(test)]
 mod tests {
