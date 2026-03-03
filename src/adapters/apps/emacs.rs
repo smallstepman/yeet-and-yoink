@@ -1,6 +1,6 @@
 use anyhow::{bail, Context, Result};
 
-use crate::adapters::apps::{
+use crate::engine::contracts::{
     unsupported_operation, AdapterCapabilities, AppKind, DeepApp, MergeExecutionMode,
     MergePreparation, MoveDecision, TearResult,
 };
@@ -403,7 +403,7 @@ impl DeepApp for EditorBackend {
 #[cfg(test)]
 mod tests {
     use super::EditorBackend;
-    use crate::adapters::apps::DeepApp;
+    use crate::engine::contracts::DeepApp;
 
     fn env_guard() -> std::sync::MutexGuard<'static, ()> {
         crate::utils::env_guard()

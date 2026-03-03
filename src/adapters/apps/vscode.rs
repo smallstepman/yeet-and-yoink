@@ -1,6 +1,6 @@
 use anyhow::Result;
 
-use crate::adapters::apps::{
+use crate::engine::contracts::{
     unsupported_operation, AdapterCapabilities, AppKind, DeepApp, MoveDecision, TearResult,
 };
 use crate::engine::topology::Direction;
@@ -53,7 +53,7 @@ impl DeepApp for Vscode {
 #[cfg(test)]
 mod tests {
     use super::Vscode;
-    use crate::adapters::apps::DeepApp;
+    use crate::engine::contracts::DeepApp;
 
     #[test]
     fn declares_explicit_capability_contract() {

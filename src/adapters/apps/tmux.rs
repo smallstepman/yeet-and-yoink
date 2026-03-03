@@ -1,7 +1,7 @@
 use anyhow::{bail, Context, Result};
 
 use crate::adapters::apps::terminal_backend::TerminalBackend;
-use crate::adapters::apps::{AdapterCapabilities, AppKind, DeepApp, MoveDecision, TearResult};
+use crate::engine::contracts::{AdapterCapabilities, AppKind, DeepApp, MoveDecision, TearResult};
 use crate::engine::runtime::{self, CommandContext};
 use crate::engine::topology::Direction;
 
@@ -204,7 +204,7 @@ impl DeepApp for Tmux {
 #[cfg(test)]
 mod tests {
     use super::Tmux;
-    use crate::adapters::apps::DeepApp;
+    use crate::engine::contracts::DeepApp;
 
     #[test]
     fn declares_explicit_capability_contract() {

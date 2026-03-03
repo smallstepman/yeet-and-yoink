@@ -1,3 +1,4 @@
+pub mod contracts;
 pub mod domain;
 pub mod orchestrator;
 pub mod runtime;

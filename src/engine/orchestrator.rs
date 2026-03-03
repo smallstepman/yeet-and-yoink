@@ -3,11 +3,12 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 
-use crate::adapters::apps::{self, DeepApp, MergeExecutionMode, MoveDecision};
+use crate::adapters::apps::{self};
 use crate::adapters::window_managers::{
     plan_tear_out, CapabilitySupport, FocusedWindowView, ResizeIntent, ResizeKind,
     WindowManagerAdapter, WindowRecord,
 };
+use crate::engine::contracts::{DeepApp, MergeExecutionMode, MoveDecision};
 use crate::engine::domain::ErasedDomain;
 use crate::engine::domain::{domain_id_for_window, encode_native_window_ref};
 use crate::engine::domain::{PayloadRegistry, TransferOutcome, TransferPipeline};

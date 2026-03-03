@@ -154,11 +154,11 @@ use std::time::Duration;
 use anyhow::{bail, Context, Result};
 use serde::Deserialize;
 
-use crate::adapters::apps::{
+use crate::config::TerminalMuxBackend;
+use crate::engine::contracts::{
     unsupported_operation, AdapterCapabilities, AppKind, DeepApp, MergeExecutionMode,
     MergePreparation, MoveDecision, TearResult,
 };
-use crate::config::TerminalMuxBackend;
 use crate::engine::runtime::ProcessId;
 use crate::engine::topology::Direction;
 use crate::logging;
@@ -1025,7 +1025,7 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     use super::TerminalBackend;
-    use crate::adapters::apps::{DeepApp, MoveDecision};
+    use crate::engine::contracts::{DeepApp, MoveDecision};
     use crate::engine::topology::Direction;
 
     static NEXT_ID: AtomicU64 = AtomicU64::new(1);

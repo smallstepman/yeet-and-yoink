@@ -5,7 +5,7 @@ use std::thread::sleep;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::adapters::apps::terminal_backend::TerminalBackend;
-use crate::adapters::apps::{AdapterCapabilities, AppKind, DeepApp, MoveDecision, TearResult};
+use crate::engine::contracts::{AdapterCapabilities, AppKind, DeepApp, MoveDecision, TearResult};
 use crate::engine::runtime::{self, CommandContext};
 use crate::engine::topology::Direction;
 use crate::logging;
@@ -356,7 +356,7 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     use super::Nvim;
-    use crate::adapters::apps::{DeepApp, MoveDecision};
+    use crate::engine::contracts::{DeepApp, MoveDecision};
     use crate::engine::topology::Direction;
 
     static NEXT_ID: AtomicU64 = AtomicU64::new(1);

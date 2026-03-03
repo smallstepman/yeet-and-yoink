@@ -4,7 +4,7 @@ use serde_json::Value;
 use std::io::Write;
 use std::process::{Command, Stdio};
 
-use crate::adapters::apps::{AdapterCapabilities, AppKind, DeepApp, MoveDecision, TearResult};
+use crate::engine::contracts::{AdapterCapabilities, AppKind, DeepApp, MoveDecision, TearResult};
 use crate::engine::topology::Direction;
 use crate::logging;
 
@@ -283,7 +283,7 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     use super::{FirefoxRequest, Librefox};
-    use crate::adapters::apps::{DeepApp, MoveDecision};
+    use crate::engine::contracts::{DeepApp, MoveDecision};
     use crate::engine::topology::Direction;
 
     static NEXT_ID: AtomicU64 = AtomicU64::new(1);

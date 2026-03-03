@@ -322,9 +322,10 @@ use anyhow::{anyhow, Context, Result};
 
 use crate::adapters::apps::editor_backend::EditorBackend;
 use crate::adapters::apps::terminal_backend::TerminalBackend;
-use crate::adapters::apps::{self, AppKind, DeepApp, MergePreparation};
+use crate::adapters::apps::{self};
 use crate::adapters::window_managers::niri::NiriDomainPlugin;
 use crate::adapters::window_managers::{FocusedWindowView, WindowManagerAdapter};
+use crate::engine::contracts::{AppKind, DeepApp, MergePreparation};
 use crate::engine::runtime::ProcessId;
 
 pub const WM_DOMAIN_ID: DomainId = 1;
