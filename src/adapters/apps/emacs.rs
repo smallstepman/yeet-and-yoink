@@ -7,10 +7,14 @@ use crate::engine::contracts::{
 use crate::engine::runtime::{self, CommandContext, ProcessId};
 use crate::engine::topology::Direction;
 
-pub struct EditorBackend;
+pub struct EmacsBackend;
 pub const ADAPTER_NAME: &str = "editor";
 pub const ADAPTER_ALIASES: &[&str] = &["editor", "emacs"];
 pub const APP_IDS: &[&str] = &["emacs", "Emacs", "org.gnu.emacs"];
+
+struct EmacsMergePreparation {
+    frame_id: String,
+}
 
 /// Find the focused GUI frame's selected window, then run body in that context.
 /// Uses `with-selected-window` which RESTORES the original selection on exit.
@@ -35,7 +39,7 @@ fn in_focused_window_mut(body: &str) -> String {
     )
 }
 
-impl EditorBackend {
+impl EmacsBackend {
     fn eval(expr: &str) -> Result<String> {
         let output = runtime::run_command_output(
             "emacsclient",
@@ -124,7 +128,7 @@ impl EditorBackend {
     }
 }
 
-impl DeepApp for EditorBackend {
+impl DeepApp for EmacsBackend {
     fn adapter_name(&self) -> &'static str {
         ADAPTER_NAME
     }
@@ -358,7 +362,9 @@ impl DeepApp for EditorBackend {
         if frame_id.is_empty() || frame_id == "nil" {
             bail!("failed to capture emacs source frame id");
         }
-        Ok(MergePreparation::EditorFrameSource { frame_id })
+        Ok(MergePreparation::with_payload(EmacsMergePreparation {
+            frame_id,
+        }))
     }
 
     fn merge_into_target(
@@ -369,7 +375,8 @@ impl DeepApp for EditorBackend {
         preparation: MergePreparation,
     ) -> Result<()> {
         let frame_id = preparation
-            .editor_frame_source()
+            .into_payload::<EmacsMergePreparation>()
+            .map(|preparation| preparation.frame_id)
             .context("source emacs frame id missing")?;
         let frame_id_lit = frame_id.replace('\\', "\\\\").replace('\"', "\\\"");
         let focused_is_source = Self::eval_in_frame(&format!(
@@ -402,7 +409,7 @@ impl DeepApp for EditorBackend {
 
 #[cfg(test)]
 mod tests {
-    use super::EditorBackend;
+    use super::EmacsBackend;
     use crate::engine::contracts::DeepApp;
 
     fn env_guard() -> std::sync::MutexGuard<'static, ()> {
@@ -411,7 +418,7 @@ mod tests {
 
     #[test]
     fn declares_explicit_capability_contract() {
-        let app = EditorBackend;
+        let app = EmacsBackend;
         let caps = DeepApp::capabilities(&app);
         assert!(caps.probe);
         assert!(caps.focus);
@@ -447,7 +454,7 @@ enabled = false
         std::env::set_var("XDG_CONFIG_DIR", &base);
         crate::config::prepare().expect("config should load");
 
-        let app = EditorBackend;
+        let app = EmacsBackend;
         let caps = DeepApp::capabilities(&app);
         assert!(!caps.resize_internal);
 

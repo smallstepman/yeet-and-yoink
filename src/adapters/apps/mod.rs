@@ -1,21 +1,19 @@
-#[path = "emacs.rs"]
-pub mod editor_backend;
+pub mod emacs;
 pub mod librefox;
 pub mod nvim;
-#[path = "wezterm.rs"]
-pub mod terminal_backend;
 pub mod tmux;
 pub mod vscode;
+pub mod wezterm;
 
 use crate::engine::runtime;
 use crate::logging;
 
-use editor_backend::EditorBackend;
+use emacs::EmacsBackend;
 use librefox::Librefox;
 use nvim::Nvim;
-use terminal_backend::TerminalBackend;
 use tmux::Tmux;
 use vscode::Vscode;
+use wezterm::WeztermBackend;
 
 pub use crate::engine::contracts::{
     unsupported_operation, AdapterCapabilities, AppCapabilities, AppKind, DeepApp,
@@ -45,7 +43,7 @@ struct DirectAdapterSpec {
 }
 
 fn build_editor() -> Box<dyn DeepApp> {
-    Box::new(EditorBackend)
+    Box::new(EmacsBackend)
 }
 
 fn build_librefox() -> Box<dyn DeepApp> {
@@ -58,9 +56,9 @@ fn build_vscode() -> Box<dyn DeepApp> {
 
 const DIRECT_ADAPTERS: &[DirectAdapterSpec] = &[
     DirectAdapterSpec {
-        name: editor_backend::ADAPTER_NAME,
-        aliases: editor_backend::ADAPTER_ALIASES,
-        app_ids: editor_backend::APP_IDS,
+        name: emacs::ADAPTER_NAME,
+        aliases: emacs::ADAPTER_ALIASES,
+        app_ids: emacs::APP_IDS,
         build: build_editor,
     },
     DirectAdapterSpec {
@@ -76,6 +74,12 @@ const DIRECT_ADAPTERS: &[DirectAdapterSpec] = &[
         build: build_vscode,
     },
 ];
+
+/// Baseline adapters used to seed runtime domains even when the focused window
+/// does not currently belong to that app kind.
+pub fn default_domain_adapters() -> Vec<Box<dyn DeepApp>> {
+    vec![Box::new(WeztermBackend), Box::new(EmacsBackend)]
+}
 
 fn preferred_adapter_name() -> Option<String> {
     crate::config::app_adapter_override().and_then(|raw| {
@@ -120,7 +124,7 @@ fn resolve_direct_adapter(app_id: &str, preferred: Option<&str>) -> Option<Box<d
 ///   returns `[Nvim { .. }, Tmux { .. }]`
 ///
 /// For a non-terminal editor:
-///   returns `[EditorBackend]`
+///   returns `[EmacsBackend]`
 pub fn resolve_chain(app_id: &str, pid: u32, title: &str) -> Vec<Box<dyn DeepApp>> {
     logging::debug(format!(
         "resolve_chain: app_id={} pid={} title={}",
@@ -128,9 +132,9 @@ pub fn resolve_chain(app_id: &str, pid: u32, title: &str) -> Vec<Box<dyn DeepApp
     ));
     let preferred = preferred_adapter_name();
 
-    if terminal_backend::APP_IDS.contains(&app_id) {
+    if wezterm::APP_IDS.contains(&app_id) {
         if let Some(preferred) = preferred.as_deref() {
-            if !matches_adapter_alias(preferred, terminal_backend::ADAPTER_ALIASES) {
+            if !matches_adapter_alias(preferred, wezterm::ADAPTER_ALIASES) {
                 logging::debug(format!(
                     "resolve_chain: adapter override '{}' disables terminal chain",
                     preferred
@@ -162,7 +166,7 @@ fn resolve_terminal_chain(terminal_pid: u32) -> Vec<Box<dyn DeepApp>> {
     let mut chain: Vec<Box<dyn DeepApp>> = Vec::new();
 
     // Ask the terminal multiplexer backend for active pane foreground process name.
-    let fg_hint = TerminalBackend::active_foreground_process(terminal_pid);
+    let fg_hint = WeztermBackend::active_foreground_process(terminal_pid);
     let fg_base = fg_hint
         .as_deref()
         .map(runtime::normalize_process_name)
@@ -209,7 +213,7 @@ fn resolve_terminal_chain(terminal_pid: u32) -> Vec<Box<dyn DeepApp>> {
 
     let Some(search_pid) = search_pid else {
         logging::debug("resolve_terminal_chain: no focused shell match; using terminal layer only");
-        chain.push(Box::new(TerminalBackend));
+        chain.push(Box::new(WeztermBackend));
         return chain;
     };
     logging::debug(format!(
@@ -253,7 +257,7 @@ fn resolve_terminal_chain(terminal_pid: u32) -> Vec<Box<dyn DeepApp>> {
 
     // Always include the terminal layer as outermost fallback so that
     // terminal-native pane operations can run when inner layers passthrough.
-    chain.push(Box::new(TerminalBackend));
+    chain.push(Box::new(WeztermBackend));
     logging::debug(format!(
         "resolve_terminal_chain: final depth={}",
         chain.len()
@@ -267,7 +271,7 @@ mod resolve_chain_tests {
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};
 
-    use crate::adapters::apps::{editor_backend, terminal_backend};
+    use crate::adapters::apps::{emacs, wezterm};
 
     use super::resolve_chain;
 
@@ -311,9 +315,9 @@ mod resolve_chain_tests {
         let old_override = set_env("NIRI_DEEP_CONFIG", None);
         crate::config::prepare().expect("config should load");
 
-        let chain = resolve_chain(editor_backend::APP_IDS[0], 0, "");
+        let chain = resolve_chain(emacs::APP_IDS[0], 0, "");
         assert_eq!(chain.len(), 1);
-        assert_eq!(chain[0].adapter_name(), editor_backend::ADAPTER_NAME);
+        assert_eq!(chain[0].adapter_name(), emacs::ADAPTER_NAME);
 
         restore_env("NIRI_DEEP_CONFIG", old_override);
     }
@@ -337,7 +341,7 @@ enabled = true
         let old_override = set_env("NIRI_DEEP_CONFIG", None);
         crate::config::prepare().expect("config should load");
 
-        let chain = resolve_chain(editor_backend::APP_IDS[0], 0, "");
+        let chain = resolve_chain(emacs::APP_IDS[0], 0, "");
         assert!(chain.is_empty());
 
         restore_env("XDG_CONFIG_DIR", old_xdg);
@@ -365,7 +369,7 @@ enabled = true
         let old_override = set_env("NIRI_DEEP_CONFIG", None);
         crate::config::prepare().expect("config should load");
 
-        let chain = resolve_chain(terminal_backend::APP_IDS[0], 0, "");
+        let chain = resolve_chain(wezterm::APP_IDS[0], 0, "");
         assert!(chain.is_empty());
 
         restore_env("XDG_CONFIG_DIR", old_xdg);

@@ -1,3 +1,5 @@
+use std::any::Any;
+
 use anyhow::{anyhow, Result};
 
 use crate::engine::runtime::ProcessId;
@@ -30,29 +32,52 @@ pub enum MergeExecutionMode {
     TargetFocused,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum MergePreparation {
-    None,
-    TerminalMuxSourcePane {
-        pane_id: u64,
-        target_window_id: Option<u64>,
-    },
-    EditorFrameSource {
-        frame_id: String,
-    },
+pub struct MergePreparation {
+    payload: Option<Box<dyn Any + Send>>,
 }
 
 impl MergePreparation {
-    pub fn terminal_mux_source(self) -> Option<(u64, Option<u64>)> {
-        super::apps::terminal::terminal_mux_source(self)
+    pub fn none() -> Self {
+        Self { payload: None }
     }
 
-    pub fn editor_frame_source(self) -> Option<String> {
-        super::apps::editor::editor_frame_source(self)
+    pub fn with_payload<T>(payload: T) -> Self
+    where
+        T: Send + 'static,
+    {
+        Self {
+            payload: Some(Box::new(payload)),
+        }
     }
 
-    pub fn with_target_window_hint(self, target_window_id: Option<u64>) -> Self {
-        super::apps::terminal::with_target_window_hint(self, target_window_id)
+    pub fn into_payload<T>(self) -> Option<T>
+    where
+        T: Send + 'static,
+    {
+        self.payload
+            .and_then(|payload| payload.downcast::<T>().ok())
+            .map(|typed| *typed)
+    }
+
+    pub fn map_payload<T>(self, update: impl FnOnce(T) -> T) -> Self
+    where
+        T: Send + 'static,
+    {
+        let Some(payload) = self.payload else {
+            return self;
+        };
+        match payload.downcast::<T>() {
+            Ok(typed) => Self::with_payload(update(*typed)),
+            Err(payload) => Self {
+                payload: Some(payload),
+            },
+        }
+    }
+}
+
+impl Default for MergePreparation {
+    fn default() -> Self {
+        Self::none()
     }
 }
 
@@ -149,7 +174,16 @@ pub trait DeepApp: Send {
 
     /// Capture source-side merge state before focus moves to target window.
     fn prepare_merge(&self, _source_pid: Option<ProcessId>) -> Result<MergePreparation> {
-        Ok(MergePreparation::None)
+        Ok(MergePreparation::none())
+    }
+
+    /// Allow adapters to enrich source merge preparation once a concrete target is known.
+    fn augment_merge_preparation_for_target(
+        &self,
+        preparation: MergePreparation,
+        _target_window_id: Option<u64>,
+    ) -> MergePreparation {
+        preparation
     }
 
     /// Merge source content into target window context.

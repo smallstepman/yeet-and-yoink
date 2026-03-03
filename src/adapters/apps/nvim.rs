@@ -4,7 +4,7 @@ use std::path::Path;
 use std::thread::sleep;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use crate::adapters::apps::terminal_backend::TerminalBackend;
+use crate::adapters::apps::wezterm::WeztermBackend;
 use crate::engine::contracts::{AdapterCapabilities, AppKind, DeepApp, MoveDecision, TearResult};
 use crate::engine::runtime::{self, CommandContext};
 use crate::engine::topology::Direction;
@@ -263,7 +263,7 @@ impl Nvim {
             bail!("smart-splits mux split_pane failed; ensure smart-splits.nvim is configured");
         }
         let target_pane_id =
-            TerminalBackend::pane_neighbor_for_pid(terminal_pid, source_pane_id, dir)?;
+            WeztermBackend::pane_neighbor_for_pid(terminal_pid, source_pane_id, dir)?;
         let target_socket = Self::target_socket_path()?;
         let target_socket = target_socket.to_string_lossy().to_string();
         let launch_command = Self::launch_target_nvim_command(&target_socket, &snapshot);
@@ -279,7 +279,7 @@ impl Nvim {
             snapshot.col
         ));
 
-        TerminalBackend::send_text_to_pane(terminal_pid, target_pane_id, &launch_command)?;
+        WeztermBackend::send_text_to_pane(terminal_pid, target_pane_id, &launch_command)?;
         Self::wait_for_target_nvim(&target_socket)?;
 
         if snapshot.col > 1 {

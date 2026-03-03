@@ -195,10 +195,15 @@ impl ClientFocusSelection {
     }
 }
 
-pub struct TerminalBackend;
+pub struct WeztermBackend;
 pub const ADAPTER_NAME: &str = "terminal";
 pub const ADAPTER_ALIASES: &[&str] = &["terminal", "wezterm"];
 pub const APP_IDS: &[&str] = &["org.wezfurlong.wezterm"];
+
+struct WeztermMergePreparation {
+    pane_id: u64,
+    target_window_id: Option<u64>,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum MuxBridgeMode {
@@ -207,7 +212,7 @@ enum MuxBridgeMode {
     Auto,
 }
 
-impl TerminalBackend {
+impl WeztermBackend {
     const NON_SOURCE_PANE_POLL_ATTEMPTS: usize = 3;
     const NON_SOURCE_PANE_POLL_DELAY: Duration = Duration::from_millis(10);
     const MUX_BRIDGE_READY_MAX_AGE: Duration = Duration::from_secs(2);
@@ -776,7 +781,7 @@ impl TerminalBackend {
     }
 }
 
-impl DeepApp for TerminalBackend {
+impl DeepApp for WeztermBackend {
     fn adapter_name(&self) -> &'static str {
         ADAPTER_NAME
     }
@@ -987,9 +992,20 @@ impl DeepApp for TerminalBackend {
     fn prepare_merge(&self, source_pid: Option<ProcessId>) -> Result<MergePreparation> {
         let source_pid = source_pid.context("source wezterm merge missing pid")?;
         let source_pane_id = Self::focused_pane_for_pid(source_pid.get())?;
-        Ok(MergePreparation::TerminalMuxSourcePane {
+        Ok(MergePreparation::with_payload(WeztermMergePreparation {
             pane_id: source_pane_id,
             target_window_id: None,
+        }))
+    }
+
+    fn augment_merge_preparation_for_target(
+        &self,
+        preparation: MergePreparation,
+        target_window_id: Option<u64>,
+    ) -> MergePreparation {
+        preparation.map_payload::<WeztermMergePreparation>(|mut preparation| {
+            preparation.target_window_id = target_window_id;
+            preparation
         })
     }
 
@@ -1001,15 +1017,15 @@ impl DeepApp for TerminalBackend {
         preparation: MergePreparation,
     ) -> Result<()> {
         let source_pid = source_pid.context("source wezterm merge missing pid")?;
-        let (source_pane_id, target_window_id) = preparation
-            .terminal_mux_source()
+        let preparation = preparation
+            .into_payload::<WeztermMergePreparation>()
             .context("source wezterm merge missing pane id")?;
         let target_pid = target_pid.context("target wezterm merge missing pid")?;
         Self::merge_source_pane_into_focused_target(
             source_pid.get(),
-            source_pane_id,
+            preparation.pane_id,
             target_pid.get(),
-            target_window_id,
+            preparation.target_window_id,
             dir,
         )
         .context("wezterm merge failed")
@@ -1024,7 +1040,7 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};
 
-    use super::TerminalBackend;
+    use super::WeztermBackend;
     use crate::engine::contracts::{DeepApp, MoveDecision};
     use crate::engine::topology::Direction;
 
@@ -1036,7 +1052,7 @@ mod tests {
 
     #[test]
     fn declares_explicit_capability_contract() {
-        let app = TerminalBackend;
+        let app = WeztermBackend;
         let caps = DeepApp::capabilities(&app);
         assert!(caps.probe);
         assert!(caps.focus);
@@ -1070,7 +1086,7 @@ enabled = false
         std::env::set_var("XDG_CONFIG_DIR", &config_root);
         crate::config::prepare().expect("config should load");
 
-        let app = TerminalBackend;
+        let app = WeztermBackend;
         let caps = DeepApp::capabilities(&app);
         assert!(!caps.focus);
 
@@ -1105,7 +1121,7 @@ enabled = false
         std::env::set_var("XDG_CONFIG_DIR", &config_root);
         crate::config::prepare().expect("config should load");
 
-        let app = TerminalBackend;
+        let app = WeztermBackend;
         let caps = DeepApp::capabilities(&app);
         assert!(!caps.resize_internal);
 
@@ -1319,7 +1335,7 @@ exit "$status"
             "",
         );
 
-        let fg = TerminalBackend::active_foreground_process(pid);
+        let fg = WeztermBackend::active_foreground_process(pid);
         assert_eq!(fg.as_deref(), Some("tmux"));
     }
 
@@ -1343,7 +1359,7 @@ exit "$status"
         );
         harness.set_response("get-pane-direction Left --pane-id 7", 1, "", "no pane");
 
-        let app = TerminalBackend;
+        let app = WeztermBackend;
         let can_focus = app
             .can_focus(Direction::West, pid)
             .expect("can_focus should gracefully fall back");
@@ -1377,7 +1393,7 @@ exit "$status"
         harness.set_response("get-pane-direction Up --pane-id 2", 1, "", "no pane");
         harness.set_response("get-pane-direction Down --pane-id 2", 1, "", "no pane");
 
-        let app = TerminalBackend;
+        let app = WeztermBackend;
         let decision = app
             .move_decision(Direction::East, pid)
             .expect("move_decision should succeed");
@@ -1410,7 +1426,7 @@ exit "$status"
         harness.set_response("get-pane-direction Up --pane-id 2", 1, "", "no pane");
         harness.set_response("get-pane-direction Left --pane-id 2", 0, "1\n", "");
 
-        let app = TerminalBackend;
+        let app = WeztermBackend;
         let decision = app
             .move_decision(Direction::North, pid)
             .expect("move_decision should succeed");
@@ -1438,7 +1454,7 @@ exit "$status"
         harness.set_response("get-pane-direction Left --pane-id 10", 0, "9\n", "");
         harness.set_response("split-pane --pane-id 9 --left --move-pane-id 10", 0, "", "");
 
-        let app = TerminalBackend;
+        let app = WeztermBackend;
         app.move_internal(Direction::West, pid)
             .expect("move_internal should succeed");
 
@@ -1471,7 +1487,7 @@ exit "$status"
         );
         harness.set_response("split-pane --pane-id 68 --top --move-pane-id 70", 0, "", "");
 
-        let app = TerminalBackend;
+        let app = WeztermBackend;
         app.rearrange(Direction::North, pid)
             .expect("rearrange should fallback to tab peer");
 
@@ -1499,7 +1515,7 @@ exit "$status"
         );
         harness.set_response("move-pane-to-new-tab --new-window --pane-id 77", 0, "", "");
 
-        let app = TerminalBackend;
+        let app = WeztermBackend;
         let tear = app
             .move_out(Direction::East, pid)
             .expect("move_out should succeed");
@@ -1526,7 +1542,7 @@ exit "$status"
         );
         harness.set_response("adjust-pane-size --pane-id 10 --amount 40 Right", 0, "", "");
 
-        let app = TerminalBackend;
+        let app = WeztermBackend;
         app.resize_internal(Direction::East, true, 40, pid)
             .expect("resize_internal should succeed");
 
@@ -1561,7 +1577,7 @@ exit "$status"
             "",
         );
 
-        TerminalBackend::merge_source_pane_into_focused_target(pid, 10, pid, None, Direction::West)
+        WeztermBackend::merge_source_pane_into_focused_target(pid, 10, pid, None, Direction::West)
             .expect("merge should succeed");
         let log = harness.command_log();
         assert!(log.contains("split-pane --pane-id 9 --right --move-pane-id 10"));
@@ -1595,7 +1611,7 @@ exit "$status"
             "",
         );
 
-        TerminalBackend::merge_source_pane_into_focused_target(pid, 10, pid, None, Direction::West)
+        WeztermBackend::merge_source_pane_into_focused_target(pid, 10, pid, None, Direction::West)
             .expect("merge enqueue should succeed");
 
         let bridge_cmd = harness
@@ -1621,7 +1637,7 @@ exit "$status"
         fs::create_dir_all(&bridge_dir).expect("bridge dir should be creatable");
         fs::write(bridge_dir.join("ready"), "ready\n").expect("ready marker should be writable");
 
-        TerminalBackend::merge_source_pane_into_focused_target(pid, 10, pid, None, Direction::West)
+        WeztermBackend::merge_source_pane_into_focused_target(pid, 10, pid, None, Direction::West)
             .expect("auto bridge enqueue should succeed");
 
         let bridge_cmd = bridge_dir.join("merge.cmd");
@@ -1666,7 +1682,7 @@ exit "$status"
             "",
         );
 
-        TerminalBackend::merge_source_pane_into_focused_target(
+        WeztermBackend::merge_source_pane_into_focused_target(
             pid,
             10,
             pid,
@@ -1711,7 +1727,7 @@ exit "$status"
             "",
         );
 
-        TerminalBackend::merge_source_pane_into_focused_target(pid, 10, pid, None, Direction::West)
+        WeztermBackend::merge_source_pane_into_focused_target(pid, 10, pid, None, Direction::West)
             .expect("default direct merge should succeed");
 
         let bridge_cmd = harness
@@ -1749,7 +1765,7 @@ exit "$status"
         );
         harness.set_response("split-pane --pane-id 0 --right --move-pane-id 1", 0, "", "");
 
-        TerminalBackend::merge_source_pane_into_focused_target(pid, 1, pid, None, Direction::West)
+        WeztermBackend::merge_source_pane_into_focused_target(pid, 1, pid, None, Direction::West)
             .expect("merge should resolve target pane from other window");
 
         let log = harness.command_log();
@@ -1788,7 +1804,7 @@ exit "$status"
         );
         harness.set_response("split-pane --pane-id 2 --right --move-pane-id 1", 0, "", "");
 
-        TerminalBackend::merge_source_pane_into_focused_target(
+        WeztermBackend::merge_source_pane_into_focused_target(
             pid,
             1,
             pid,
@@ -1853,7 +1869,7 @@ enable = false
             "",
         );
 
-        TerminalBackend::merge_source_pane_into_focused_target(pid, 10, pid, None, Direction::West)
+        WeztermBackend::merge_source_pane_into_focused_target(pid, 10, pid, None, Direction::West)
             .expect("merge should use direct cli when config disables mux bridge");
 
         let log = harness.command_log();

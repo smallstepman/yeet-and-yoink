@@ -1,6 +1,6 @@
 use anyhow::{bail, Context, Result};
 
-use crate::adapters::apps::terminal_backend::TerminalBackend;
+use crate::adapters::apps::wezterm::WeztermBackend;
 use crate::engine::contracts::{AdapterCapabilities, AppKind, DeepApp, MoveDecision, TearResult};
 use crate::engine::runtime::{self, CommandContext};
 use crate::engine::topology::Direction;
@@ -196,7 +196,7 @@ impl DeepApp for Tmux {
         let target = String::from_utf8_lossy(&output.stdout).trim().to_string();
 
         Ok(TearResult {
-            spawn_command: Some(TerminalBackend::spawn_attach_command(target)),
+            spawn_command: Some(WeztermBackend::spawn_attach_command(target)),
         })
     }
 }

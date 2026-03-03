@@ -320,8 +320,6 @@ use std::sync::OnceLock;
 
 use anyhow::{anyhow, Context, Result};
 
-use crate::adapters::apps::editor_backend::EditorBackend;
-use crate::adapters::apps::terminal_backend::TerminalBackend;
 use crate::adapters::apps::{self};
 use crate::adapters::window_managers::niri::NiriDomainPlugin;
 use crate::adapters::window_managers::{FocusedWindowView, WindowManagerAdapter};
@@ -331,6 +329,14 @@ use crate::engine::runtime::ProcessId;
 pub const WM_DOMAIN_ID: DomainId = 1;
 pub const TERMINAL_DOMAIN_ID: DomainId = 2;
 pub const EDITOR_DOMAIN_ID: DomainId = 3;
+
+fn domain_id_for_app_kind(kind: AppKind) -> DomainId {
+    match kind {
+        AppKind::Terminal => TERMINAL_DOMAIN_ID,
+        AppKind::Editor => EDITOR_DOMAIN_ID,
+        AppKind::Browser => WM_DOMAIN_ID,
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NativeWindowRef {
@@ -359,7 +365,6 @@ pub fn decode_native_window_ref(bytes: &[u8]) -> Option<NativeWindowRef> {
     })
 }
 
-#[derive(Debug)]
 struct AppMergePayload {
     source_pid: Option<ProcessId>,
     preparation: MergePreparation,
@@ -533,9 +538,9 @@ impl TopologyModifierImpl for AppDomainPlugin {
         let merge_payload = payload_any
             .downcast::<AppMergePayload>()
             .map_err(|_| anyhow!("unsupported payload for '{}'", self.adapter.adapter_name()))?;
-        let preparation = merge_payload
-            .preparation
-            .with_target_window_hint(target_window_id);
+        let preparation = self
+            .adapter
+            .augment_merge_preparation_for_target(merge_payload.preparation, target_window_id);
         self.adapter
             .merge_into_target(dir, merge_payload.source_pid, target_pid, preparation)
             .with_context(|| format!("{} merge_into_target failed", self.adapter.adapter_name()))?;
@@ -605,11 +610,7 @@ pub fn domain_id_for_window(
         .map(|adapter| adapter.kind())
         .next()
     {
-        return match kind {
-            AppKind::Terminal => TERMINAL_DOMAIN_ID,
-            AppKind::Editor => EDITOR_DOMAIN_ID,
-            AppKind::Browser => WM_DOMAIN_ID,
-        };
+        return domain_id_for_app_kind(kind);
     }
     WM_DOMAIN_ID
 }
@@ -630,14 +631,10 @@ where
         other => domains.push(Box::new(UnsupportedDomainPlugin::new(WM_DOMAIN_ID, other))),
     }
 
-    domains.push(Box::new(AppDomainPlugin::new(
-        TERMINAL_DOMAIN_ID,
-        Box::new(TerminalBackend),
-    )));
-    domains.push(Box::new(AppDomainPlugin::new(
-        EDITOR_DOMAIN_ID,
-        Box::new(EditorBackend),
-    )));
+    for adapter in apps::default_domain_adapters() {
+        let domain_id = domain_id_for_app_kind(adapter.kind());
+        domains.push(Box::new(AppDomainPlugin::new(domain_id, adapter)));
+    }
 
     let (app_id, title, pid) = wm.with_focused_window(|window| {
         Ok((
@@ -649,11 +646,7 @@ where
     let owner_pid = pid.map(ProcessId::get).unwrap_or(0);
     let mut overridden = HashSet::new();
     for adapter in apps::resolve_chain(&app_id, owner_pid, &title) {
-        let domain_id = match adapter.kind() {
-            AppKind::Terminal => TERMINAL_DOMAIN_ID,
-            AppKind::Editor => EDITOR_DOMAIN_ID,
-            AppKind::Browser => WM_DOMAIN_ID,
-        };
+        let domain_id = domain_id_for_app_kind(adapter.kind());
         if overridden.insert(domain_id) {
             domains.push(Box::new(AppDomainPlugin::new(domain_id, adapter)));
         }
@@ -665,6 +658,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::{decode_native_window_ref, domain_id_for_window, encode_native_window_ref};
+    use crate::adapters::apps::wezterm;
     use crate::engine::runtime::ProcessId;
 
     #[test]
@@ -678,7 +672,7 @@ mod tests {
 
     #[test]
     fn terminal_app_ids_classify_to_terminal_domain() {
-        let domain = domain_id_for_window(Some("org.wezfurlong.wezterm"), None, Some("term"));
+        let domain = domain_id_for_window(Some(wezterm::APP_IDS[0]), None, Some("term"));
         assert_eq!(domain, super::TERMINAL_DOMAIN_ID);
     }
 }
