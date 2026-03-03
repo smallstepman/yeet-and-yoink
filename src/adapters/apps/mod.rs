@@ -350,14 +350,15 @@ enabled = true
         )
         .expect("config file should be writable");
 
-        let old_xdg = set_env("XDG_CONFIG_DIR", Some(root.to_str().expect("utf-8 path")));
-        let old_override = set_env("NIRI_DEEP_CONFIG", None);
+        let old_override = set_env(
+            "NIRI_DEEP_CONFIG",
+            Some(config_dir.join("config.toml").to_str().expect("utf-8 path")),
+        );
         crate::config::prepare().expect("config should load");
 
         let chain = resolve_chain(emacs::APP_IDS[0], 0, "");
         assert!(chain.is_empty());
 
-        restore_env("XDG_CONFIG_DIR", old_xdg);
         restore_env("NIRI_DEEP_CONFIG", old_override);
         crate::config::prepare().expect("config should reload");
         let _ = std::fs::remove_dir_all(root);
@@ -378,14 +379,15 @@ enabled = true
         )
         .expect("config file should be writable");
 
-        let old_xdg = set_env("XDG_CONFIG_DIR", Some(root.to_str().expect("utf-8 path")));
-        let old_override = set_env("NIRI_DEEP_CONFIG", None);
+        let old_override = set_env(
+            "NIRI_DEEP_CONFIG",
+            Some(config_dir.join("config.toml").to_str().expect("utf-8 path")),
+        );
         crate::config::prepare().expect("config should load");
 
         let chain = resolve_chain(wezterm::APP_IDS[0], 0, "");
         assert!(chain.is_empty());
 
-        restore_env("XDG_CONFIG_DIR", old_xdg);
         restore_env("NIRI_DEEP_CONFIG", old_override);
         crate::config::prepare().expect("config should reload");
         let _ = std::fs::remove_dir_all(root);

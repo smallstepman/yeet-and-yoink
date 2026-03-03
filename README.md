@@ -8,9 +8,7 @@ domain plugins (WM / terminal / editor), plus a transfer pipeline for cross-doma
 `config.toml` is loaded in this order:
 
 1. `NIRI_DEEP_CONFIG` (explicit file path)
-2. `$XDG_CONFIG_DIR/niri-deep/config.toml`
-3. `$XDG_CONFIG_HOME/niri-deep/config.toml`
-4. `~/.config/niri-deep/config.toml`
+2. Platform config dir from `etcetera` (typically `$XDG_CONFIG_HOME/niri-deep/config.toml` on Linux)
 
 If no file is present, defaults from `src/config.rs` are used.
 

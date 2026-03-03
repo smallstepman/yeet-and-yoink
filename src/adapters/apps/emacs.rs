@@ -457,18 +457,18 @@ enabled = false
         )
         .expect("config file should be writable");
 
-        let old_config_dir = std::env::var_os("XDG_CONFIG_DIR");
-        std::env::set_var("XDG_CONFIG_DIR", &base);
+        let old_config_override = std::env::var_os("NIRI_DEEP_CONFIG");
+        std::env::set_var("NIRI_DEEP_CONFIG", config_dir.join("config.toml"));
         crate::config::prepare().expect("config should load");
 
         let app = EmacsBackend;
         let caps = DeepApp::capabilities(&app);
         assert!(!caps.resize_internal);
 
-        if let Some(value) = old_config_dir {
-            std::env::set_var("XDG_CONFIG_DIR", value);
+        if let Some(value) = old_config_override {
+            std::env::set_var("NIRI_DEEP_CONFIG", value);
         } else {
-            std::env::remove_var("XDG_CONFIG_DIR");
+            std::env::remove_var("NIRI_DEEP_CONFIG");
         }
         crate::config::prepare().expect("config should reload");
         let _ = std::fs::remove_dir_all(base);

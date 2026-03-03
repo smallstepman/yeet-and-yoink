@@ -1078,7 +1078,7 @@ mod tests {
         let _env_guard = env_guard();
         let pid = 7070;
         let harness = WeztermHarness::new(pid);
-        let old_config_dir = std::env::var_os("XDG_CONFIG_DIR");
+        let old_config_override = std::env::var_os("NIRI_DEEP_CONFIG");
         let config_root = harness.base.join("config-root");
         let config_dir = config_root.join("niri-deep");
         fs::create_dir_all(&config_dir).expect("config dir should be creatable");
@@ -1093,17 +1093,17 @@ enabled = false
 "#,
         )
         .expect("config file should be writable");
-        std::env::set_var("XDG_CONFIG_DIR", &config_root);
+        std::env::set_var("NIRI_DEEP_CONFIG", config_dir.join("config.toml"));
         crate::config::prepare().expect("config should load");
 
         let app = WeztermBackend;
         let caps = DeepApp::capabilities(&app);
         assert!(!caps.focus);
 
-        if let Some(value) = old_config_dir {
-            std::env::set_var("XDG_CONFIG_DIR", value);
+        if let Some(value) = old_config_override {
+            std::env::set_var("NIRI_DEEP_CONFIG", value);
         } else {
-            std::env::remove_var("XDG_CONFIG_DIR");
+            std::env::remove_var("NIRI_DEEP_CONFIG");
         }
         crate::config::prepare().expect("config should reload");
     }
@@ -1113,7 +1113,7 @@ enabled = false
         let _env_guard = env_guard();
         let pid = 7171;
         let harness = WeztermHarness::new(pid);
-        let old_config_dir = std::env::var_os("XDG_CONFIG_DIR");
+        let old_config_override = std::env::var_os("NIRI_DEEP_CONFIG");
         let config_root = harness.base.join("config-root");
         let config_dir = config_root.join("niri-deep");
         fs::create_dir_all(&config_dir).expect("config dir should be creatable");
@@ -1128,17 +1128,17 @@ enabled = false
 "#,
         )
         .expect("config file should be writable");
-        std::env::set_var("XDG_CONFIG_DIR", &config_root);
+        std::env::set_var("NIRI_DEEP_CONFIG", config_dir.join("config.toml"));
         crate::config::prepare().expect("config should load");
 
         let app = WeztermBackend;
         let caps = DeepApp::capabilities(&app);
         assert!(!caps.resize_internal);
 
-        if let Some(value) = old_config_dir {
-            std::env::set_var("XDG_CONFIG_DIR", value);
+        if let Some(value) = old_config_override {
+            std::env::set_var("NIRI_DEEP_CONFIG", value);
         } else {
-            std::env::remove_var("XDG_CONFIG_DIR");
+            std::env::remove_var("NIRI_DEEP_CONFIG");
         }
         crate::config::prepare().expect("config should reload");
     }
@@ -1839,7 +1839,7 @@ exit "$status"
         let pid = 9898;
         let harness = WeztermHarness::new(pid);
         let old_bridge = std::env::var_os("NIRI_DEEP_WEZTERM_MUX_BRIDGE");
-        let old_config_dir = std::env::var_os("XDG_CONFIG_DIR");
+        let old_config_override = std::env::var_os("NIRI_DEEP_CONFIG");
         std::env::set_var("NIRI_DEEP_WEZTERM_MUX_BRIDGE", "1");
 
         let config_root = harness.base.join("config-root");
@@ -1857,7 +1857,7 @@ enable = false
 "#,
         )
         .expect("config file should be writable");
-        std::env::set_var("XDG_CONFIG_DIR", &config_root);
+        std::env::set_var("NIRI_DEEP_CONFIG", config_dir.join("config.toml"));
         crate::config::prepare().expect("config should load");
 
         harness.set_response(
@@ -1895,10 +1895,10 @@ enable = false
         } else {
             std::env::remove_var("NIRI_DEEP_WEZTERM_MUX_BRIDGE");
         }
-        if let Some(value) = old_config_dir {
-            std::env::set_var("XDG_CONFIG_DIR", value);
+        if let Some(value) = old_config_override {
+            std::env::set_var("NIRI_DEEP_CONFIG", value);
         } else {
-            std::env::remove_var("XDG_CONFIG_DIR");
+            std::env::remove_var("NIRI_DEEP_CONFIG");
         }
         crate::config::prepare().expect("config should reload");
     }

@@ -1,4 +1,5 @@
 use anyhow::{anyhow, Context, Result};
+use etcetera::base_strategy::{choose_base_strategy, BaseStrategy};
 /// Config types for WM app-integration configuration.
 ///
 /// Deserializes TOML like:
@@ -24,7 +25,7 @@ use anyhow::{anyhow, Context, Result};
 /// ```
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{OnceLock, RwLock};
 
 use crate::engine::topology::Direction;
@@ -469,53 +470,29 @@ fn write_config(next: Config) {
     }
 }
 
-fn config_paths() -> Vec<PathBuf> {
+fn resolve_config_path() -> Result<(PathBuf, bool)> {
     if let Some(explicit) = std::env::var_os("NIRI_DEEP_CONFIG").map(PathBuf::from) {
-        return vec![explicit];
+        return Ok((explicit, true));
     }
 
-    let mut paths = Vec::new();
-    // Legacy compatibility for existing test harnesses and old setups.
-    if let Some(legacy_xdg_dir) = std::env::var_os("XDG_CONFIG_DIR").map(PathBuf::from) {
-        let legacy_path = legacy_xdg_dir.join("niri-deep").join("config.toml");
-        if !paths.contains(&legacy_path) {
-            paths.push(legacy_path);
-        }
-    }
-    if let Some(xdg_home) = std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from) {
-        let xdg_path = xdg_home.join("niri-deep").join("config.toml");
-        if !paths.contains(&xdg_path) {
-            paths.push(xdg_path);
-        }
-    }
-    if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
-        paths.push(home.join(".config").join("niri-deep").join("config.toml"));
-    }
-    paths
+    let strategy = choose_base_strategy().context("failed to resolve config directory")?;
+    Ok((strategy.config_dir().join("niri-deep").join("config.toml"), false))
 }
 
-fn load_config_from(path: &PathBuf) -> Result<Config> {
+fn load_config_from(path: &Path) -> Result<Config> {
     let raw = std::fs::read_to_string(path)
         .with_context(|| format!("failed to read config file {}", path.display()))?;
     toml::from_str(&raw).with_context(|| format!("failed to parse config file {}", path.display()))
 }
 
 pub fn prepare() -> Result<()> {
-    let explicit = std::env::var_os("NIRI_DEEP_CONFIG").is_some();
-    let paths = config_paths();
-
-    for path in &paths {
-        if path.exists() {
-            write_config(load_config_from(path)?);
-            return Ok(());
-        }
+    let (path, explicit) = resolve_config_path()?;
+    if path.exists() {
+        write_config(load_config_from(&path)?);
+        return Ok(());
     }
 
     if explicit {
-        let path = paths
-            .first()
-            .cloned()
-            .ok_or_else(|| anyhow!("NIRI_DEEP_CONFIG is set but no file path was resolved"))?;
         return Err(anyhow!(
             "config override path does not exist: {}",
             path.display()
