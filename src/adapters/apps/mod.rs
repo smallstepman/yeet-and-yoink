@@ -1,9 +1,12 @@
 pub mod emacs;
+pub mod kitty;
 pub mod librefox;
 pub mod nvim;
+pub mod terminal_mux;
 pub mod tmux;
 pub mod vscode;
 pub mod wezterm;
+pub mod zellij;
 
 use crate::config::AppSection;
 use crate::engine::runtime;
@@ -410,7 +413,7 @@ fn resolve_terminal_chain(terminal_pid: u32) -> Vec<Box<dyn AppAdapter>> {
     let mut chain: Vec<Box<dyn AppAdapter>> = Vec::new();
 
     // Ask the terminal multiplexer backend for active pane foreground process name.
-    let fg_hint = WeztermBackend::active_foreground_process(terminal_pid);
+    let fg_hint = wezterm::WeztermBackend::active_foreground_process(terminal_pid);
     let fg_base = fg_hint
         .as_deref()
         .map(runtime::normalize_process_name)

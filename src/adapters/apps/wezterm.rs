@@ -154,6 +154,10 @@ use std::time::Duration;
 use anyhow::{bail, Context, Result};
 use serde::Deserialize;
 
+use crate::adapters::apps::terminal_mux::TerminalMuxProvider;
+use crate::adapters::apps::kitty::KITTY_MUX_PROVIDER;
+use crate::adapters::apps::tmux::TMUX_MUX_PROVIDER;
+use crate::adapters::apps::zellij::ZELLIJ_MUX_PROVIDER;
 use crate::adapters::apps::AppAdapter;
 use crate::config::TerminalMuxBackend;
 use crate::engine::contract::{
@@ -163,6 +167,8 @@ use crate::engine::contract::{
 use crate::engine::runtime::ProcessId;
 use crate::engine::topology::Direction;
 use crate::logging;
+mod providers;
+use providers::WEZTERM_MUX_PROVIDER;
 
 #[derive(Debug, Deserialize)]
 struct WeztermMuxPane {
@@ -332,17 +338,6 @@ impl WeztermMux {
             );
         }
         Ok(())
-    }
-
-    pub fn spawn_attach_command(target: String) -> Vec<String> {
-        vec![
-            "wezterm".into(),
-            "-e".into(),
-            "tmux".into(),
-            "attach-session".into(),
-            "-t".into(),
-            target,
-        ]
     }
 
     pub fn merge_source_pane_into_focused_target(
@@ -796,24 +791,40 @@ impl WeztermMux {
 }
 
 impl WeztermBackend {
-    fn mux() -> WeztermMux {
-        WeztermMux
+    fn mux_backend() -> TerminalMuxBackend {
+        crate::config::mux_policy_for(ADAPTER_ALIASES).backend
+    }
+
+    fn mux_provider() -> &'static dyn TerminalMuxProvider {
+        match Self::mux_backend() {
+            TerminalMuxBackend::Wezterm => &WEZTERM_MUX_PROVIDER,
+            TerminalMuxBackend::Tmux => &TMUX_MUX_PROVIDER,
+            TerminalMuxBackend::Zellij => &ZELLIJ_MUX_PROVIDER,
+            TerminalMuxBackend::Kitty => &KITTY_MUX_PROVIDER,
+        }
     }
 
     pub fn focused_pane_for_pid(pid: u32) -> Result<u64> {
-        WeztermMux::focused_pane_for_pid(pid)
+        Self::mux_provider().focused_pane_for_pid(pid)
     }
 
     pub fn pane_neighbor_for_pid(pid: u32, pane_id: u64, dir: Direction) -> Result<u64> {
-        WeztermMux::pane_neighbor_for_pid(pid, pane_id, dir)
+        Self::mux_provider().pane_neighbor_for_pid(pid, pane_id, dir)
     }
 
     pub fn send_text_to_pane(pid: u32, pane_id: u64, text: &str) -> Result<()> {
-        WeztermMux::send_text_to_pane(pid, pane_id, text)
+        Self::mux_provider().send_text_to_pane(pid, pane_id, text)
     }
 
     pub fn spawn_attach_command(target: String) -> Vec<String> {
-        WeztermMux::spawn_attach_command(target)
+        match Self::mux_provider().mux_attach_args(target) {
+            Some(mux_args) => {
+                let mut cmd = vec!["wezterm".into(), "-e".into()];
+                cmd.extend(mux_args);
+                cmd
+            }
+            None => vec![],
+        }
     }
 
     pub fn merge_source_pane_into_focused_target(
@@ -823,7 +834,7 @@ impl WeztermBackend {
         target_window_id: Option<u64>,
         dir: Direction,
     ) -> Result<()> {
-        WeztermMux::merge_source_pane_into_focused_target(
+        Self::mux_provider().merge_source_pane_into_focused_target(
             source_pid,
             source_pane_id,
             target_pid,
@@ -835,7 +846,7 @@ impl WeztermBackend {
     /// Returns the foreground process name of the active pane for the WezTerm
     /// instance identified by `pid`, using `wezterm cli list --format json`.
     pub fn active_foreground_process(pid: u32) -> Option<String> {
-        WeztermMux::active_foreground_process(pid)
+        Self::mux_provider().active_foreground_process(pid)
     }
 }
 
@@ -853,15 +864,7 @@ impl AppAdapter for WeztermBackend {
     }
 
     fn capabilities(&self) -> AdapterCapabilities {
-        AdapterCapabilities {
-            probe: true,
-            focus: true,
-            move_internal: true,
-            resize_internal: true,
-            rearrange: true,
-            tear_out: true,
-            merge: true,
-        }
+        Self::mux_provider().capabilities()
     }
 }
 
@@ -1062,43 +1065,43 @@ impl TopologyHandler for WeztermMux {
 
 impl TopologyHandler for WeztermBackend {
     fn can_focus(&self, dir: Direction, pid: u32) -> Result<bool> {
-        Self::mux().can_focus(dir, pid)
+        Self::mux_provider().can_focus(dir, pid)
     }
 
     fn move_decision(&self, dir: Direction, pid: u32) -> Result<MoveDecision> {
-        Self::mux().move_decision(dir, pid)
+        Self::mux_provider().move_decision(dir, pid)
     }
 
     fn can_resize(&self, dir: Direction, grow: bool, pid: u32) -> Result<bool> {
-        Self::mux().can_resize(dir, grow, pid)
+        Self::mux_provider().can_resize(dir, grow, pid)
     }
 
     fn focus(&self, dir: Direction, pid: u32) -> Result<()> {
-        Self::mux().focus(dir, pid)
+        Self::mux_provider().focus(dir, pid)
     }
 
     fn move_internal(&self, dir: Direction, pid: u32) -> Result<()> {
-        Self::mux().move_internal(dir, pid)
+        Self::mux_provider().move_internal(dir, pid)
     }
 
     fn resize_internal(&self, dir: Direction, grow: bool, step: i32, pid: u32) -> Result<()> {
-        Self::mux().resize_internal(dir, grow, step, pid)
+        Self::mux_provider().resize_internal(dir, grow, step, pid)
     }
 
     fn rearrange(&self, dir: Direction, pid: u32) -> Result<()> {
-        Self::mux().rearrange(dir, pid)
+        Self::mux_provider().rearrange(dir, pid)
     }
 
     fn move_out(&self, dir: Direction, pid: u32) -> Result<TearResult> {
-        Self::mux().move_out(dir, pid)
+        Self::mux_provider().move_out(dir, pid)
     }
 
     fn merge_execution_mode(&self) -> MergeExecutionMode {
-        Self::mux().merge_execution_mode()
+        Self::mux_provider().merge_execution_mode()
     }
 
     fn prepare_merge(&self, source_pid: Option<ProcessId>) -> Result<MergePreparation> {
-        Self::mux().prepare_merge(source_pid)
+        Self::mux_provider().prepare_merge(source_pid)
     }
 
     fn augment_merge_preparation_for_target(
@@ -1106,7 +1109,7 @@ impl TopologyHandler for WeztermBackend {
         preparation: MergePreparation,
         target_window_id: Option<u64>,
     ) -> MergePreparation {
-        Self::mux().augment_merge_preparation_for_target(preparation, target_window_id)
+        Self::mux_provider().augment_merge_preparation_for_target(preparation, target_window_id)
     }
 
     fn merge_into_target(
@@ -1116,7 +1119,7 @@ impl TopologyHandler for WeztermBackend {
         target_pid: Option<ProcessId>,
         preparation: MergePreparation,
     ) -> Result<()> {
-        Self::mux().merge_into_target(dir, source_pid, target_pid, preparation)
+        Self::mux_provider().merge_into_target(dir, source_pid, target_pid, preparation)
     }
 }
 
@@ -1128,7 +1131,10 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};
 
-    use super::WeztermBackend;
+    use super::{WeztermBackend, WeztermMux};
+    use crate::adapters::apps::terminal_mux::TerminalMuxProvider;
+    use crate::adapters::apps::tmux::TmuxMuxProvider;
+    use crate::adapters::apps::zellij::ZellijMuxProvider;
     use crate::engine::contract::{AppAdapter, MoveDecision, TopologyHandler};
     use crate::engine::topology::Direction;
 
@@ -1136,6 +1142,34 @@ mod tests {
 
     fn env_guard() -> std::sync::MutexGuard<'static, ()> {
         crate::utils::env_guard()
+    }
+
+    fn unique_temp_dir(prefix: &str) -> PathBuf {
+        let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!(
+            "niri-deep-wezterm-config-{prefix}-{}-{id}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&path).expect("temp dir should be created");
+        path
+    }
+
+    fn set_env(key: &str, value: Option<&str>) -> Option<OsString> {
+        let old = std::env::var_os(key);
+        if let Some(value) = value {
+            std::env::set_var(key, value);
+        } else {
+            std::env::remove_var(key);
+        }
+        old
+    }
+
+    fn restore_env(key: &str, old: Option<OsString>) {
+        if let Some(value) = old {
+            std::env::set_var(key, value);
+        } else {
+            std::env::remove_var(key);
+        }
     }
 
     #[test]
@@ -1155,6 +1189,87 @@ mod tests {
     fn advertises_config_aliases_for_policy_binding() {
         let app = WeztermBackend;
         assert_eq!(app.config_aliases(), Some(super::ADAPTER_ALIASES));
+    }
+
+    #[test]
+    fn mux_providers_implement_expected_traits() {
+        fn assert_mux_trait<T: TerminalMuxProvider>() {}
+        assert_mux_trait::<WeztermMux>();
+        assert_mux_trait::<TmuxMuxProvider>();
+        assert_mux_trait::<ZellijMuxProvider>();
+    }
+
+    #[test]
+    fn capabilities_follow_tmux_mux_backend() {
+        let _guard = env_guard();
+        let root = unique_temp_dir("caps-tmux");
+        let config_dir = root.join("niri-deep");
+        fs::create_dir_all(&config_dir).expect("config dir should be created");
+        fs::write(
+            config_dir.join("config.toml"),
+            r#"
+[app.terminal.wezterm]
+enabled = true
+mux_backend = "tmux"
+"#,
+        )
+        .expect("config file should be writable");
+        let old_override = set_env(
+            "NIRI_DEEP_CONFIG",
+            Some(config_dir.join("config.toml").to_str().expect("utf-8 path")),
+        );
+        crate::config::prepare().expect("config should load");
+
+        let app = WeztermBackend;
+        let caps = AppAdapter::capabilities(&app);
+        assert!(caps.probe);
+        assert!(caps.focus);
+        assert!(caps.move_internal);
+        assert!(!caps.resize_internal);
+        assert!(!caps.rearrange);
+        assert!(caps.tear_out);
+
+        restore_env("NIRI_DEEP_CONFIG", old_override);
+        crate::config::prepare().expect("config should reload");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn zellij_backend_selects_zellij_attach_command() {
+        let _guard = env_guard();
+        let root = unique_temp_dir("zellij-attach");
+        let config_dir = root.join("niri-deep");
+        fs::create_dir_all(&config_dir).expect("config dir should be created");
+        fs::write(
+            config_dir.join("config.toml"),
+            r#"
+[app.terminal.wezterm]
+enabled = true
+mux_backend = "zellij"
+"#,
+        )
+        .expect("config file should be writable");
+        let old_override = set_env(
+            "NIRI_DEEP_CONFIG",
+            Some(config_dir.join("config.toml").to_str().expect("utf-8 path")),
+        );
+        crate::config::prepare().expect("config should load");
+
+        let command = WeztermBackend::spawn_attach_command("dev".to_string());
+        assert_eq!(
+            command,
+            vec![
+                "wezterm".to_string(),
+                "-e".to_string(),
+                "zellij".to_string(),
+                "attach".to_string(),
+                "dev".to_string(),
+            ]
+        );
+
+        restore_env("NIRI_DEEP_CONFIG", old_override);
+        crate::config::prepare().expect("config should reload");
+        let _ = fs::remove_dir_all(root);
     }
 
     struct WeztermHarness {
