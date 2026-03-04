@@ -247,33 +247,30 @@ impl Orchestrator {
                     };
                     let tear = TopologyHandler::move_out(app.as_ref(), dir, owner_pid)
                         .with_context(|| format!("{adapter_name} move_out failed"))?;
-                    let has_spawn_command = tear.spawn_command.is_some();
                     if let Some(command) = tear.spawn_command {
                         wm.spawn(command).with_context(|| {
                             format!("{adapter_name} tear-out spawn via wm failed")
                         })?;
                     }
-                    if !has_spawn_command {
-                        if let Err(err) = self.focus_tearout_window(
-                            wm,
-                            &pre_window_ids,
-                            source_window_id,
-                            source_pid,
-                            &app_id,
-                        ) {
-                            logging::debug(format!(
-                                "orchestrator: unable to focus tear-out window adapter={} err={:#}",
-                                adapter_name, err
-                            ));
-                        }
-                        if let Err(err) =
-                            self.place_tearout_window(wm, dir, source_window_id, source_tile_index)
-                        {
-                            logging::debug(format!(
-                                "orchestrator: tear-out placement fallback failed adapter={} err={:#}",
-                                adapter_name, err
-                            ));
-                        }
+                    if let Err(err) = self.focus_tearout_window(
+                        wm,
+                        &pre_window_ids,
+                        source_window_id,
+                        source_pid,
+                        &app_id,
+                    ) {
+                        logging::debug(format!(
+                            "orchestrator: unable to focus tear-out window adapter={} err={:#}",
+                            adapter_name, err
+                        ));
+                    }
+                    if let Err(err) =
+                        self.place_tearout_window(wm, dir, source_window_id, source_tile_index)
+                    {
+                        logging::debug(format!(
+                            "orchestrator: tear-out placement fallback failed adapter={} err={:#}",
+                            adapter_name, err
+                        ));
                     }
                     logging::debug(format!(
                         "orchestrator: app move handled by {adapter_name} decision=TearOut"

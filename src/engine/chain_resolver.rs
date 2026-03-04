@@ -106,6 +106,32 @@ fn resolve_direct_adapter(app_id: &str, preferred: Option<&str>) -> Option<Box<d
     None
 }
 
+fn tmux_candidate_pids(root_pid: u32) -> Vec<u32> {
+    let mut candidates = Vec::new();
+    if runtime::process_comm(root_pid).as_deref() == Some("tmux") {
+        candidates.push(root_pid);
+    }
+    for pid in runtime::find_descendants_by_comm(root_pid, "tmux") {
+        if !candidates.contains(&pid) {
+            candidates.push(pid);
+        }
+    }
+    candidates
+}
+
+fn resolve_tmux_for_root(root_pid: u32) -> (Vec<u32>, Option<Tmux>) {
+    let candidates = tmux_candidate_pids(root_pid);
+    let launch_prefix: Vec<String> = wezterm::TERMINAL_LAUNCH_PREFIX
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    let tmux = candidates
+        .iter()
+        .copied()
+        .find_map(|pid| Tmux::from_client_pid(pid, launch_prefix.clone()));
+    (candidates, tmux)
+}
+
 fn resolve_terminal_chain(terminal_pid: u32) -> Vec<Box<dyn AppAdapter>> {
     let mut chain: Vec<Box<dyn AppAdapter>> = Vec::new();
 
@@ -134,23 +160,54 @@ fn resolve_terminal_chain(terminal_pid: u32) -> Vec<Box<dyn AppAdapter>> {
     let search_pid = if shells.len() <= 1 {
         shells.first().copied()
     } else if !fg_base.is_empty() {
-        shells.iter().copied().find(|&shell_pid| {
-            let Ok(stat) = std::fs::read_to_string(format!("/proc/{shell_pid}/stat")) else {
-                return false;
-            };
-            let Some(tpgid) = runtime::parse_stat_tpgid(&stat) else {
-                return false;
-            };
-            runtime::process_comm(tpgid)
-                .map(|comm| comm == fg_base)
-                .unwrap_or(false)
-        })
+        shells
+            .iter()
+            .copied()
+            .find(|&shell_pid| !runtime::find_descendants_by_comm(shell_pid, &fg_base).is_empty())
+            .or_else(|| {
+                shells.iter().copied().find(|&shell_pid| {
+                    let Ok(stat) = std::fs::read_to_string(format!("/proc/{shell_pid}/stat"))
+                    else {
+                        return false;
+                    };
+                    let Some(tpgid) = runtime::parse_stat_tpgid(&stat) else {
+                        return false;
+                    };
+                    runtime::process_comm(tpgid)
+                        .map(|comm| comm == fg_base)
+                        .unwrap_or(false)
+                })
+            })
     } else {
         None
     };
 
     let Some(search_pid) = search_pid else {
-        logging::debug("resolve_terminal_chain: no focused shell match; using terminal layer only");
+        logging::debug(
+            "resolve_terminal_chain: no focused shell match; trying tmux fallback on all shells",
+        );
+        // Shell disambiguation by tpgid fails when the fg process is running *inside* tmux,
+        // because the shell's tpgid points to the tmux client, not the inner fg process.
+        // Fall back: try every shell candidate (and terminal root for direct tmux children).
+        let mut fallback_roots = shells.clone();
+        if !fallback_roots.contains(&terminal_pid) {
+            fallback_roots.push(terminal_pid);
+        }
+        'tmux_fallback: for root_pid in fallback_roots {
+            let (tmux_pids, found_tmux) = resolve_tmux_for_root(root_pid);
+            logging::debug(format!(
+                "resolve_terminal_chain: tmux fallback root={root_pid} candidates={tmux_pids:?}"
+            ));
+            if let Some(tmux) = found_tmux {
+                if let Some(nvim_pid) = tmux.nvim_in_current_pane() {
+                    if let Some(nvim) = Nvim::for_pid(nvim_pid) {
+                        chain.push(apps::bind_policy(Box::new(nvim)));
+                    }
+                }
+                chain.push(apps::bind_policy(Box::new(tmux)));
+                break 'tmux_fallback;
+            }
+        }
         chain.push(apps::bind_policy(Box::new(wezterm::WeztermBackend)));
         return chain;
     };
@@ -160,20 +217,11 @@ fn resolve_terminal_chain(terminal_pid: u32) -> Vec<Box<dyn AppAdapter>> {
 
     match fg_base.as_str() {
         "tmux" => {
-            let tmux_pids = runtime::find_descendants_by_comm(search_pid, "tmux");
+            let (tmux_pids, found_tmux) = resolve_tmux_for_root(search_pid);
             logging::debug(format!(
                 "resolve_terminal_chain: tmux descendants under shell {} => {:?}",
                 search_pid, tmux_pids
             ));
-            let found_tmux = tmux_pids.first().and_then(|tmux_client_pid| {
-                Tmux::from_client_pid(
-                    *tmux_client_pid,
-                    wezterm::TERMINAL_LAUNCH_PREFIX
-                        .iter()
-                        .map(|s| s.to_string())
-                        .collect(),
-                )
-            });
             if let Some(tmux) = found_tmux {
                 if let Some(nvim_pid) = tmux.nvim_in_current_pane() {
                     if let Some(nvim) = Nvim::for_pid(nvim_pid) {
@@ -195,7 +243,22 @@ fn resolve_terminal_chain(terminal_pid: u32) -> Vec<Box<dyn AppAdapter>> {
                 }
             }
         }
-        _ => {}
+        _ => {
+            // fg_base is an arbitrary process running inside a mux (e.g. "node", "python").
+            // Try tmux detection under the shell regardless.
+            let (tmux_pids, found_tmux) = resolve_tmux_for_root(search_pid);
+            logging::debug(format!(
+                "resolve_terminal_chain: fg={fg_base} tmux descendants under shell {search_pid} => {tmux_pids:?}"
+            ));
+            if let Some(tmux) = found_tmux {
+                if let Some(nvim_pid) = tmux.nvim_in_current_pane() {
+                    if let Some(nvim) = Nvim::for_pid(nvim_pid) {
+                        chain.push(apps::bind_policy(Box::new(nvim)));
+                    }
+                }
+                chain.push(apps::bind_policy(Box::new(tmux)));
+            }
+        }
     }
 
     chain.push(apps::bind_policy(Box::new(wezterm::WeztermBackend)));
