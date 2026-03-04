@@ -473,13 +473,13 @@ fn resolve_terminal_chain(terminal_pid: u32) -> Vec<Box<dyn AppAdapter>> {
             let found_tmux = tmux_pids
                 .first()
                 .and_then(|tmux_client_pid| {
-                    tmux::tmux_from_client_pid(
+                    tmux::Tmux::from_client_pid(
                         *tmux_client_pid,
                         wezterm::TERMINAL_LAUNCH_PREFIX.iter().map(|s| s.to_string()).collect(),
                     )
                 });
             if let Some(tmux) = found_tmux {
-                if let Some(nvim_pid) = tmux::tmux_nvim_in_current_pane(&tmux) {
+                if let Some(nvim_pid) = tmux.nvim_in_current_pane() {
                     if let Some(nvim) = Nvim::for_pid(nvim_pid) {
                         chain.push(bind_policy(Box::new(nvim)));
                     }
