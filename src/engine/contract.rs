@@ -3,9 +3,20 @@ use std::any::Any;
 use anyhow::{anyhow, Result};
 
 use crate::engine::runtime::ProcessId;
-use crate::engine::topology::Direction;
+use crate::engine::topology::{Direction, DomainId};
 
-pub trait TerminalMuxProvider: TopologyHandler {
+pub trait ChainResolver {
+    fn resolve_chain(&self, app_id: &str, pid: u32, title: &str) -> Vec<Box<dyn AppAdapter>>;
+    fn default_domain_adapters(&self) -> Vec<Box<dyn AppAdapter>>;
+    fn domain_id_for_window(
+        &self,
+        app_id: Option<&str>,
+        pid: Option<ProcessId>,
+        title: Option<&str>,
+    ) -> DomainId;
+}
+
+pub trait TerminalMuxProvider: TopologyHandler + ChainResolver {
     /// Capabilities this mux backend supports (pane focus, move, resize, etc).
     fn capabilities(&self) -> AdapterCapabilities;
     fn focused_pane_for_pid(&self, pid: u32) -> Result<u64>;
@@ -238,7 +249,7 @@ pub trait TopologyHandler {
 }
 
 /// Metadata/capabilities contract for app adapters.
-pub trait AppAdapter: Send + TopologyHandler {
+pub trait AppAdapter: Send + TopologyHandler + ChainResolver {
     /// Human-readable adapter name used in diagnostics.
     fn adapter_name(&self) -> &'static str;
 
@@ -256,6 +267,29 @@ pub trait AppAdapter: Send + TopologyHandler {
     /// Optional adapter-native expression evaluator.
     fn eval(&self, _expression: &str, _pid: Option<ProcessId>) -> Result<String> {
         Err(unsupported_operation(self.adapter_name(), "eval"))
+    }
+}
+
+impl<T> ChainResolver for T
+where
+    T: TopologyHandler + ?Sized,
+{
+    fn resolve_chain(&self, app_id: &str, pid: u32, title: &str) -> Vec<Box<dyn AppAdapter>> {
+        crate::engine::chain_resolver::runtime_chain_resolver().resolve_chain(app_id, pid, title)
+    }
+
+    fn default_domain_adapters(&self) -> Vec<Box<dyn AppAdapter>> {
+        crate::engine::chain_resolver::runtime_chain_resolver().default_domain_adapters()
+    }
+
+    fn domain_id_for_window(
+        &self,
+        app_id: Option<&str>,
+        pid: Option<ProcessId>,
+        title: Option<&str>,
+    ) -> DomainId {
+        crate::engine::chain_resolver::runtime_chain_resolver()
+            .domain_id_for_window(app_id, pid, title)
     }
 }
 

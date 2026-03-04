@@ -3,12 +3,13 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 
-use crate::adapters::apps::{self};
 use crate::adapters::window_managers::{
     plan_tear_out, CapabilitySupport, FocusedWindowView, ResizeIntent, ResizeKind,
     WindowManagerAdapter, WindowRecord,
 };
-use crate::engine::contract::{AppAdapter, MergeExecutionMode, MoveDecision, TopologyHandler};
+use crate::engine::contract::{
+    AppAdapter, ChainResolver, MergeExecutionMode, MoveDecision, TopologyHandler,
+};
 use crate::engine::domain::ErasedDomain;
 use crate::engine::domain::{domain_id_for_window, encode_native_window_ref};
 use crate::engine::domain::{PayloadRegistry, TransferOutcome, TransferPipeline};
@@ -109,7 +110,9 @@ impl Orchestrator {
             return Ok(false);
         };
 
-        for app in apps::resolve_chain(&app_id, owner_pid, &title) {
+        for app in crate::engine::chain_resolver::runtime_chain_resolver()
+            .resolve_chain(&app_id, owner_pid, &title)
+        {
             if !app.capabilities().focus {
                 continue;
             }
@@ -197,7 +200,9 @@ impl Orchestrator {
             return Ok(false);
         };
 
-        for app in apps::resolve_chain(&app_id, owner_pid, &title) {
+        for app in crate::engine::chain_resolver::runtime_chain_resolver()
+            .resolve_chain(&app_id, owner_pid, &title)
+        {
             let adapter_name = app.adapter_name();
             let decision = TopologyHandler::move_decision(app.as_ref(), dir, owner_pid)
                 .with_context(|| format!("{adapter_name} move_decision failed"))?;
@@ -482,13 +487,14 @@ impl Orchestrator {
 
     fn window_matches_adapter(adapter_name: &str, window: &WindowRecord) -> bool {
         let owner_pid = window.pid.map(ProcessId::get).unwrap_or(0);
-        apps::resolve_chain(
-            window.app_id.as_deref().unwrap_or_default(),
-            owner_pid,
-            window.title.as_deref().unwrap_or_default(),
-        )
-        .into_iter()
-        .any(|adapter| adapter.adapter_name() == adapter_name)
+        crate::engine::chain_resolver::runtime_chain_resolver()
+            .resolve_chain(
+                window.app_id.as_deref().unwrap_or_default(),
+                owner_pid,
+                window.title.as_deref().unwrap_or_default(),
+            )
+            .into_iter()
+            .any(|adapter| adapter.adapter_name() == adapter_name)
     }
 
     fn leaf_from_window(window: &WindowRecord, leaf_id: u64) -> GlobalLeaf {
@@ -656,7 +662,9 @@ impl Orchestrator {
             return Ok(false);
         };
 
-        for app in apps::resolve_chain(&app_id, owner_pid, &title) {
+        for app in crate::engine::chain_resolver::runtime_chain_resolver()
+            .resolve_chain(&app_id, owner_pid, &title)
+        {
             if !app.capabilities().resize_internal {
                 continue;
             }
@@ -1079,6 +1087,8 @@ mod tests {
 
     #[test]
     fn move_prefers_cross_domain_transfer_when_payloads_are_compatible() {
+        let _guard = crate::utils::env_guard();
+        crate::config::prepare().expect("config should load");
         let mut orchestrator = Orchestrator::default();
 
         let source_counters = DomainCounters::default();
@@ -1152,6 +1162,8 @@ mod tests {
 
     #[test]
     fn move_falls_back_to_wm_when_transfer_has_no_compatible_payload() {
+        let _guard = crate::utils::env_guard();
+        crate::config::prepare().expect("config should load");
         let mut orchestrator = Orchestrator::default();
 
         let source_counters = DomainCounters::default();

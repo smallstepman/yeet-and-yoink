@@ -4,8 +4,9 @@ use std::path::Path;
 use std::thread::sleep;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use crate::adapters::apps::wezterm::WeztermBackend;
+use crate::adapters::apps::wezterm;
 use crate::adapters::apps::AppAdapter;
+use crate::adapters::terminal_multiplexers;
 use crate::engine::contract::{
     AdapterCapabilities, AppKind, MoveDecision, TearResult, TopologyHandler,
 };
@@ -250,7 +251,8 @@ impl Nvim {
         if !self.smart_mux_split_pane(dir)? {
             bail!("smart-splits mux split_pane failed; ensure smart-splits.nvim is configured");
         }
-        let target_pane_id = WeztermBackend::mux_provider().pane_neighbor_for_pid(
+        let target_pane_id = terminal_multiplexers::pane_neighbor_for_pid(
+            wezterm::ADAPTER_ALIASES,
             terminal_pid,
             source_pane_id,
             dir,
@@ -270,7 +272,8 @@ impl Nvim {
             snapshot.col
         ));
 
-        WeztermBackend::mux_provider().send_text_to_pane(
+        terminal_multiplexers::send_text_to_pane(
+            wezterm::ADAPTER_ALIASES,
             terminal_pid,
             target_pane_id,
             &launch_command,

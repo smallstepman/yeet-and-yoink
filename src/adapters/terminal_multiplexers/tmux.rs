@@ -1,9 +1,8 @@
 use anyhow::{bail, Context, Result};
 
-use crate::adapters::apps::AppAdapter;
 use crate::engine::contract::{
-    AdapterCapabilities, AppKind, MergeExecutionMode, MergePreparation, MoveDecision, TearResult,
-    TerminalMuxProvider, TopologyHandler,
+    AdapterCapabilities, AppAdapter, AppKind, MergeExecutionMode, MergePreparation, MoveDecision,
+    TearResult, TerminalMuxProvider, TopologyHandler,
 };
 use crate::engine::runtime::{self, CommandContext, ProcessId};
 use crate::engine::topology::Direction;
@@ -118,7 +117,7 @@ impl Tmux {
             return None;
         }
         let pane_pid: u32 = self.query("#{pane_pid}").ok()?.parse().ok()?;
-        let nvim_pids = super::find_descendants_by_comm(pane_pid, "nvim");
+        let nvim_pids = runtime::find_descendants_by_comm(pane_pid, "nvim");
         nvim_pids.first().copied()
     }
 }

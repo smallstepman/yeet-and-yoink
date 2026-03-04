@@ -1,26 +1,14 @@
 pub mod emacs;
-pub mod kitty;
 pub mod librefox;
 pub mod nvim;
-pub mod terminal_mux;
-pub mod tmux;
 pub mod vscode;
 pub mod wezterm;
-pub mod zellij;
 
 use crate::config::AppSection;
-use crate::engine::runtime;
-use crate::logging;
-
-use emacs::EmacsBackend;
-use librefox::Librefox;
-use nvim::Nvim;
-use vscode::Vscode;
-use wezterm::WeztermBackend;
 
 pub use crate::engine::contract::{
     unsupported_operation, AdapterCapabilities, AppAdapter, AppCapabilities, AppKind,
-    MergeExecutionMode, MergePreparation, MoveDecision, TearResult, TopologyHandler,
+    ChainResolver, MergeExecutionMode, MergePreparation, MoveDecision, TearResult, TopologyHandler,
     TopologySnapshot,
 };
 
@@ -29,11 +17,6 @@ pub use crate::engine::contract::{
 /// 2. Keep unsupported operations disabled in `capabilities` so the orchestrator
 ///    classify them as `Unsupported` without runtime probes.
 /// 3. Add adapter tests that cover focus/move/resize behavior and precedence.
-
-/// Find descendant PIDs whose /proc/<pid>/comm matches `name`.
-pub(crate) fn find_descendants_by_comm(pid: u32, name: &str) -> Vec<u32> {
-    runtime::find_descendants_by_comm(pid, name)
-}
 
 struct PolicyBoundApp {
     inner: Box<dyn AppAdapter>,
@@ -258,260 +241,23 @@ impl TopologyHandler for PolicyBoundApp {
     }
 }
 
-fn bind_policy(app: Box<dyn AppAdapter>) -> Box<dyn AppAdapter> {
+pub(crate) fn bind_policy(app: Box<dyn AppAdapter>) -> Box<dyn AppAdapter> {
     Box::new(PolicyBoundApp::new(app))
 }
 
 // ---------------------------------------------------------------------------
-// App resolution
+// App resolution (delegated to engine ChainResolver)
 // ---------------------------------------------------------------------------
-
-struct DirectAdapterSpec {
-    name: &'static str,
-    aliases: &'static [&'static str],
-    app_ids: &'static [&'static str],
-    section: AppSection,
-    build: fn() -> Box<dyn AppAdapter>,
-}
-
-fn build_editor() -> Box<dyn AppAdapter> {
-    Box::new(EmacsBackend)
-}
-
-fn build_librefox() -> Box<dyn AppAdapter> {
-    Box::new(Librefox)
-}
-
-fn build_vscode() -> Box<dyn AppAdapter> {
-    Box::new(Vscode)
-}
-
-const DIRECT_ADAPTERS: &[DirectAdapterSpec] = &[
-    DirectAdapterSpec {
-        name: emacs::ADAPTER_NAME,
-        aliases: emacs::ADAPTER_ALIASES,
-        app_ids: emacs::APP_IDS,
-        section: AppSection::Editor,
-        build: build_editor,
-    },
-    DirectAdapterSpec {
-        name: "librefox",
-        aliases: &["librefox"],
-        app_ids: &["librewolf", "LibreWolf", "firefox", "Firefox"],
-        section: AppSection::Browser,
-        build: build_librefox,
-    },
-    DirectAdapterSpec {
-        name: "vscode",
-        aliases: &["vscode"],
-        app_ids: &["code", "code-url-handler", "Code", "code-oss"],
-        section: AppSection::Editor,
-        build: build_vscode,
-    },
-];
 
 /// Baseline adapters used to seed runtime domains even when the focused window
 /// does not currently belong to that app kind.
 pub fn default_domain_adapters() -> Vec<Box<dyn AppAdapter>> {
-    vec![
-        bind_policy(Box::new(WeztermBackend)),
-        bind_policy(Box::new(EmacsBackend)),
-    ]
-}
-
-fn preferred_adapter_name() -> Option<String> {
-    crate::config::app_adapter_override().and_then(|raw| {
-        let normalized = raw.trim().to_ascii_lowercase();
-        if normalized.is_empty() {
-            None
-        } else {
-            Some(normalized)
-        }
-    })
-}
-
-fn matches_adapter_alias(preferred: &str, aliases: &[&str]) -> bool {
-    aliases.iter().any(|candidate| *candidate == preferred)
-}
-
-fn resolve_direct_adapter(app_id: &str, preferred: Option<&str>) -> Option<Box<dyn AppAdapter>> {
-    for spec in DIRECT_ADAPTERS {
-        if !spec.app_ids.iter().any(|candidate| *candidate == app_id) {
-            continue;
-        }
-
-        if let Some(preferred) = preferred {
-            if !matches_adapter_alias(preferred, spec.aliases) {
-                logging::debug(format!(
-                    "resolve_chain: adapter override '{}' does not match direct adapter '{}'",
-                    preferred, spec.name
-                ));
-                return None;
-            }
-        }
-
-        if !crate::config::app_integration_enabled(spec.section, spec.aliases) {
-            logging::debug(format!(
-                "resolve_chain: direct adapter '{}' disabled via config",
-                spec.name
-            ));
-            return None;
-        }
-
-        return Some(bind_policy((spec.build)()));
-    }
-
-    None
+    crate::engine::chain_resolver::runtime_chain_resolver().default_domain_adapters()
 }
 
 /// Resolve a chain of app handlers for a window, innermost-first.
-///
-/// For a terminal running `terminal → zsh → tmux → nvim`:
-///   returns `[Nvim { .. }, Tmux { .. }]`
-///
-/// For a non-terminal editor:
-///   returns `[EmacsBackend]`
 pub fn resolve_chain(app_id: &str, pid: u32, title: &str) -> Vec<Box<dyn AppAdapter>> {
-    logging::debug(format!(
-        "resolve_chain: app_id={} pid={} title={}",
-        app_id, pid, title
-    ));
-    let preferred = preferred_adapter_name();
-
-    if wezterm::APP_IDS.contains(&app_id) {
-        if let Some(preferred) = preferred.as_deref() {
-            if !matches_adapter_alias(preferred, wezterm::ADAPTER_ALIASES) {
-                logging::debug(format!(
-                    "resolve_chain: adapter override '{}' disables terminal chain",
-                    preferred
-                ));
-                return vec![];
-            }
-        }
-        if !crate::config::app_integration_enabled(AppSection::Terminal, wezterm::ADAPTER_ALIASES) {
-            logging::debug("resolve_chain: terminal integration disabled via config");
-            return vec![];
-        }
-        let chain = resolve_terminal_chain(pid);
-        logging::debug(format!("resolve_chain: terminal depth={}", chain.len()));
-        return chain;
-    }
-
-    if let Some(app) = resolve_direct_adapter(app_id, preferred.as_deref()) {
-        logging::debug("resolve_chain: direct app match depth=1");
-        return vec![app];
-    }
-
-    logging::debug("resolve_chain: no deep app match depth=0");
-    vec![]
-}
-
-/// Resolve the app chain for a terminal window using multiplexer state,
-/// to directly identify the active pane's foreground process, avoiding title heuristics.
-fn resolve_terminal_chain(terminal_pid: u32) -> Vec<Box<dyn AppAdapter>> {
-    let mut chain: Vec<Box<dyn AppAdapter>> = Vec::new();
-
-    // Ask the terminal multiplexer backend for active pane foreground process name.
-    let fg_hint = wezterm::WeztermBackend::mux_provider().active_foreground_process(terminal_pid);
-    let fg_base = fg_hint
-        .as_deref()
-        .map(runtime::normalize_process_name)
-        .unwrap_or_default();
-    logging::debug(format!(
-        "resolve_terminal_chain: pid={} fg_hint={:?} fg_base={}",
-        terminal_pid, fg_hint, fg_base
-    ));
-
-    // Find shell children of the terminal process.
-    let shells: Vec<u32> = runtime::child_pids(terminal_pid)
-        .into_iter()
-        .filter(|&pid| runtime::is_shell_pid(pid))
-        .collect();
-    logging::debug(format!(
-        "resolve_terminal_chain: shell_candidates={:?}",
-        shells
-    ));
-
-    // Identify the shell owning the active pane. With a single shell (single
-    // tab), take it directly. With multiple shells (multiple tabs), match by
-    // the foreground process group reported by terminal multiplexer backend.
-    let search_pid = if shells.len() <= 1 {
-        shells.first().copied()
-    } else if !fg_base.is_empty() {
-        shells.iter().copied().find(|&shell_pid| {
-            let Ok(stat) = std::fs::read_to_string(format!("/proc/{shell_pid}/stat")) else {
-                return false;
-            };
-            let Some(tpgid) = runtime::parse_stat_tpgid(&stat) else {
-                return false;
-            };
-            runtime::process_comm(tpgid)
-                .map(|comm| comm == fg_base)
-                .unwrap_or(false)
-        })
-    } else {
-        None
-    };
-
-    let Some(search_pid) = search_pid else {
-        logging::debug("resolve_terminal_chain: no focused shell match; using terminal layer only");
-        chain.push(bind_policy(Box::new(WeztermBackend)));
-        return chain;
-    };
-    logging::debug(format!(
-        "resolve_terminal_chain: selected shell pid={search_pid}"
-    ));
-
-    // Build the chain based on fg_base (most specific first).
-    match fg_base.as_str() {
-        "tmux" => {
-            let tmux_pids = find_descendants_by_comm(search_pid, "tmux");
-            logging::debug(format!(
-                "resolve_terminal_chain: tmux descendants under shell {} => {:?}",
-                search_pid, tmux_pids
-            ));
-            let found_tmux = tmux_pids.first().and_then(|tmux_client_pid| {
-                tmux::Tmux::from_client_pid(
-                    *tmux_client_pid,
-                    wezterm::TERMINAL_LAUNCH_PREFIX
-                        .iter()
-                        .map(|s| s.to_string())
-                        .collect(),
-                )
-            });
-            if let Some(tmux) = found_tmux {
-                if let Some(nvim_pid) = tmux.nvim_in_current_pane() {
-                    if let Some(nvim) = Nvim::for_pid(nvim_pid) {
-                        chain.push(bind_policy(Box::new(nvim)));
-                    }
-                }
-                chain.push(bind_policy(Box::new(tmux)));
-            }
-        }
-        "nvim" => {
-            let nvim_pids = find_descendants_by_comm(search_pid, "nvim");
-            logging::debug(format!(
-                "resolve_terminal_chain: nvim descendants under shell {} => {:?}",
-                search_pid, nvim_pids
-            ));
-            if let Some(&nvim_pid) = nvim_pids.first() {
-                if let Some(nvim) = Nvim::for_pid(nvim_pid) {
-                    chain.push(bind_policy(Box::new(nvim)));
-                }
-            }
-        }
-        _ => {}
-    }
-
-    // Always include the terminal layer as outermost fallback so that
-    // terminal-native pane operations can run when inner layers passthrough.
-    chain.push(bind_policy(Box::new(WeztermBackend)));
-    logging::debug(format!(
-        "resolve_terminal_chain: final depth={}",
-        chain.len()
-    ));
-
-    chain
+    crate::engine::chain_resolver::runtime_chain_resolver().resolve_chain(app_id, pid, title)
 }
 
 #[cfg(test)]
@@ -520,8 +266,9 @@ mod resolve_chain_tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     use crate::adapters::apps::{
-        emacs, librefox::Librefox, nvim::Nvim, tmux::Tmux, vscode::Vscode, wezterm, TopologyHandler,
+        emacs, librefox::Librefox, nvim::Nvim, vscode::Vscode, wezterm, TopologyHandler,
     };
+    use crate::adapters::terminal_multiplexers::tmux::Tmux;
 
     use super::resolve_chain;
 

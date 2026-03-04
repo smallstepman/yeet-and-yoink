@@ -1,3 +1,4 @@
+pub mod chain_resolver;
 pub mod contract;
 pub mod domain;
 pub mod orchestrator;

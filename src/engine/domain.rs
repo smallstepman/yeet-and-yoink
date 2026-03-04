@@ -5,11 +5,10 @@ use std::sync::OnceLock;
 use anyhow::Result as AnyResult;
 use anyhow::{anyhow, Context, Result};
 
-use crate::adapters::apps::{self};
 use crate::adapters::window_managers::niri::NiriDomainPlugin;
 use crate::adapters::window_managers::{FocusedWindowView, WindowManagerAdapter};
 use crate::engine::contract::{
-    AppAdapter, AppKind, MergePreparation, TopologyHandler as AppTopologyHandler,
+    AppAdapter, AppKind, ChainResolver, MergePreparation, TopologyHandler as AppTopologyHandler,
 };
 use crate::engine::runtime::ProcessId;
 use crate::engine::topology::{Direction, DomainId, LeafId, Rect};
@@ -604,23 +603,14 @@ pub fn domain_id_for_window(
     pid: Option<ProcessId>,
     title: Option<&str>,
 ) -> DomainId {
-    let app_id = app_id.unwrap_or_default();
-    let title = title.unwrap_or_default();
-    let owner_pid = pid.map(ProcessId::get).unwrap_or(0);
-    if let Some(kind) = apps::resolve_chain(app_id, owner_pid, title)
-        .into_iter()
-        .map(|adapter| adapter.kind())
-        .next()
-    {
-        return domain_id_for_app_kind(kind);
-    }
-    WM_DOMAIN_ID
+    crate::engine::chain_resolver::runtime_chain_resolver().domain_id_for_window(app_id, pid, title)
 }
 
 pub fn runtime_domains_for_window_manager<W>(wm: &mut W) -> Result<Vec<Box<dyn ErasedDomain>>>
 where
     W: WindowManagerAdapter,
 {
+    let resolver = crate::engine::chain_resolver::runtime_chain_resolver();
     let mut domains: Vec<Box<dyn ErasedDomain>> = Vec::new();
     match wm.adapter_name() {
         "niri" => {
@@ -633,7 +623,7 @@ where
         other => domains.push(Box::new(UnsupportedDomainPlugin::new(WM_DOMAIN_ID, other))),
     }
 
-    for adapter in apps::default_domain_adapters() {
+    for adapter in resolver.default_domain_adapters() {
         let domain_id = domain_id_for_app_kind(adapter.kind());
         domains.push(Box::new(AppDomainPlugin::new(domain_id, adapter)));
     }
@@ -647,7 +637,7 @@ where
     })?;
     let owner_pid = pid.map(ProcessId::get).unwrap_or(0);
     let mut overridden = HashSet::new();
-    for adapter in apps::resolve_chain(&app_id, owner_pid, &title) {
+    for adapter in resolver.resolve_chain(&app_id, owner_pid, &title) {
         let domain_id = domain_id_for_app_kind(adapter.kind());
         if overridden.insert(domain_id) {
             domains.push(Box::new(AppDomainPlugin::new(domain_id, adapter)));
