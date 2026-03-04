@@ -24,7 +24,7 @@
 //!    - Represents visible windows and focus state, and can be mapped to mux objects.
 //!
 //! niri-deep currently uses CLI-first control, with an optional Lua/mux bridge path
-//! (`NIRI_DEEP_WEZTERM_MUX_BRIDGE=1`) for cases where deciding merge targets purely from
+//! for cases where deciding merge targets purely from
 //! transient CLI focus metadata is less reliable.
 //!
 //! ## CLI capabilities relevant to this module
@@ -219,49 +219,30 @@ struct WeztermMuxMergePreparation {
 enum MuxBridgeMode {
     Disabled,
     Enabled,
-    Auto,
 }
 
 impl WeztermMux {
     const NON_SOURCE_PANE_POLL_ATTEMPTS: usize = 3;
     const NON_SOURCE_PANE_POLL_DELAY: Duration = Duration::from_millis(10);
-    const MUX_BRIDGE_READY_MAX_AGE: Duration = Duration::from_secs(2);
-    const MUX_BRIDGE_READY_FILE: &'static str = "ready";
-
-    fn mux_policy() -> crate::config::MuxPolicy {
-        crate::config::mux_policy_for(ADAPTER_ALIASES)
-    }
 
     fn mux_bridge_mode() -> MuxBridgeMode {
-        let mux_policy = Self::mux_policy();
+        let mux_policy = crate::config::mux_policy_for(ADAPTER_ALIASES);
         if !mux_policy.integration_enabled {
             return MuxBridgeMode::Disabled;
         }
-        if let Some(enabled) = mux_policy.bridge_enable_override() {
-            if !enabled {
-                return MuxBridgeMode::Disabled;
-            }
-            return match mux_policy.backend {
-                TerminalMuxBackend::Wezterm => MuxBridgeMode::Enabled,
-                TerminalMuxBackend::Tmux
-                | TerminalMuxBackend::Zellij
-                | TerminalMuxBackend::Kitty => MuxBridgeMode::Disabled,
-            };
+        if let Some(false) = mux_policy.bridge_enable_override() {
+            return MuxBridgeMode::Disabled;
         }
         match mux_policy.backend {
-            TerminalMuxBackend::Wezterm => MuxBridgeMode::Auto,
-            TerminalMuxBackend::Tmux | TerminalMuxBackend::Zellij | TerminalMuxBackend::Kitty => {
-                MuxBridgeMode::Disabled
-            }
+            TerminalMuxBackend::Wezterm => MuxBridgeMode::Enabled,
+            TerminalMuxBackend::Tmux
+            | TerminalMuxBackend::Zellij
+            | TerminalMuxBackend::Kitty => MuxBridgeMode::Disabled,
         }
     }
 
     fn should_use_mux_bridge() -> bool {
-        match Self::mux_bridge_mode() {
-            MuxBridgeMode::Disabled => false,
-            MuxBridgeMode::Enabled => true,
-            MuxBridgeMode::Auto => Self::mux_bridge_ready(),
-        }
+        Self::mux_bridge_mode() == MuxBridgeMode::Enabled
     }
 
     fn enqueue_mux_merge_command(source_pane_id: u64, dir: Direction) -> Result<()> {
@@ -295,146 +276,6 @@ impl WeztermMux {
     fn mux_bridge_dir() -> PathBuf {
         let runtime_dir = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".to_string());
         PathBuf::from(runtime_dir).join("niri-deep-wezterm-mux")
-    }
-
-    fn mux_bridge_ready_path() -> PathBuf {
-        Self::mux_bridge_dir().join(Self::MUX_BRIDGE_READY_FILE)
-    }
-
-    fn mux_bridge_ready() -> bool {
-        let ready_path = Self::mux_bridge_ready_path();
-        let Ok(metadata) = fs::metadata(&ready_path) else {
-            return false;
-        };
-        let Ok(modified) = metadata.modified() else {
-            return false;
-        };
-        let Ok(age) = modified.elapsed() else {
-            return false;
-        };
-        age <= Self::MUX_BRIDGE_READY_MAX_AGE
-    }
-
-    fn resolve_focused_pane_for_pid(pid: u32) -> Result<u64> {
-        Self::focused_pane_id(pid)
-    }
-
-    fn resolve_pane_neighbor_for_pid(pid: u32, pane_id: u64, dir: Direction) -> Result<u64> {
-        Self::pane_in_direction(pid, pane_id, dir)?
-            .context("no terminal multiplexer pane exists in requested direction")
-    }
-
-    fn send_text_to_pane_raw(pid: u32, pane_id: u64, text: &str) -> Result<()> {
-        let pane_id_str = pane_id.to_string();
-        let output = Self::cli_output(
-            pid,
-            &["send-text", "--pane-id", &pane_id_str, "--no-paste", text],
-        )?;
-        if !output.status.success() {
-            bail!(
-                "terminal multiplexer send-text failed: {}",
-                String::from_utf8_lossy(&output.stderr).trim()
-            );
-        }
-        Ok(())
-    }
-
-    fn merge_source_pane_into_focused_target_raw(
-        source_pid: u32,
-        source_pane_id: u64,
-        target_pid: u32,
-        target_window_id: Option<u64>,
-        dir: Direction,
-    ) -> Result<()> {
-        if source_pid == 0 || target_pid == 0 {
-            bail!("invalid wezterm pid for merge");
-        }
-        if source_pid != target_pid {
-            bail!("cannot merge panes across different wezterm instances");
-        }
-
-        if Self::should_use_mux_bridge() && target_window_id.is_none() {
-            logging::debug(format!(
-                "wezterm: mux bridge enabled; enqueue merge source pane {} dir={}",
-                source_pane_id, dir
-            ));
-            Self::enqueue_mux_merge_command(source_pane_id, dir)?;
-            return Ok(());
-        }
-        if Self::should_use_mux_bridge() && target_window_id.is_some() {
-            logging::debug(
-                "wezterm: skipping mux bridge because explicit merge target is available",
-            );
-        }
-        logging::debug("wezterm: mux bridge unavailable; using direct cli merge path");
-
-        let target_pane_id = if let Some(window_id) = target_window_id {
-            Self::merge_target_pane_id(target_pid, source_pane_id, Some(window_id))?
-        } else {
-            if let Some(pane_id) =
-                Self::wait_for_non_source_focused_client_pane(target_pid, source_pane_id)?
-            {
-                logging::debug(format!(
-                    "wezterm: merge target from focused client transition = {}",
-                    pane_id
-                ));
-                pane_id
-            } else {
-                Self::merge_target_pane_id(target_pid, source_pane_id, None)?
-            }
-        };
-        if target_pane_id == source_pane_id {
-            bail!("source and target panes are the same");
-        }
-
-        let target_pane_id_str = target_pane_id.to_string();
-        let source_pane_id_str = source_pane_id.to_string();
-        let target_side = Self::split_flag(dir.opposite());
-        logging::debug(format!(
-            "wezterm: merge source pane {} into target pane {} side={}",
-            source_pane_id, target_pane_id, target_side
-        ));
-        Self::cli_stdout(
-            target_pid,
-            &[
-                "split-pane",
-                "--pane-id",
-                &target_pane_id_str,
-                target_side,
-                "--move-pane-id",
-                &source_pane_id_str,
-            ],
-        )?;
-        Ok(())
-    }
-
-    fn wait_for_non_source_focused_client_pane(
-        pid: u32,
-        source_pane_id: u64,
-    ) -> Result<Option<u64>> {
-        for attempt in 0..Self::NON_SOURCE_PANE_POLL_ATTEMPTS {
-            if let Some(pane_id) = Self::focused_client_pane_id(pid)? {
-                if pane_id != source_pane_id {
-                    return Ok(Some(pane_id));
-                }
-            }
-            if attempt + 1 < Self::NON_SOURCE_PANE_POLL_ATTEMPTS {
-                std::thread::sleep(Self::NON_SOURCE_PANE_POLL_DELAY);
-            }
-        }
-        Ok(None)
-    }
-
-    fn focused_client_pane_id(pid: u32) -> Result<Option<u64>> {
-        let panes = Self::list_panes(pid)?;
-        let clients = Self::list_clients(pid)?;
-        let pane_exists = |pane_id: u64| panes.iter().any(|p| p.pane_id == pane_id);
-
-        if let Some(selection) = Self::select_client_focused_pane(&clients, pid, pane_exists) {
-            return Ok(Some(selection.pane_id()));
-        }
-
-        Ok(None)
     }
 
     fn merge_target_pane_id(
@@ -698,16 +539,6 @@ impl WeztermMux {
         bail!("unable to determine focused wezterm pane")
     }
 
-    fn pane_count_in_active_tab(pid: u32, active_pane_id: u64) -> Result<u32> {
-        let panes = Self::list_panes(pid)?;
-        let active_tab_id = panes
-            .iter()
-            .find(|p| p.pane_id == active_pane_id)
-            .map(|p| p.tab_id)
-            .context("active pane is not present in wezterm pane list")?;
-        Ok(panes.iter().filter(|p| p.tab_id == active_tab_id).count() as u32)
-    }
-
     fn direction_name(dir: Direction) -> &'static str {
         match dir.egocentric() {
             "left" => "Left",
@@ -753,40 +584,6 @@ impl WeztermMux {
         })?;
         Ok(Some(id))
     }
-
-    fn has_neighbor(pid: u32, pane_id: u64, dir: Direction) -> Result<bool> {
-        Ok(Self::pane_in_direction(pid, pane_id, dir)?.is_some())
-    }
-
-    fn fallback_rearrange_target(pid: u32, pane_id: u64) -> Result<Option<u64>> {
-        let panes = Self::list_panes(pid)?;
-        let active_tab_id = panes
-            .iter()
-            .find(|pane| pane.pane_id == pane_id)
-            .map(|pane| pane.tab_id)
-            .context("active pane is not present in wezterm pane list")?;
-        let mut candidates: Vec<u64> = panes
-            .into_iter()
-            .filter(|pane| pane.tab_id == active_tab_id && pane.pane_id != pane_id)
-            .map(|pane| pane.pane_id)
-            .collect();
-        candidates.sort_unstable();
-        Ok(candidates.into_iter().next())
-    }
-
-    /// Returns the foreground process name of the active pane for the WezTerm
-    /// instance identified by `pid`, using `wezterm cli list --format json`.
-    fn active_foreground_process_raw(pid: u32) -> Option<String> {
-        let pane_id = Self::focused_pane_id(pid).ok()?;
-        let panes = Self::list_panes(pid).ok()?;
-        panes
-            .into_iter()
-            .find(|p| p.pane_id == pane_id)
-            .and_then(|p| {
-                let name = p.foreground_process_name.trim().to_string();
-                (!name.is_empty()).then_some(name)
-            })
-    }
 }
 
 impl TerminalMuxProvider for WeztermMux {
@@ -803,15 +600,27 @@ impl TerminalMuxProvider for WeztermMux {
     }
 
     fn focused_pane_for_pid(&self, pid: u32) -> Result<u64> {
-        Self::resolve_focused_pane_for_pid(pid)
+        Self::focused_pane_id(pid)
     }
 
     fn pane_neighbor_for_pid(&self, pid: u32, pane_id: u64, dir: Direction) -> Result<u64> {
-        Self::resolve_pane_neighbor_for_pid(pid, pane_id, dir)
+        Self::pane_in_direction(pid, pane_id, dir)?
+            .context("no terminal multiplexer pane exists in requested direction")
     }
 
     fn send_text_to_pane(&self, pid: u32, pane_id: u64, text: &str) -> Result<()> {
-        Self::send_text_to_pane_raw(pid, pane_id, text)
+        let pane_id_str = pane_id.to_string();
+        let output = Self::cli_output(
+            pid,
+            &["send-text", "--pane-id", &pane_id_str, "--no-paste", text],
+        )?;
+        if !output.status.success() {
+            bail!(
+                "terminal multiplexer send-text failed: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+        }
+        Ok(())
     }
 
     fn mux_attach_args(&self, _target: String) -> Option<Vec<String>> {
@@ -826,17 +635,95 @@ impl TerminalMuxProvider for WeztermMux {
         target_window_id: Option<u64>,
         dir: Direction,
     ) -> Result<()> {
-        Self::merge_source_pane_into_focused_target_raw(
-            source_pid,
-            source_pane_id,
+        if source_pid == 0 || target_pid == 0 {
+            bail!("invalid wezterm pid for merge");
+        }
+        if source_pid != target_pid {
+            bail!("cannot merge panes across different wezterm instances");
+        }
+
+        if Self::should_use_mux_bridge() && target_window_id.is_none() {
+            logging::debug(format!(
+                "wezterm: mux bridge enabled; enqueue merge source pane {} dir={}",
+                source_pane_id, dir
+            ));
+            Self::enqueue_mux_merge_command(source_pane_id, dir)?;
+            return Ok(());
+        }
+        if Self::should_use_mux_bridge() && target_window_id.is_some() {
+            logging::debug(
+                "wezterm: skipping mux bridge because explicit merge target is available",
+            );
+        }
+        logging::debug("wezterm: mux bridge unavailable; using direct cli merge path");
+
+        let target_pane_id = if let Some(window_id) = target_window_id {
+            Self::merge_target_pane_id(target_pid, source_pane_id, Some(window_id))?
+        } else {
+            // Poll for focus transition away from source pane.
+            let mut transitioned_pane = None;
+            for attempt in 0..Self::NON_SOURCE_PANE_POLL_ATTEMPTS {
+                let panes = Self::list_panes(target_pid)?;
+                let clients = Self::list_clients(target_pid)?;
+                let pane_exists = |pane_id: u64| panes.iter().any(|p| p.pane_id == pane_id);
+                if let Some(selection) =
+                    Self::select_client_focused_pane(&clients, target_pid, pane_exists)
+                {
+                    let pane_id = selection.pane_id();
+                    if pane_id != source_pane_id {
+                        transitioned_pane = Some(pane_id);
+                        break;
+                    }
+                }
+                if attempt + 1 < Self::NON_SOURCE_PANE_POLL_ATTEMPTS {
+                    std::thread::sleep(Self::NON_SOURCE_PANE_POLL_DELAY);
+                }
+            }
+            if let Some(pane_id) = transitioned_pane {
+                logging::debug(format!(
+                    "wezterm: merge target from focused client transition = {}",
+                    pane_id
+                ));
+                pane_id
+            } else {
+                Self::merge_target_pane_id(target_pid, source_pane_id, None)?
+            }
+        };
+        if target_pane_id == source_pane_id {
+            bail!("source and target panes are the same");
+        }
+
+        let target_pane_id_str = target_pane_id.to_string();
+        let source_pane_id_str = source_pane_id.to_string();
+        let target_side = Self::split_flag(dir.opposite());
+        logging::debug(format!(
+            "wezterm: merge source pane {} into target pane {} side={}",
+            source_pane_id, target_pane_id, target_side
+        ));
+        Self::cli_stdout(
             target_pid,
-            target_window_id,
-            dir,
-        )
+            &[
+                "split-pane",
+                "--pane-id",
+                &target_pane_id_str,
+                target_side,
+                "--move-pane-id",
+                &source_pane_id_str,
+            ],
+        )?;
+        Ok(())
     }
 
     fn active_foreground_process(&self, pid: u32) -> Option<String> {
-        Self::active_foreground_process_raw(pid)
+        let pane_id = Self::focused_pane_id(pid).ok()?;
+        let panes = Self::list_panes(pid).ok()?;
+        panes
+            .into_iter()
+            .find(|p| p.pane_id == pane_id)
+            .and_then(|p| {
+                let name = p.foreground_process_name.trim().to_string();
+                (!name.is_empty()).then_some(name)
+            })
     }
 }
 
@@ -886,12 +773,18 @@ impl AppAdapter for WeztermBackend {
 impl TopologyHandler for WeztermMux {
     fn can_focus(&self, dir: Direction, pid: u32) -> Result<bool> {
         let pane_id = Self::focused_pane_id(pid)?;
-        Self::has_neighbor(pid, pane_id, dir)
+        Ok(Self::pane_in_direction(pid, pane_id, dir)?.is_some())
     }
 
     fn move_decision(&self, dir: Direction, pid: u32) -> Result<MoveDecision> {
         let pane_id = Self::focused_pane_id(pid)?;
-        let pane_count = Self::pane_count_in_active_tab(pid, pane_id)?;
+        let panes = Self::list_panes(pid)?;
+        let active_tab_id = panes
+            .iter()
+            .find(|p| p.pane_id == pane_id)
+            .map(|p| p.tab_id)
+            .context("active pane is not present in wezterm pane list")?;
+        let pane_count = panes.iter().filter(|p| p.tab_id == active_tab_id).count() as u32;
         if pane_count <= 1 {
             logging::debug(format!(
                 "wezterm: move_decision dir={dir} pane_count={} => Passthrough",
@@ -900,19 +793,19 @@ impl TopologyHandler for WeztermMux {
             return Ok(MoveDecision::Passthrough);
         }
 
-        if Self::has_neighbor(pid, pane_id, dir)? {
+        if Self::pane_in_direction(pid, pane_id, dir)?.is_some() {
             logging::debug(format!("wezterm: move_decision dir={dir} => Internal"));
             return Ok(MoveDecision::Internal);
         }
 
         let has_perpendicular_neighbor = match dir {
             Direction::North | Direction::South => {
-                Self::has_neighbor(pid, pane_id, Direction::West)?
-                    || Self::has_neighbor(pid, pane_id, Direction::East)?
+                Self::pane_in_direction(pid, pane_id, Direction::West)?.is_some()
+                    || Self::pane_in_direction(pid, pane_id, Direction::East)?.is_some()
             }
             Direction::West | Direction::East => {
-                Self::has_neighbor(pid, pane_id, Direction::North)?
-                    || Self::has_neighbor(pid, pane_id, Direction::South)?
+                Self::pane_in_direction(pid, pane_id, Direction::North)?.is_some()
+                    || Self::pane_in_direction(pid, pane_id, Direction::South)?.is_some()
             }
         };
         if has_perpendicular_neighbor {
@@ -984,19 +877,38 @@ impl TopologyHandler for WeztermMux {
 
     fn rearrange(&self, dir: Direction, pid: u32) -> Result<()> {
         let pane_id = Self::focused_pane_id(pid)?;
-        let target =
-            match dir {
-                Direction::North | Direction::South => {
-                    Self::pane_in_direction(pid, pane_id, Direction::West)?
-                        .or(Self::pane_in_direction(pid, pane_id, Direction::East)?)
-                }
-                Direction::West | Direction::East => {
-                    Self::pane_in_direction(pid, pane_id, Direction::North)?
-                        .or(Self::pane_in_direction(pid, pane_id, Direction::South)?)
-                }
+        let target = match dir {
+            Direction::North | Direction::South => {
+                Self::pane_in_direction(pid, pane_id, Direction::West)?
+                    .or(Self::pane_in_direction(pid, pane_id, Direction::East)?)
             }
-            .or(Self::fallback_rearrange_target(pid, pane_id)?)
-            .context("no perpendicular wezterm pane found for rearrange")?;
+            Direction::West | Direction::East => {
+                Self::pane_in_direction(pid, pane_id, Direction::North)?
+                    .or(Self::pane_in_direction(pid, pane_id, Direction::South)?)
+            }
+        };
+        // Fallback: pick any other pane in the same tab.
+        let target = match target {
+            Some(t) => t,
+            None => {
+                let panes = Self::list_panes(pid)?;
+                let active_tab_id = panes
+                    .iter()
+                    .find(|p| p.pane_id == pane_id)
+                    .map(|p| p.tab_id)
+                    .context("active pane is not present in wezterm pane list")?;
+                let mut candidates: Vec<u64> = panes
+                    .into_iter()
+                    .filter(|p| p.tab_id == active_tab_id && p.pane_id != pane_id)
+                    .map(|p| p.pane_id)
+                    .collect();
+                candidates.sort_unstable();
+                candidates
+                    .into_iter()
+                    .next()
+                    .context("no perpendicular wezterm pane found for rearrange")?
+            }
+        };
 
         let pane_id_str = pane_id.to_string();
         let target_str = target.to_string();
@@ -1037,7 +949,7 @@ impl TopologyHandler for WeztermMux {
 
     fn prepare_merge(&self, source_pid: Option<ProcessId>) -> Result<MergePreparation> {
         let source_pid = source_pid.context("source wezterm merge missing pid")?;
-        let source_pane_id = Self::resolve_focused_pane_for_pid(source_pid.get())?;
+        let source_pane_id = Self::focused_pane_id(source_pid.get())?;
         Ok(MergePreparation::with_payload(WeztermMuxMergePreparation {
             pane_id: source_pane_id,
             target_window_id: None,
@@ -1067,7 +979,7 @@ impl TopologyHandler for WeztermMux {
             .into_payload::<WeztermMuxMergePreparation>()
             .context("source wezterm merge missing pane id")?;
         let target_pid = target_pid.context("target wezterm merge missing pid")?;
-        Self::merge_source_pane_into_focused_target_raw(
+        self.merge_source_pane_into_focused_target(
             source_pid.get(),
             preparation.pane_id,
             target_pid.get(),
@@ -1334,6 +1246,7 @@ mux_backend = "wezterm"
         old_runtime_dir: Option<OsString>,
         old_responses_dir: Option<OsString>,
         old_log_file: Option<OsString>,
+        old_config_override: Option<OsString>,
     }
 
     impl WeztermHarness {
@@ -1415,6 +1328,7 @@ exit "$status"
             let old_runtime_dir = std::env::var_os("XDG_RUNTIME_DIR");
             let old_responses_dir = std::env::var_os("WEZTERM_TEST_RESPONSES_DIR");
             let old_log_file = std::env::var_os("WEZTERM_TEST_LOG");
+            let old_config_override = std::env::var_os("NIRI_DEEP_CONFIG");
 
             let mut path_entries = vec![bin_dir];
             if let Some(ref old) = old_path {
@@ -1436,7 +1350,22 @@ exit "$status"
                 old_runtime_dir,
                 old_responses_dir,
                 old_log_file,
+                old_config_override,
             }
+        }
+
+        /// Disable the mux bridge via config for tests that need direct CLI merge.
+        fn disable_mux_bridge(&self) {
+            let config_dir = self.base.join("config");
+            fs::create_dir_all(&config_dir).expect("config dir should be creatable");
+            let config_path = config_dir.join("config.toml");
+            fs::write(
+                &config_path,
+                "[app.terminal.wezterm]\nenabled = true\n\n[app.terminal.wezterm.mux]\nenable = false\n",
+            )
+            .expect("config file should be writable");
+            std::env::set_var("NIRI_DEEP_CONFIG", &config_path);
+            crate::config::prepare().expect("config should load");
         }
 
         fn set_response(&self, key: &str, status: i32, stdout: &str, stderr: &str) {
@@ -1498,6 +1427,13 @@ exit "$status"
             } else {
                 std::env::remove_var("WEZTERM_TEST_LOG");
             }
+
+            if let Some(value) = &self.old_config_override {
+                std::env::set_var("NIRI_DEEP_CONFIG", value);
+            } else {
+                std::env::remove_var("NIRI_DEEP_CONFIG");
+            }
+            let _ = crate::config::prepare();
 
             let _ = fs::remove_dir_all(&self.base);
         }
@@ -1747,8 +1683,7 @@ exit "$status"
         let _env_guard = env_guard();
         let pid = 9595;
         let harness = WeztermHarness::new(pid);
-        let old_bridge = std::env::var_os("NIRI_DEEP_WEZTERM_MUX_BRIDGE");
-        std::env::set_var("NIRI_DEEP_WEZTERM_MUX_BRIDGE", "0");
+        harness.disable_mux_bridge();
 
         harness.set_response(
             "list --format json",
@@ -1773,12 +1708,6 @@ exit "$status"
             .expect("merge should succeed");
         let log = harness.command_log();
         assert!(log.contains("split-pane --pane-id 9 --right --move-pane-id 10"));
-
-        if let Some(value) = old_bridge {
-            std::env::set_var("NIRI_DEEP_WEZTERM_MUX_BRIDGE", value);
-        } else {
-            std::env::remove_var("NIRI_DEEP_WEZTERM_MUX_BRIDGE");
-        }
     }
 
     #[test]
@@ -1786,22 +1715,6 @@ exit "$status"
         let _env_guard = env_guard();
         let pid = 9696;
         let harness = WeztermHarness::new(pid);
-        let bridge_dir = harness.runtime_dir.join("niri-deep-wezterm-mux");
-        fs::create_dir_all(&bridge_dir).expect("bridge dir should be creatable");
-        fs::write(bridge_dir.join("ready"), "ready\n").expect("ready marker should be writable");
-
-        harness.set_response(
-            "list --format json",
-            0,
-            r#"[{"pane_id":9,"tab_id":5,"is_active":true,"foreground_process_name":"zsh"}]"#,
-            "",
-        );
-        harness.set_response(
-            "list-clients --format json",
-            0,
-            r#"[{"pid":9696,"focused_pane_id":9}]"#,
-            "",
-        );
 
         WeztermBackend::mux_provider().merge_source_pane_into_focused_target(pid, 10, pid, None, Direction::West)
             .expect("merge enqueue should succeed");
@@ -1818,32 +1731,23 @@ exit "$status"
     }
 
     #[test]
-    fn merge_source_pane_auto_mode_uses_bridge_when_ready() {
+    fn merge_source_pane_uses_bridge_by_default() {
         let _env_guard = env_guard();
         let pid = 9707;
         let harness = WeztermHarness::new(pid);
-        let old_bridge = std::env::var_os("NIRI_DEEP_WEZTERM_MUX_BRIDGE");
-        std::env::remove_var("NIRI_DEEP_WEZTERM_MUX_BRIDGE");
-
-        let bridge_dir = harness.runtime_dir.join("niri-deep-wezterm-mux");
-        fs::create_dir_all(&bridge_dir).expect("bridge dir should be creatable");
-        fs::write(bridge_dir.join("ready"), "ready\n").expect("ready marker should be writable");
 
         WeztermBackend::mux_provider().merge_source_pane_into_focused_target(pid, 10, pid, None, Direction::West)
-            .expect("auto bridge enqueue should succeed");
+            .expect("bridge enqueue should succeed");
 
-        let bridge_cmd = bridge_dir.join("merge.cmd");
+        let bridge_cmd = harness
+            .runtime_dir
+            .join("niri-deep-wezterm-mux")
+            .join("merge.cmd");
         let payload = fs::read_to_string(&bridge_cmd).expect("bridge command file should exist");
         assert_eq!(payload.trim(), "merge 10 west");
 
         let log = harness.command_log();
         assert!(!log.contains("split-pane --pane-id"));
-
-        if let Some(value) = old_bridge {
-            std::env::set_var("NIRI_DEEP_WEZTERM_MUX_BRIDGE", value);
-        } else {
-            std::env::remove_var("NIRI_DEEP_WEZTERM_MUX_BRIDGE");
-        }
     }
 
     #[test]
@@ -1851,12 +1755,6 @@ exit "$status"
         let _env_guard = env_guard();
         let pid = 9711;
         let harness = WeztermHarness::new(pid);
-        let old_bridge = std::env::var_os("NIRI_DEEP_WEZTERM_MUX_BRIDGE");
-        std::env::remove_var("NIRI_DEEP_WEZTERM_MUX_BRIDGE");
-
-        let bridge_dir = harness.runtime_dir.join("niri-deep-wezterm-mux");
-        fs::create_dir_all(&bridge_dir).expect("bridge dir should be creatable");
-        fs::write(bridge_dir.join("ready"), "ready\n").expect("ready marker should be writable");
 
         harness.set_response(
             "list --format json",
@@ -1885,21 +1783,17 @@ exit "$status"
 
         let log = harness.command_log();
         assert!(log.contains("split-pane --pane-id 20 --right --move-pane-id 10"));
-        let bridge_cmd = bridge_dir.join("merge.cmd");
+        let bridge_cmd = harness.runtime_dir.join("niri-deep-wezterm-mux").join("merge.cmd");
         assert!(!bridge_cmd.exists());
-
-        if let Some(value) = old_bridge {
-            std::env::set_var("NIRI_DEEP_WEZTERM_MUX_BRIDGE", value);
-        } else {
-            std::env::remove_var("NIRI_DEEP_WEZTERM_MUX_BRIDGE");
-        }
     }
 
     #[test]
-    fn merge_source_pane_defaults_to_direct_cli_when_bridge_not_ready() {
+    fn merge_source_pane_uses_direct_cli_when_bridge_disabled() {
         let _env_guard = env_guard();
         let pid = 9717;
         let harness = WeztermHarness::new(pid);
+        harness.disable_mux_bridge();
+
         harness.set_response(
             "list --format json",
             0,
@@ -1920,7 +1814,7 @@ exit "$status"
         );
 
         WeztermBackend::mux_provider().merge_source_pane_into_focused_target(pid, 10, pid, None, Direction::West)
-            .expect("default direct merge should succeed");
+            .expect("direct merge should succeed when bridge is disabled");
 
         let bridge_cmd = harness
             .runtime_dir
@@ -1937,8 +1831,7 @@ exit "$status"
         let _env_guard = env_guard();
         let pid = 9797;
         let harness = WeztermHarness::new(pid);
-        let old_bridge = std::env::var_os("NIRI_DEEP_WEZTERM_MUX_BRIDGE");
-        std::env::set_var("NIRI_DEEP_WEZTERM_MUX_BRIDGE", "0");
+        harness.disable_mux_bridge();
 
         harness.set_response(
             "list --format json",
@@ -1962,12 +1855,6 @@ exit "$status"
 
         let log = harness.command_log();
         assert!(log.contains("split-pane --pane-id 0 --right --move-pane-id 1"));
-
-        if let Some(value) = old_bridge {
-            std::env::set_var("NIRI_DEEP_WEZTERM_MUX_BRIDGE", value);
-        } else {
-            std::env::remove_var("NIRI_DEEP_WEZTERM_MUX_BRIDGE");
-        }
     }
 
     #[test]
@@ -1975,8 +1862,7 @@ exit "$status"
         let _env_guard = env_guard();
         let pid = 9808;
         let harness = WeztermHarness::new(pid);
-        let old_bridge = std::env::var_os("NIRI_DEEP_WEZTERM_MUX_BRIDGE");
-        std::env::set_var("NIRI_DEEP_WEZTERM_MUX_BRIDGE", "0");
+        harness.disable_mux_bridge();
 
         harness.set_response(
             "list --format json",
@@ -2007,40 +1893,14 @@ exit "$status"
 
         let log = harness.command_log();
         assert!(log.contains("split-pane --pane-id 2 --right --move-pane-id 1"));
-
-        if let Some(value) = old_bridge {
-            std::env::set_var("NIRI_DEEP_WEZTERM_MUX_BRIDGE", value);
-        } else {
-            std::env::remove_var("NIRI_DEEP_WEZTERM_MUX_BRIDGE");
-        }
     }
 
     #[test]
-    fn merge_source_pane_config_overrides_legacy_env_var_toggle() {
+    fn merge_source_pane_config_overrides_bridge_default() {
         let _env_guard = env_guard();
         let pid = 9898;
         let harness = WeztermHarness::new(pid);
-        let old_bridge = std::env::var_os("NIRI_DEEP_WEZTERM_MUX_BRIDGE");
-        let old_config_override = std::env::var_os("NIRI_DEEP_CONFIG");
-        std::env::set_var("NIRI_DEEP_WEZTERM_MUX_BRIDGE", "1");
-
-        let config_root = harness.base.join("config-root");
-        let config_dir = config_root.join("niri-deep");
-        fs::create_dir_all(&config_dir).expect("config dir should be creatable");
-        fs::write(
-            config_dir.join("config.toml"),
-            r#"
-[app.terminal.wezterm]
-enabled = true
-mux_backend = "wezterm"
-
-[app.terminal.wezterm.mux]
-enable = false
-"#,
-        )
-        .expect("config file should be writable");
-        std::env::set_var("NIRI_DEEP_CONFIG", config_dir.join("config.toml"));
-        crate::config::prepare().expect("config should load");
+        harness.disable_mux_bridge();
 
         harness.set_response(
             "list --format json",
@@ -2071,17 +1931,5 @@ enable = false
             .join("niri-deep-wezterm-mux")
             .join("merge.cmd");
         assert!(!bridge_cmd.exists());
-
-        if let Some(value) = old_bridge {
-            std::env::set_var("NIRI_DEEP_WEZTERM_MUX_BRIDGE", value);
-        } else {
-            std::env::remove_var("NIRI_DEEP_WEZTERM_MUX_BRIDGE");
-        }
-        if let Some(value) = old_config_override {
-            std::env::set_var("NIRI_DEEP_CONFIG", value);
-        } else {
-            std::env::remove_var("NIRI_DEEP_CONFIG");
-        }
-        crate::config::prepare().expect("config should reload");
     }
 }
