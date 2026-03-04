@@ -165,7 +165,7 @@ use crate::engine::topology::Direction;
 use crate::logging;
 
 #[derive(Debug, Deserialize)]
-struct WezPaneInfo {
+struct WeztermMuxPane {
     #[serde(default)]
     window_id: u64,
     pane_id: u64,
@@ -177,18 +177,18 @@ struct WezPaneInfo {
 }
 
 #[derive(Debug, Deserialize)]
-struct WezClientInfo {
+struct WeztermMuxClient {
     pid: u32,
     focused_pane_id: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ClientFocusSelection {
+enum WeztermMuxFocusSelection {
     MatchingPid(u64),
     AnyClient(u64),
 }
 
-impl ClientFocusSelection {
+impl WeztermMuxFocusSelection {
     fn pane_id(self) -> u64 {
         match self {
             Self::MatchingPid(pane_id) | Self::AnyClient(pane_id) => pane_id,
@@ -196,12 +196,16 @@ impl ClientFocusSelection {
     }
 }
 
+/// Terminal app adapter surface (domain identity + integration helpers).
 pub struct WeztermBackend;
+/// Built-in WezTerm mux pane-grid topology handler.
+#[derive(Debug, Clone, Copy, Default)]
+struct WeztermMux;
 pub const ADAPTER_NAME: &str = "terminal";
 pub const ADAPTER_ALIASES: &[&str] = &["wezterm", "terminal"];
 pub const APP_IDS: &[&str] = &["org.wezfurlong.wezterm"];
 
-struct WeztermMergePreparation {
+struct WeztermMuxMergePreparation {
     pane_id: u64,
     target_window_id: Option<u64>,
 }
@@ -213,7 +217,7 @@ enum MuxBridgeMode {
     Auto,
 }
 
-impl WeztermBackend {
+impl WeztermMux {
     const NON_SOURCE_PANE_POLL_ATTEMPTS: usize = 3;
     const NON_SOURCE_PANE_POLL_DELAY: Duration = Duration::from_millis(10);
     const MUX_BRIDGE_READY_MAX_AGE: Duration = Duration::from_secs(2);
@@ -450,7 +454,7 @@ impl WeztermBackend {
         let not_source = |pane_id: u64| pane_id != source_pane_id;
 
         if let Some(target_window_id) = target_window_id {
-            let mut candidates: Vec<&WezPaneInfo> = panes
+            let mut candidates: Vec<&WeztermMuxPane> = panes
                 .iter()
                 .filter(|pane| pane.window_id == target_window_id && pane.pane_id != source_pane_id)
                 .collect();
@@ -476,8 +480,8 @@ impl WeztermBackend {
         }) {
             let pane_id = selection.pane_id();
             let origin = match selection {
-                ClientFocusSelection::MatchingPid(_) => "matching client focused pane",
-                ClientFocusSelection::AnyClient(_) => "any client focused pane",
+                WeztermMuxFocusSelection::MatchingPid(_) => "matching client focused pane",
+                WeztermMuxFocusSelection::AnyClient(_) => "any client focused pane",
             };
             logging::debug(format!(
                 "wezterm: merge target from {} = {}",
@@ -595,14 +599,14 @@ impl WeztermBackend {
         Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
     }
 
-    fn list_panes(pid: u32) -> Result<Vec<WezPaneInfo>> {
+    fn list_panes(pid: u32) -> Result<Vec<WeztermMuxPane>> {
         let stdout = Self::cli_stdout(pid, &["list", "--format", "json"])?;
-        let panes: Vec<WezPaneInfo> =
+        let panes: Vec<WeztermMuxPane> =
             serde_json::from_str(&stdout).context("failed to parse wezterm pane list json")?;
         Ok(panes)
     }
 
-    fn list_clients(pid: u32) -> Result<Vec<WezClientInfo>> {
+    fn list_clients(pid: u32) -> Result<Vec<WeztermMuxClient>> {
         let output = match Self::cli_output(pid, &["list-clients", "--format", "json"]) {
             Ok(output) => output,
             // Graceful fallback for older wezterm builds that may not support list-clients.
@@ -632,16 +636,16 @@ impl WeztermBackend {
             return Ok(vec![]);
         }
 
-        let clients: Vec<WezClientInfo> =
+        let clients: Vec<WeztermMuxClient> =
             serde_json::from_str(&stdout).context("failed to parse wezterm client list json")?;
         Ok(clients)
     }
 
     fn select_client_focused_pane<F>(
-        clients: &[WezClientInfo],
+        clients: &[WeztermMuxClient],
         pid: u32,
         mut accept: F,
-    ) -> Option<ClientFocusSelection>
+    ) -> Option<WeztermMuxFocusSelection>
     where
         F: FnMut(u64) -> bool,
     {
@@ -649,12 +653,14 @@ impl WeztermBackend {
             .iter()
             .find_map(|client| {
                 (client.pid == pid && client.focused_pane_id > 0 && accept(client.focused_pane_id))
-                    .then_some(ClientFocusSelection::MatchingPid(client.focused_pane_id))
+                    .then_some(WeztermMuxFocusSelection::MatchingPid(
+                        client.focused_pane_id,
+                    ))
             })
             .or_else(|| {
                 clients.iter().find_map(|client| {
                     (client.focused_pane_id > 0 && accept(client.focused_pane_id))
-                        .then_some(ClientFocusSelection::AnyClient(client.focused_pane_id))
+                        .then_some(WeztermMuxFocusSelection::AnyClient(client.focused_pane_id))
                 })
             })
     }
@@ -670,11 +676,11 @@ impl WeztermBackend {
         if let Some(selection) = Self::select_client_focused_pane(&clients, pid, |_| true) {
             let pane_id = selection.pane_id();
             match selection {
-                ClientFocusSelection::MatchingPid(_) => logging::debug(format!(
+                WeztermMuxFocusSelection::MatchingPid(_) => logging::debug(format!(
                     "wezterm: pid={} focused pane from matching client = {}",
                     pid, pane_id
                 )),
-                ClientFocusSelection::AnyClient(_) => logging::debug(format!(
+                WeztermMuxFocusSelection::AnyClient(_) => logging::debug(format!(
                     "wezterm: pid={} focused pane from any client fallback = {}",
                     pid, pane_id
                 )),
@@ -789,6 +795,50 @@ impl WeztermBackend {
     }
 }
 
+impl WeztermBackend {
+    fn mux() -> WeztermMux {
+        WeztermMux
+    }
+
+    pub fn focused_pane_for_pid(pid: u32) -> Result<u64> {
+        WeztermMux::focused_pane_for_pid(pid)
+    }
+
+    pub fn pane_neighbor_for_pid(pid: u32, pane_id: u64, dir: Direction) -> Result<u64> {
+        WeztermMux::pane_neighbor_for_pid(pid, pane_id, dir)
+    }
+
+    pub fn send_text_to_pane(pid: u32, pane_id: u64, text: &str) -> Result<()> {
+        WeztermMux::send_text_to_pane(pid, pane_id, text)
+    }
+
+    pub fn spawn_attach_command(target: String) -> Vec<String> {
+        WeztermMux::spawn_attach_command(target)
+    }
+
+    pub fn merge_source_pane_into_focused_target(
+        source_pid: u32,
+        source_pane_id: u64,
+        target_pid: u32,
+        target_window_id: Option<u64>,
+        dir: Direction,
+    ) -> Result<()> {
+        WeztermMux::merge_source_pane_into_focused_target(
+            source_pid,
+            source_pane_id,
+            target_pid,
+            target_window_id,
+            dir,
+        )
+    }
+
+    /// Returns the foreground process name of the active pane for the WezTerm
+    /// instance identified by `pid`, using `wezterm cli list --format json`.
+    pub fn active_foreground_process(pid: u32) -> Option<String> {
+        WeztermMux::active_foreground_process(pid)
+    }
+}
+
 impl AppAdapter for WeztermBackend {
     fn adapter_name(&self) -> &'static str {
         ADAPTER_NAME
@@ -815,7 +865,7 @@ impl AppAdapter for WeztermBackend {
     }
 }
 
-impl TopologyHandler for WeztermBackend {
+impl TopologyHandler for WeztermMux {
     fn can_focus(&self, dir: Direction, pid: u32) -> Result<bool> {
         let pane_id = Self::focused_pane_id(pid)?;
         Self::has_neighbor(pid, pane_id, dir)
@@ -970,7 +1020,7 @@ impl TopologyHandler for WeztermBackend {
     fn prepare_merge(&self, source_pid: Option<ProcessId>) -> Result<MergePreparation> {
         let source_pid = source_pid.context("source wezterm merge missing pid")?;
         let source_pane_id = Self::focused_pane_for_pid(source_pid.get())?;
-        Ok(MergePreparation::with_payload(WeztermMergePreparation {
+        Ok(MergePreparation::with_payload(WeztermMuxMergePreparation {
             pane_id: source_pane_id,
             target_window_id: None,
         }))
@@ -981,7 +1031,7 @@ impl TopologyHandler for WeztermBackend {
         preparation: MergePreparation,
         target_window_id: Option<u64>,
     ) -> MergePreparation {
-        preparation.map_payload::<WeztermMergePreparation>(|mut preparation| {
+        preparation.map_payload::<WeztermMuxMergePreparation>(|mut preparation| {
             preparation.target_window_id = target_window_id;
             preparation
         })
@@ -996,7 +1046,7 @@ impl TopologyHandler for WeztermBackend {
     ) -> Result<()> {
         let source_pid = source_pid.context("source wezterm merge missing pid")?;
         let preparation = preparation
-            .into_payload::<WeztermMergePreparation>()
+            .into_payload::<WeztermMuxMergePreparation>()
             .context("source wezterm merge missing pane id")?;
         let target_pid = target_pid.context("target wezterm merge missing pid")?;
         Self::merge_source_pane_into_focused_target(
@@ -1007,6 +1057,66 @@ impl TopologyHandler for WeztermBackend {
             dir,
         )
         .context("wezterm merge failed")
+    }
+}
+
+impl TopologyHandler for WeztermBackend {
+    fn can_focus(&self, dir: Direction, pid: u32) -> Result<bool> {
+        Self::mux().can_focus(dir, pid)
+    }
+
+    fn move_decision(&self, dir: Direction, pid: u32) -> Result<MoveDecision> {
+        Self::mux().move_decision(dir, pid)
+    }
+
+    fn can_resize(&self, dir: Direction, grow: bool, pid: u32) -> Result<bool> {
+        Self::mux().can_resize(dir, grow, pid)
+    }
+
+    fn focus(&self, dir: Direction, pid: u32) -> Result<()> {
+        Self::mux().focus(dir, pid)
+    }
+
+    fn move_internal(&self, dir: Direction, pid: u32) -> Result<()> {
+        Self::mux().move_internal(dir, pid)
+    }
+
+    fn resize_internal(&self, dir: Direction, grow: bool, step: i32, pid: u32) -> Result<()> {
+        Self::mux().resize_internal(dir, grow, step, pid)
+    }
+
+    fn rearrange(&self, dir: Direction, pid: u32) -> Result<()> {
+        Self::mux().rearrange(dir, pid)
+    }
+
+    fn move_out(&self, dir: Direction, pid: u32) -> Result<TearResult> {
+        Self::mux().move_out(dir, pid)
+    }
+
+    fn merge_execution_mode(&self) -> MergeExecutionMode {
+        Self::mux().merge_execution_mode()
+    }
+
+    fn prepare_merge(&self, source_pid: Option<ProcessId>) -> Result<MergePreparation> {
+        Self::mux().prepare_merge(source_pid)
+    }
+
+    fn augment_merge_preparation_for_target(
+        &self,
+        preparation: MergePreparation,
+        target_window_id: Option<u64>,
+    ) -> MergePreparation {
+        Self::mux().augment_merge_preparation_for_target(preparation, target_window_id)
+    }
+
+    fn merge_into_target(
+        &self,
+        dir: Direction,
+        source_pid: Option<ProcessId>,
+        target_pid: Option<ProcessId>,
+        preparation: MergePreparation,
+    ) -> Result<()> {
+        Self::mux().merge_into_target(dir, source_pid, target_pid, preparation)
     }
 }
 
