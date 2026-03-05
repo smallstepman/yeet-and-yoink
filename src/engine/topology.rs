@@ -2,6 +2,8 @@ use clap::ValueEnum;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
+use crate::engine::contract::MoveDecision;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SplitAxis {
     Horizontal,
@@ -188,9 +190,67 @@ pub struct GlobalLeaf {
     pub rect: Rect,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DirectionalNeighbors {
+    pub west: bool,
+    pub east: bool,
+    pub north: bool,
+    pub south: bool,
+}
+
+impl DirectionalNeighbors {
+    pub fn in_direction(self, dir: Direction) -> bool {
+        match dir {
+            Direction::West => self.west,
+            Direction::East => self.east,
+            Direction::North => self.north,
+            Direction::South => self.south,
+        }
+    }
+
+    pub fn has_perpendicular(self, dir: Direction) -> bool {
+        match dir {
+            Direction::West | Direction::East => self.north || self.south,
+            Direction::North | Direction::South => self.west || self.east,
+        }
+    }
+
+    pub fn set(&mut self, dir: Direction, value: bool) {
+        match dir {
+            Direction::West => self.west = value,
+            Direction::East => self.east = value,
+            Direction::North => self.north = value,
+            Direction::South => self.south = value,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct MoveSurface {
+    pub pane_count: u32,
+    pub neighbors: DirectionalNeighbors,
+    pub supports_rearrange: bool,
+}
+
+impl MoveSurface {
+    pub fn decision_for(self, dir: Direction) -> MoveDecision {
+        if self.pane_count <= 1 {
+            return MoveDecision::Passthrough;
+        }
+        if self.neighbors.in_direction(dir) {
+            return MoveDecision::Internal;
+        }
+        if self.supports_rearrange && self.neighbors.has_perpendicular(dir) {
+            return MoveDecision::Rearrange;
+        }
+        MoveDecision::TearOut
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{Direction, Rect};
+    use super::{Direction, DirectionalNeighbors, MoveSurface, Rect};
+    use crate::engine::contract::MoveDecision;
 
     #[test]
     fn rect_leading_and_receiving_edges_are_opposites() {
@@ -242,5 +302,44 @@ mod tests {
         assert_eq!(Direction::South.sequential(), "lower");
         assert_eq!(Direction::North.hierarchical(), "parent");
         assert_eq!(Direction::South.hierarchical(), "child");
+    }
+
+    #[test]
+    fn directional_neighbors_report_direction_and_perpendicular_presence() {
+        let mut neighbors = DirectionalNeighbors::default();
+        neighbors.set(Direction::West, true);
+        neighbors.set(Direction::North, true);
+
+        assert!(neighbors.in_direction(Direction::West));
+        assert!(!neighbors.in_direction(Direction::East));
+        assert!(neighbors.has_perpendicular(Direction::West));
+        assert!(neighbors.has_perpendicular(Direction::North));
+    }
+
+    #[test]
+    fn move_surface_classifies_by_neighbor_and_rearrange_capability() {
+        let surface = MoveSurface {
+            pane_count: 2,
+            neighbors: DirectionalNeighbors {
+                west: false,
+                east: false,
+                north: true,
+                south: false,
+            },
+            supports_rearrange: true,
+        };
+        assert!(matches!(
+            surface.decision_for(Direction::West),
+            MoveDecision::Rearrange
+        ));
+
+        let without_rearrange = MoveSurface {
+            supports_rearrange: false,
+            ..surface
+        };
+        assert!(matches!(
+            without_rearrange.decision_for(Direction::West),
+            MoveDecision::TearOut
+        ));
     }
 }

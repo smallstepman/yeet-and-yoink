@@ -3,7 +3,7 @@ use std::any::Any;
 use anyhow::{anyhow, Result};
 
 use crate::engine::runtime::ProcessId;
-use crate::engine::topology::{Direction, DomainId};
+use crate::engine::topology::{Direction, DirectionalNeighbors, DomainId, MoveSurface};
 
 pub trait ChainResolver {
     fn resolve_chain(&self, app_id: &str, pid: u32, title: &str) -> Vec<Box<dyn AppAdapter>>;
@@ -181,8 +181,30 @@ pub trait TopologyHandler {
 
     fn can_focus(&self, dir: Direction, pid: u32) -> Result<bool>;
     fn focus(&self, dir: Direction, pid: u32) -> Result<()>;
-    fn move_decision(&self, dir: Direction, pid: u32) -> Result<MoveDecision>;
+    fn move_decision(&self, dir: Direction, pid: u32) -> Result<MoveDecision> {
+        Ok(self.move_surface(pid)?.decision_for(dir))
+    }
     fn move_internal(&self, dir: Direction, pid: u32) -> Result<()>;
+
+    fn directional_neighbors(&self, pid: u32) -> Result<DirectionalNeighbors> {
+        let mut neighbors = DirectionalNeighbors::default();
+        for direction in Direction::ALL {
+            neighbors.set(direction, self.can_focus(direction, pid)?);
+        }
+        Ok(neighbors)
+    }
+
+    fn supports_rearrange_decision(&self) -> bool {
+        true
+    }
+
+    fn move_surface(&self, pid: u32) -> Result<MoveSurface> {
+        Ok(MoveSurface {
+            pane_count: self.window_count(pid)?,
+            neighbors: self.directional_neighbors(pid)?,
+            supports_rearrange: self.supports_rearrange_decision(),
+        })
+    }
 
     /// Optional primitive for "edge in a direction" queries.
     fn at_side(&self, dir: Direction, pid: u32) -> Result<bool> {
@@ -303,4 +325,54 @@ pub fn unsupported_operation(adapter: &str, operation: &str) -> anyhow::Error {
 
 fn legacy_pid(pid: Option<ProcessId>) -> u32 {
     pid.map(ProcessId::get).unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{MoveDecision, TearResult, TopologyHandler};
+    use crate::engine::topology::{Direction, DirectionalNeighbors};
+
+    struct SharedDecisionAdapter;
+
+    impl TopologyHandler for SharedDecisionAdapter {
+        fn directional_neighbors(&self, _pid: u32) -> anyhow::Result<DirectionalNeighbors> {
+            Ok(DirectionalNeighbors {
+                west: false,
+                east: false,
+                north: true,
+                south: false,
+            })
+        }
+
+        fn window_count(&self, _pid: u32) -> anyhow::Result<u32> {
+            Ok(2)
+        }
+
+        fn can_focus(&self, _dir: Direction, _pid: u32) -> anyhow::Result<bool> {
+            Ok(false)
+        }
+
+        fn focus(&self, _dir: Direction, _pid: u32) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        fn move_internal(&self, _dir: Direction, _pid: u32) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        fn move_out(&self, _dir: Direction, _pid: u32) -> anyhow::Result<TearResult> {
+            Ok(TearResult {
+                spawn_command: None,
+            })
+        }
+    }
+
+    #[test]
+    fn topology_handler_move_surface_classifies_decisions() {
+        let adapter = SharedDecisionAdapter;
+        assert!(matches!(
+            adapter.move_decision(Direction::West, 0).expect("decision"),
+            MoveDecision::Rearrange
+        ));
+    }
 }

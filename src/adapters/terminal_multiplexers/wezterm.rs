@@ -13,7 +13,7 @@ use crate::engine::contract::{
     TerminalMultiplexerProvider, TopologyHandler,
 };
 use crate::engine::runtime::ProcessId;
-use crate::engine::topology::Direction;
+use crate::engine::topology::{Direction, DirectionalNeighbors, MoveSurface};
 use crate::logging;
 
 #[derive(Debug, Deserialize)]
@@ -540,6 +540,29 @@ impl TerminalMultiplexerProvider for WeztermMux {
 }
 
 impl TopologyHandler for WeztermMux {
+    fn directional_neighbors(&self, pid: u32) -> Result<DirectionalNeighbors> {
+        let pane_id = Self::focused_pane_id(pid)?;
+        let mut neighbors = DirectionalNeighbors::default();
+        for direction in Direction::ALL {
+            neighbors.set(
+                direction,
+                Self::pane_in_direction(pid, pane_id, direction)?.is_some(),
+            );
+        }
+        Ok(neighbors)
+    }
+
+    fn window_count(&self, pid: u32) -> Result<u32> {
+        let pane_id = Self::focused_pane_id(pid)?;
+        let panes = Self::list_panes(pid)?;
+        let active_tab_id = panes
+            .iter()
+            .find(|p| p.pane_id == pane_id)
+            .map(|p| p.tab_id)
+            .context("active pane is not present in wezterm pane list")?;
+        Ok(panes.iter().filter(|p| p.tab_id == active_tab_id).count() as u32)
+    }
+
     fn can_focus(&self, dir: Direction, pid: u32) -> Result<bool> {
         let pane_id = Self::focused_pane_id(pid)?;
         Ok(Self::pane_in_direction(pid, pane_id, dir)?.is_some())
@@ -554,36 +577,43 @@ impl TopologyHandler for WeztermMux {
             .map(|p| p.tab_id)
             .context("active pane is not present in wezterm pane list")?;
         let pane_count = panes.iter().filter(|p| p.tab_id == active_tab_id).count() as u32;
-        if pane_count <= 1 {
-            logging::debug(format!(
-                "wezterm: move_decision dir={dir} pane_count={} => Passthrough",
-                pane_count
-            ));
-            return Ok(MoveDecision::Passthrough);
-        }
-
-        if Self::pane_in_direction(pid, pane_id, dir)?.is_some() {
-            logging::debug(format!("wezterm: move_decision dir={dir} => Internal"));
-            return Ok(MoveDecision::Internal);
-        }
-
-        let has_perpendicular_neighbor = match dir {
-            Direction::North | Direction::South => {
-                Self::pane_in_direction(pid, pane_id, Direction::West)?.is_some()
-                    || Self::pane_in_direction(pid, pane_id, Direction::East)?.is_some()
+        let mut neighbors = DirectionalNeighbors::default();
+        neighbors.set(dir, Self::pane_in_direction(pid, pane_id, dir)?.is_some());
+        if !neighbors.in_direction(dir) {
+            match dir {
+                Direction::North | Direction::South => {
+                    neighbors.set(
+                        Direction::West,
+                        Self::pane_in_direction(pid, pane_id, Direction::West)?.is_some(),
+                    );
+                    neighbors.set(
+                        Direction::East,
+                        Self::pane_in_direction(pid, pane_id, Direction::East)?.is_some(),
+                    );
+                }
+                Direction::West | Direction::East => {
+                    neighbors.set(
+                        Direction::North,
+                        Self::pane_in_direction(pid, pane_id, Direction::North)?.is_some(),
+                    );
+                    neighbors.set(
+                        Direction::South,
+                        Self::pane_in_direction(pid, pane_id, Direction::South)?.is_some(),
+                    );
+                }
             }
-            Direction::West | Direction::East => {
-                Self::pane_in_direction(pid, pane_id, Direction::North)?.is_some()
-                    || Self::pane_in_direction(pid, pane_id, Direction::South)?.is_some()
-            }
-        };
-        if has_perpendicular_neighbor {
-            logging::debug(format!("wezterm: move_decision dir={dir} => Rearrange"));
-            return Ok(MoveDecision::Rearrange);
         }
-
-        logging::debug(format!("wezterm: move_decision dir={dir} => TearOut"));
-        Ok(MoveDecision::TearOut)
+        let decision = MoveSurface {
+            pane_count,
+            neighbors,
+            supports_rearrange: true,
+        }
+        .decision_for(dir);
+        logging::debug(format!(
+            "wezterm: move_decision dir={dir} => {:?}",
+            decision
+        ));
+        Ok(decision)
     }
 
     fn can_resize(&self, _dir: Direction, _grow: bool, _pid: u32) -> Result<bool> {

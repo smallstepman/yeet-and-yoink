@@ -282,7 +282,9 @@ mod tests {
     use crate::adapters::terminal_multiplexers::tmux::TmuxMuxProvider;
     use crate::adapters::terminal_multiplexers::wezterm::WeztermMux;
     use crate::adapters::terminal_multiplexers::zellij::ZellijMuxProvider;
-    use crate::engine::contract::{AppAdapter, MoveDecision, TerminalMultiplexerProvider, TopologyHandler};
+    use crate::engine::contract::{
+        AppAdapter, MoveDecision, TerminalMultiplexerProvider, TopologyHandler,
+    };
     use crate::engine::topology::Direction;
 
     static NEXT_ID: AtomicU64 = AtomicU64::new(1);

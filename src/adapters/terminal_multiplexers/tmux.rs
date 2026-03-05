@@ -7,7 +7,7 @@ use crate::engine::contract::{
     TearResult, TerminalMultiplexerProvider, TopologyHandler,
 };
 use crate::engine::runtime::{self, CommandContext, ProcessId};
-use crate::engine::topology::Direction;
+use crate::engine::topology::{Direction, DirectionalNeighbors};
 
 pub struct Tmux {
     /// Tmux session name, used for attach/spawn operations.
@@ -222,7 +222,9 @@ impl Tmux {
             let height = fields
                 .next()
                 .and_then(|value| value.parse::<i32>().ok())
-                .with_context(|| format!("invalid tmux pane height in list-panes output: {line}"))?;
+                .with_context(|| {
+                    format!("invalid tmux pane height in list-panes output: {line}")
+                })?;
             panes.push(TmuxPaneGeom {
                 pane_id,
                 left,
@@ -252,7 +254,11 @@ impl Tmux {
             .with_context(|| format!("source tmux pane %{source_pane_id} missing from window"))?;
 
         let mut best: Option<(u64, i32, i32)> = None;
-        for pane in panes.iter().copied().filter(|pane| pane.pane_id != source_pane_id) {
+        for pane in panes
+            .iter()
+            .copied()
+            .filter(|pane| pane.pane_id != source_pane_id)
+        {
             let (distance, overlap) = match dir {
                 Direction::West => {
                     if pane.left + pane.width <= source.left {
@@ -539,7 +545,9 @@ impl TopologyHandler for TmuxMuxProvider {
             None,
             dir,
         )?;
-        if preparation.session_name.starts_with(DETACHED_SESSION_PREFIX)
+        if preparation
+            .session_name
+            .starts_with(DETACHED_SESSION_PREFIX)
             && preparation.session_name != target_session_name
         {
             let detached_session = preparation.session_name.clone();
@@ -585,6 +593,26 @@ impl AppAdapter for Tmux {
 }
 
 impl TopologyHandler for Tmux {
+    fn directional_neighbors(&self, _pid: u32) -> Result<DirectionalNeighbors> {
+        Ok(DirectionalNeighbors {
+            west: self.query_client_pane("#{pane_at_left}")? != "1",
+            east: self.query_client_pane("#{pane_at_right}")? != "1",
+            north: self.query_client_pane("#{pane_at_top}")? != "1",
+            south: self.query_client_pane("#{pane_at_bottom}")? != "1",
+        })
+    }
+
+    fn supports_rearrange_decision(&self) -> bool {
+        false
+    }
+
+    fn window_count(&self, _pid: u32) -> Result<u32> {
+        Ok(self
+            .query_client_pane("#{window_panes}")?
+            .parse()
+            .unwrap_or(1))
+    }
+
     fn can_focus(&self, dir: Direction, _pid: u32) -> Result<bool> {
         let format = match dir.positional() {
             "left" => "#{pane_at_left}",
@@ -597,15 +625,7 @@ impl TopologyHandler for Tmux {
     }
 
     fn move_decision(&self, dir: Direction, pid: u32) -> Result<MoveDecision> {
-        let panes: u32 = self.query_client_pane("#{window_panes}")?.parse().unwrap_or(1);
-        if panes <= 1 {
-            return Ok(MoveDecision::Passthrough);
-        }
-        if self.can_focus(dir, pid)? {
-            Ok(MoveDecision::Internal)
-        } else {
-            Ok(MoveDecision::TearOut)
-        }
+        Ok(self.move_surface(pid)?.decision_for(dir))
     }
 
     fn focus(&self, dir: Direction, _pid: u32) -> Result<()> {
@@ -680,8 +700,12 @@ impl TopologyHandler for Tmux {
         }
         let target = String::from_utf8_lossy(&output.stdout).trim().to_string();
         let attach_target = self.detach_target_for_new_client(&target)?;
-        let mut spawn_args: Vec<String> =
-            vec!["tmux".into(), "attach-session".into(), "-t".into(), attach_target];
+        let mut spawn_args: Vec<String> = vec![
+            "tmux".into(),
+            "attach-session".into(),
+            "-t".into(),
+            attach_target,
+        ];
         if !self.terminal_launch_prefix.is_empty() {
             let mut cmd = self.terminal_launch_prefix.clone();
             cmd.append(&mut spawn_args);
