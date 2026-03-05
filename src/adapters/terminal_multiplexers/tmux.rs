@@ -10,13 +10,18 @@ use crate::engine::runtime::{self, CommandContext, ProcessId};
 use crate::engine::topology::{Direction, DirectionalNeighbors};
 
 pub struct Tmux {
-    /// Tmux session name, used for attach/spawn operations.
-    session: String,
-    /// Tmux client pid that belongs to the hosting terminal window.
-    client_pid: u32,
+    session: TmuxSession,
     /// Terminal launch prefix for composing spawn commands (e.g. `["wezterm", "-e"]`).
     /// Set by the terminal host that detected this tmux session.
     terminal_launch_prefix: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+struct TmuxSession {
+    /// Tmux session name, used for attach/spawn operations.
+    name: String,
+    /// Tmux client pid that belongs to the hosting terminal window.
+    client_pid: u32,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -40,6 +45,24 @@ struct TmuxPaneGeom {
     height: i32,
 }
 
+trait TmuxSessionAccess: Sized {
+    fn from_client_pid(client_pid: u32) -> Option<Self>;
+    fn for_terminal_pid(terminal_pid: u32) -> Result<Self>;
+    fn focused_pane_id_for_client(&self) -> Result<u64>;
+    fn query_pane(&self, pane_id: u64, format: &str) -> Result<String>;
+    fn query_client_pane(&self, format: &str) -> Result<String>;
+    fn list_panes_for_window(&self, window_ref: &str) -> Result<Vec<TmuxPaneGeom>>;
+    fn overlap_len(a_start: i32, a_len: i32, b_start: i32, b_len: i32) -> i32;
+    fn directional_neighbor_pane_id(&self, source_pane_id: u64, dir: Direction) -> Result<u64>;
+    fn directional_neighbors(&self) -> Result<DirectionalNeighbors>;
+    fn window_count(&self) -> Result<u32>;
+    fn focus(&self, dir: Direction) -> Result<()>;
+    fn move_internal(&self, dir: Direction) -> Result<()>;
+    fn detach_target_for_new_client(&self, break_target: &str) -> Result<String>;
+    fn move_out(&self, terminal_launch_prefix: &[String]) -> Result<TearResult>;
+    fn nvim_in_current_pane(&self) -> Option<u32>;
+}
+
 // ---------------------------------------------------------------------------
 // Tmux — constructors, CLI primitive, pub(crate) queries
 // ---------------------------------------------------------------------------
@@ -52,6 +75,22 @@ impl Tmux {
         client_pid: u32,
         terminal_launch_prefix: Vec<String>,
     ) -> Option<Tmux> {
+        let session = TmuxSession::from_client_pid(client_pid)?;
+        Some(Tmux {
+            session,
+            terminal_launch_prefix,
+        })
+    }
+
+    /// Check if the active pane in this session is running nvim/vim.
+    /// Returns the nvim process PID if found.
+    pub(crate) fn nvim_in_current_pane(&self) -> Option<u32> {
+        self.session.nvim_in_current_pane()
+    }
+}
+
+impl TmuxSessionAccess for TmuxSession {
+    fn from_client_pid(client_pid: u32) -> Option<TmuxSession> {
         let output = runtime::run_command_output(
             "tmux",
             &["list-clients", "-F", "#{client_pid}:#{session_name}"],
@@ -70,10 +109,9 @@ impl Tmux {
         for line in stdout.lines() {
             if let Some((pid_str, session)) = line.split_once(':') {
                 if pid_str == target {
-                    return Some(Tmux {
-                        session: session.to_string(),
+                    return Some(TmuxSession {
+                        name: session.to_string(),
                         client_pid,
-                        terminal_launch_prefix: terminal_launch_prefix.clone(),
                     });
                 }
             }
@@ -84,7 +122,7 @@ impl Tmux {
     /// Resolve a Tmux session from a terminal PID (walks process tree to find
     /// tmux client). Used by `TmuxMuxProvider` when tmux is the mux backend
     /// under a terminal host.
-    fn for_terminal_pid(terminal_pid: u32) -> Result<Tmux> {
+    fn for_terminal_pid(terminal_pid: u32) -> Result<TmuxSession> {
         let mut tmux_candidates: Vec<u32> = Vec::new();
         if runtime::process_comm(terminal_pid).as_deref() == Some("tmux") {
             tmux_candidates.push(terminal_pid);
@@ -108,7 +146,7 @@ impl Tmux {
         let candidates_debug = format!("{tmux_candidates:?}");
         tmux_candidates
             .into_iter()
-            .find_map(|candidate_pid| Self::from_client_pid(candidate_pid, vec![]))
+            .find_map(Self::from_client_pid)
             .with_context(|| {
                 format!(
                     "tmux mux backend selected but unable to map terminal pid {} to tmux client candidates={}",
@@ -317,6 +355,66 @@ impl Tmux {
         })
     }
 
+    fn directional_neighbors(&self) -> Result<DirectionalNeighbors> {
+        Ok(DirectionalNeighbors {
+            west: self.query_client_pane("#{pane_at_left}")? != "1",
+            east: self.query_client_pane("#{pane_at_right}")? != "1",
+            north: self.query_client_pane("#{pane_at_top}")? != "1",
+            south: self.query_client_pane("#{pane_at_bottom}")? != "1",
+        })
+    }
+
+    fn window_count(&self) -> Result<u32> {
+        Ok(self
+            .query_client_pane("#{window_panes}")?
+            .parse()
+            .unwrap_or(1))
+    }
+
+    fn focus(&self, dir: Direction) -> Result<()> {
+        let flag = dir.tmux_flag();
+        let pane_ref = format!("%{}", self.focused_pane_id_for_client()?);
+        runtime::run_command_status(
+            "tmux",
+            &["select-pane", "-t", &pane_ref, flag],
+            &CommandContext {
+                adapter: "tmux",
+                action: "select-pane",
+                target: Some(pane_ref.clone()),
+            },
+        )
+        .with_context(|| format!("tmux select-pane {flag} failed"))
+    }
+
+    fn move_internal(&self, dir: Direction) -> Result<()> {
+        let source_pane_id = self.focused_pane_id_for_client()?;
+        let target_pane_id = self.directional_neighbor_pane_id(source_pane_id, dir)?;
+        let source_ref = format!("%{source_pane_id}");
+        let target_ref = format!("%{target_pane_id}");
+        runtime::run_command_status(
+            "tmux",
+            &["swap-pane", "-s", &source_ref, "-t", &target_ref],
+            &CommandContext {
+                adapter: "tmux",
+                action: "swap-pane",
+                target: Some(format!("{source_ref}->{target_ref}")),
+            },
+        )
+        .context("tmux swap-pane failed")?;
+        // Keep focus on the moved pane so repeated directional moves continue from
+        // that pane (and can tear out at edges instead of swapping back).
+        runtime::run_command_status(
+            "tmux",
+            &["select-pane", "-t", &source_ref],
+            &CommandContext {
+                adapter: "tmux",
+                action: "select-pane",
+                target: Some(source_ref.clone()),
+            },
+        )
+        .context("tmux select-pane after swap failed")
+    }
+
     fn detach_target_for_new_client(&self, break_target: &str) -> Result<String> {
         let (source_session, window_index) = break_target
             .split_once(':')
@@ -346,9 +444,53 @@ impl Tmux {
         Ok(format!("{detached_session}:{window_index}"))
     }
 
+    fn move_out(&self, terminal_launch_prefix: &[String]) -> Result<TearResult> {
+        let pane_ref = format!("%{}", self.focused_pane_id_for_client()?);
+        let output = runtime::run_command_output(
+            "tmux",
+            &[
+                "break-pane",
+                "-s",
+                &pane_ref,
+                "-d",
+                "-P",
+                "-F",
+                "#{session_name}:#{window_index}",
+            ],
+            &CommandContext {
+                adapter: "tmux",
+                action: "break-pane",
+                target: Some(pane_ref.clone()),
+            },
+        )
+        .context("failed to run tmux break-pane")?;
+        if !output.status.success() {
+            bail!(
+                "tmux break-pane failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        let target = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let attach_target = self.detach_target_for_new_client(&target)?;
+        let mut spawn_args: Vec<String> = vec![
+            "tmux".into(),
+            "attach-session".into(),
+            "-t".into(),
+            attach_target,
+        ];
+        if !terminal_launch_prefix.is_empty() {
+            let mut cmd = terminal_launch_prefix.to_vec();
+            cmd.append(&mut spawn_args);
+            spawn_args = cmd;
+        }
+        Ok(TearResult {
+            spawn_command: Some(spawn_args),
+        })
+    }
+
     /// Check if the active pane in this session is running nvim/vim.
     /// Returns the nvim process PID if found.
-    pub(crate) fn nvim_in_current_pane(&self) -> Option<u32> {
+    fn nvim_in_current_pane(&self) -> Option<u32> {
         let cmd = self.query_client_pane("#{pane_current_command}").ok()?;
         if cmd != "nvim" && cmd != "vim" {
             return None;
@@ -356,6 +498,17 @@ impl Tmux {
         let pane_pid: u32 = self.query_client_pane("#{pane_pid}").ok()?.parse().ok()?;
         let nvim_pids = runtime::find_descendants_by_comm(pane_pid, "nvim");
         nvim_pids.first().copied()
+    }
+}
+
+impl TmuxMuxProvider {
+    fn with_session<T>(
+        &self,
+        pid: u32,
+        apply: impl FnOnce(&TmuxSession) -> Result<T>,
+    ) -> Result<T> {
+        let session = TmuxSession::for_terminal_pid(pid)?;
+        apply(&session)
     }
 }
 
@@ -378,48 +531,49 @@ impl TerminalMultiplexerProvider for TmuxMuxProvider {
     }
 
     fn focused_pane_for_pid(&self, pid: u32) -> Result<u64> {
-        let tmux = Tmux::for_terminal_pid(pid)?;
-        tmux.focused_pane_id_for_client()
+        self.with_session(pid, TmuxSession::focused_pane_id_for_client)
     }
 
     fn pane_neighbor_for_pid(&self, pid: u32, pane_id: u64, dir: Direction) -> Result<u64> {
-        let tmux = Tmux::for_terminal_pid(pid)?;
-        tmux.directional_neighbor_pane_id(pane_id, dir)
+        self.with_session(pid, |session| {
+            session.directional_neighbor_pane_id(pane_id, dir)
+        })
     }
 
     fn send_text_to_pane(&self, pid: u32, pane_id: u64, text: &str) -> Result<()> {
-        let tmux = Tmux::for_terminal_pid(pid)?;
-        let pane_ref = format!("%{pane_id}");
-        let has_trailing_newline = text.ends_with('\n');
-        let lines: Vec<&str> = text.split('\n').collect();
-        for (index, line) in lines.iter().enumerate() {
-            if !line.is_empty() {
-                runtime::run_command_status(
-                    "tmux",
-                    &["send-keys", "-t", &pane_ref, "-l", line],
-                    &CommandContext {
-                        adapter: "tmux",
-                        action: "send-keys",
-                        target: Some(tmux.session.clone()),
-                    },
-                )
-                .with_context(|| format!("tmux send-keys literal failed for pane {pane_id}"))?;
+        self.with_session(pid, |session| {
+            let pane_ref = format!("%{pane_id}");
+            let has_trailing_newline = text.ends_with('\n');
+            let lines: Vec<&str> = text.split('\n').collect();
+            for (index, line) in lines.iter().enumerate() {
+                if !line.is_empty() {
+                    runtime::run_command_status(
+                        "tmux",
+                        &["send-keys", "-t", &pane_ref, "-l", line],
+                        &CommandContext {
+                            adapter: "tmux",
+                            action: "send-keys",
+                            target: Some(session.name.clone()),
+                        },
+                    )
+                    .with_context(|| format!("tmux send-keys literal failed for pane {pane_id}"))?;
+                }
+                let is_last = index + 1 == lines.len();
+                if !is_last || has_trailing_newline {
+                    runtime::run_command_status(
+                        "tmux",
+                        &["send-keys", "-t", &pane_ref, "Enter"],
+                        &CommandContext {
+                            adapter: "tmux",
+                            action: "send-keys",
+                            target: Some(session.name.clone()),
+                        },
+                    )
+                    .with_context(|| format!("tmux send-keys enter failed for pane {pane_id}"))?;
+                }
             }
-            let is_last = index + 1 == lines.len();
-            if !is_last || has_trailing_newline {
-                runtime::run_command_status(
-                    "tmux",
-                    &["send-keys", "-t", &pane_ref, "Enter"],
-                    &CommandContext {
-                        adapter: "tmux",
-                        action: "send-keys",
-                        target: Some(tmux.session.clone()),
-                    },
-                )
-                .with_context(|| format!("tmux send-keys enter failed for pane {pane_id}"))?;
-            }
-        }
-        Ok(())
+            Ok(())
+        })
     }
 
     fn mux_attach_args(&self, target: String) -> Option<Vec<String>> {
@@ -439,45 +593,48 @@ impl TerminalMultiplexerProvider for TmuxMuxProvider {
         _target_window_id: Option<u64>,
         dir: Direction,
     ) -> Result<()> {
-        let tmux = Tmux::for_terminal_pid(target_pid)?;
-        let target_pane_id = tmux.focused_pane_id_for_client()?;
-        if target_pane_id == source_pane_id {
-            bail!("source and target tmux panes are the same");
-        }
-        let source_ref = format!("%{source_pane_id}");
-        let target_ref = format!("%{target_pane_id}");
-        let target_side = dir.opposite();
-        let split_axis = match target_side {
-            Direction::West | Direction::East => "-h",
-            Direction::North | Direction::South => "-v",
-        };
-        let mut args = vec![
-            "join-pane".to_string(),
-            "-s".to_string(),
-            source_ref,
-            "-t".to_string(),
-            target_ref,
-            split_axis.to_string(),
-        ];
-        if matches!(target_side, Direction::West | Direction::North) {
-            args.push("-b".to_string());
-        }
-        let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
-        runtime::run_command_status(
-            "tmux",
-            &arg_refs,
-            &CommandContext {
-                adapter: "tmux",
-                action: "join-pane",
-                target: Some(tmux.session.clone()),
-            },
-        )
-        .context("tmux join-pane failed for merge")
+        self.with_session(target_pid, |session| {
+            let target_pane_id = session.focused_pane_id_for_client()?;
+            if target_pane_id == source_pane_id {
+                bail!("source and target tmux panes are the same");
+            }
+            let source_ref = format!("%{source_pane_id}");
+            let target_ref = format!("%{target_pane_id}");
+            let target_side = dir.opposite();
+            let split_axis = match target_side {
+                Direction::West | Direction::East => "-h",
+                Direction::North | Direction::South => "-v",
+            };
+            let mut args = vec![
+                "join-pane".to_string(),
+                "-s".to_string(),
+                source_ref,
+                "-t".to_string(),
+                target_ref,
+                split_axis.to_string(),
+            ];
+            if matches!(target_side, Direction::West | Direction::North) {
+                args.push("-b".to_string());
+            }
+            let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+            runtime::run_command_status(
+                "tmux",
+                &arg_refs,
+                &CommandContext {
+                    adapter: "tmux",
+                    action: "join-pane",
+                    target: Some(session.name.clone()),
+                },
+            )
+            .context("tmux join-pane failed for merge")
+        })
     }
 
     fn active_foreground_process(&self, pid: u32) -> Option<String> {
-        let tmux = Tmux::for_terminal_pid(pid).ok()?;
-        tmux.query_client_pane("#{pane_current_command}").ok()
+        self.with_session(pid, |session| {
+            session.query_client_pane("#{pane_current_command}")
+        })
+        .ok()
     }
 }
 
@@ -487,11 +644,25 @@ impl TerminalMultiplexerProvider for TmuxMuxProvider {
 
 impl TopologyHandler for TmuxMuxProvider {
     fn can_focus(&self, dir: Direction, pid: u32) -> Result<bool> {
-        Tmux::for_terminal_pid(pid)?.can_focus(dir, pid)
+        self.with_session(pid, |session| {
+            Ok(session.directional_neighbors()?.in_direction(dir))
+        })
     }
 
     fn move_decision(&self, dir: Direction, pid: u32) -> Result<MoveDecision> {
-        Tmux::for_terminal_pid(pid)?.move_decision(dir, pid)
+        Ok(self.move_surface(pid)?.decision_for(dir))
+    }
+
+    fn directional_neighbors(&self, pid: u32) -> Result<DirectionalNeighbors> {
+        self.with_session(pid, TmuxSession::directional_neighbors)
+    }
+
+    fn supports_rearrange_decision(&self) -> bool {
+        false
+    }
+
+    fn window_count(&self, pid: u32) -> Result<u32> {
+        self.with_session(pid, TmuxSession::window_count)
     }
 
     fn can_resize(&self, _dir: Direction, _grow: bool, _pid: u32) -> Result<bool> {
@@ -499,15 +670,15 @@ impl TopologyHandler for TmuxMuxProvider {
     }
 
     fn focus(&self, dir: Direction, pid: u32) -> Result<()> {
-        Tmux::for_terminal_pid(pid)?.focus(dir, pid)
+        self.with_session(pid, |session| session.focus(dir))
     }
 
     fn move_internal(&self, dir: Direction, pid: u32) -> Result<()> {
-        Tmux::for_terminal_pid(pid)?.move_internal(dir, pid)
+        self.with_session(pid, |session| session.move_internal(dir))
     }
 
-    fn move_out(&self, dir: Direction, pid: u32) -> Result<TearResult> {
-        Tmux::for_terminal_pid(pid)?.move_out(dir, pid)
+    fn move_out(&self, _dir: Direction, pid: u32) -> Result<TearResult> {
+        self.with_session(pid, |session| session.move_out(&[]))
     }
 
     fn merge_execution_mode(&self) -> MergeExecutionMode {
@@ -516,9 +687,11 @@ impl TopologyHandler for TmuxMuxProvider {
 
     fn prepare_merge(&self, source_pid: Option<ProcessId>) -> Result<MergePreparation> {
         let source_pid = source_pid.context("source tmux merge missing pid")?;
-        let source_tmux = Tmux::for_terminal_pid(source_pid.get())?;
-        let pane_id = source_tmux.focused_pane_id_for_client()?;
-        let session_name = source_tmux.query_pane(pane_id, "#{session_name}")?;
+        let (pane_id, session_name) = self.with_session(source_pid.get(), |session| {
+            let pane_id = session.focused_pane_id_for_client()?;
+            let session_name = session.query_pane(pane_id, "#{session_name}")?;
+            Ok((pane_id, session_name))
+        })?;
         Ok(MergePreparation::with_payload(TmuxMuxMergePreparation {
             pane_id,
             session_name,
@@ -533,8 +706,8 @@ impl TopologyHandler for TmuxMuxProvider {
         preparation: MergePreparation,
     ) -> Result<()> {
         let target_pid = target_pid.context("target tmux merge missing pid")?;
-        let target_tmux = Tmux::for_terminal_pid(target_pid.get())?;
-        let target_session_name = target_tmux.session.clone();
+        let target_session_name =
+            self.with_session(target_pid.get(), |session| Ok(session.name.clone()))?;
         let preparation = preparation
             .into_payload::<TmuxMuxMergePreparation>()
             .context("source tmux merge missing pane/session metadata")?;
@@ -594,12 +767,7 @@ impl AppAdapter for Tmux {
 
 impl TopologyHandler for Tmux {
     fn directional_neighbors(&self, _pid: u32) -> Result<DirectionalNeighbors> {
-        Ok(DirectionalNeighbors {
-            west: self.query_client_pane("#{pane_at_left}")? != "1",
-            east: self.query_client_pane("#{pane_at_right}")? != "1",
-            north: self.query_client_pane("#{pane_at_top}")? != "1",
-            south: self.query_client_pane("#{pane_at_bottom}")? != "1",
-        })
+        self.session.directional_neighbors()
     }
 
     fn supports_rearrange_decision(&self) -> bool {
@@ -607,21 +775,11 @@ impl TopologyHandler for Tmux {
     }
 
     fn window_count(&self, _pid: u32) -> Result<u32> {
-        Ok(self
-            .query_client_pane("#{window_panes}")?
-            .parse()
-            .unwrap_or(1))
+        self.session.window_count()
     }
 
     fn can_focus(&self, dir: Direction, _pid: u32) -> Result<bool> {
-        let format = match dir.positional() {
-            "left" => "#{pane_at_left}",
-            "right" => "#{pane_at_right}",
-            "top" => "#{pane_at_top}",
-            "bottom" => "#{pane_at_bottom}",
-            _ => unreachable!("invalid positional direction"),
-        };
-        Ok(self.query_client_pane(format)? != "1")
+        Ok(self.directional_neighbors(0)?.in_direction(dir))
     }
 
     fn move_decision(&self, dir: Direction, pid: u32) -> Result<MoveDecision> {
@@ -629,104 +787,30 @@ impl TopologyHandler for Tmux {
     }
 
     fn focus(&self, dir: Direction, _pid: u32) -> Result<()> {
-        let flag = dir.tmux_flag();
-        let pane_ref = format!("%{}", self.focused_pane_id_for_client()?);
-        runtime::run_command_status(
-            "tmux",
-            &["select-pane", "-t", &pane_ref, flag],
-            &CommandContext {
-                adapter: "tmux",
-                action: "select-pane",
-                target: Some(pane_ref.clone()),
-            },
-        )
-        .with_context(|| format!("tmux select-pane {flag} failed"))
+        self.session.focus(dir)
     }
 
     fn move_internal(&self, dir: Direction, _pid: u32) -> Result<()> {
-        let source_pane_id = self.focused_pane_id_for_client()?;
-        let target_pane_id = self.directional_neighbor_pane_id(source_pane_id, dir)?;
-        let source_ref = format!("%{source_pane_id}");
-        let target_ref = format!("%{target_pane_id}");
-        runtime::run_command_status(
-            "tmux",
-            &["swap-pane", "-s", &source_ref, "-t", &target_ref],
-            &CommandContext {
-                adapter: "tmux",
-                action: "swap-pane",
-                target: Some(format!("{source_ref}->{target_ref}")),
-            },
-        )
-        .context("tmux swap-pane failed")?;
-        // Keep focus on the moved pane so repeated directional moves continue from
-        // that pane (and can tear out at edges instead of swapping back).
-        runtime::run_command_status(
-            "tmux",
-            &["select-pane", "-t", &source_ref],
-            &CommandContext {
-                adapter: "tmux",
-                action: "select-pane",
-                target: Some(source_ref.clone()),
-            },
-        )
-        .context("tmux select-pane after swap failed")
+        self.session.move_internal(dir)
     }
 
     fn move_out(&self, _dir: Direction, _pid: u32) -> Result<TearResult> {
-        let pane_ref = format!("%{}", self.focused_pane_id_for_client()?);
-        let output = runtime::run_command_output(
-            "tmux",
-            &[
-                "break-pane",
-                "-s",
-                &pane_ref,
-                "-d",
-                "-P",
-                "-F",
-                "#{session_name}:#{window_index}",
-            ],
-            &CommandContext {
-                adapter: "tmux",
-                action: "break-pane",
-                target: Some(pane_ref.clone()),
-            },
-        )
-        .context("failed to run tmux break-pane")?;
-        if !output.status.success() {
-            bail!(
-                "tmux break-pane failed: {}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-        }
-        let target = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        let attach_target = self.detach_target_for_new_client(&target)?;
-        let mut spawn_args: Vec<String> = vec![
-            "tmux".into(),
-            "attach-session".into(),
-            "-t".into(),
-            attach_target,
-        ];
-        if !self.terminal_launch_prefix.is_empty() {
-            let mut cmd = self.terminal_launch_prefix.clone();
-            cmd.append(&mut spawn_args);
-            spawn_args = cmd;
-        }
-        Ok(TearResult {
-            spawn_command: Some(spawn_args),
-        })
+        self.session.move_out(&self.terminal_launch_prefix)
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::Tmux;
+    use super::{Tmux, TmuxSession};
     use crate::engine::contract::AppAdapter;
 
     #[test]
     fn declares_explicit_capability_contract() {
         let app = Tmux {
-            session: "test".to_string(),
-            client_pid: 1,
+            session: TmuxSession {
+                name: "test".to_string(),
+                client_pid: 1,
+            },
             terminal_launch_prefix: vec!["wezterm".into(), "-e".into()],
         };
         let caps = AppAdapter::capabilities(&app);
