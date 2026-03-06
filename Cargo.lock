@@ -207,21 +207,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8ca58f447f06ed17d5fc4043ce1b10dd205e060fb3ce5b979b8ed8e59ff3f79"
 
 [[package]]
-name = "yeet-and-yoink"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "clap",
- "etcetera",
- "niri-ipc",
- "serde",
- "serde_json",
- "toml",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
 name = "niri-ipc"
 version = "25.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -594,6 +579,21 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5a5364e9d77fcdeeaa6062ced926ee3381faa2ee02d3eb83a5c27a8825540829"
 dependencies = [
  "memchr",
+]
+
+[[package]]
+name = "yeet-and-yoink"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "etcetera",
+ "niri-ipc",
+ "serde",
+ "serde_json",
+ "toml",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

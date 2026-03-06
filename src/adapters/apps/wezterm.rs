@@ -465,7 +465,8 @@ mux_backend = "wezterm"
     impl WeztermHarness {
         fn new(pid: u32) -> Self {
             let unique = NEXT_ID.fetch_add(1, Ordering::Relaxed);
-            let base = std::env::temp_dir().join(format!("yeet-and-yoink-wezterm-test-{pid}-{unique}"));
+            let base =
+                std::env::temp_dir().join(format!("yeet-and-yoink-wezterm-test-{pid}-{unique}"));
             let bin_dir = base.join("bin");
             let runtime_dir = base.join("runtime");
             let responses_dir = base.join("responses");

@@ -426,8 +426,8 @@ mod tests {
     impl NvimHarness {
         fn new(terminal_pid: u32) -> Self {
             let unique = NEXT_ID.fetch_add(1, Ordering::Relaxed);
-            let base =
-                std::env::temp_dir().join(format!("yeet-and-yoink-nvim-test-{terminal_pid}-{unique}"));
+            let base = std::env::temp_dir()
+                .join(format!("yeet-and-yoink-nvim-test-{terminal_pid}-{unique}"));
             let bin_dir = base.join("bin");
             let runtime_dir = base.join("runtime");
             let nvim_responses_dir = base.join("nvim-responses");

@@ -477,7 +477,10 @@ fn resolve_config_path() -> Result<(PathBuf, bool)> {
 
     let strategy = choose_base_strategy().context("failed to resolve config directory")?;
     Ok((
-        strategy.config_dir().join("yeet-and-yoink").join("config.toml"),
+        strategy
+            .config_dir()
+            .join("yeet-and-yoink")
+            .join("config.toml"),
         false,
     ))
 }

@@ -1,14 +1,17 @@
 use clap::{Parser, Subcommand};
+use std::path::PathBuf;
 use yeet_and_yoink::commands;
 use yeet_and_yoink::commands::focus_or_cycle::FocusOrCycleArgs;
 use yeet_and_yoink::commands::resize::ResizeMode;
 use yeet_and_yoink::config;
 use yeet_and_yoink::engine::topology::Direction;
 use yeet_and_yoink::logging;
-use std::path::PathBuf;
 
 #[derive(Parser)]
-#[command(name = "yeet-and-yoink", about = "Deep focus/move integration for niri")]
+#[command(
+    name = "yeet-and-yoink",
+    about = "Deep focus/move integration for niri"
+)]
 struct Cli {
     /// Write debug logs to a file.
     #[arg(long, global = true, value_name = "PATH")]

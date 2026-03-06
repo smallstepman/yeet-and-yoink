@@ -3,6 +3,7 @@ use std::collections::BTreeMap;
 use zellij_tile::prelude::*;
 
 const TAB_RESTORE_RETRY_SECONDS: f64 = 0.2;
+const TAB_RESTORE_GRACE_SECONDS: f64 = 0.6;
 const TAB_RESTORE_MAX_ATTEMPTS: u8 = 20;
 
 #[derive(Clone, Copy)]
@@ -10,6 +11,7 @@ struct PendingTabRestore {
     source_tab_index: u32,
     baseline_client_count: usize,
     attempts_left: u8,
+    client_seen: bool,
 }
 
 #[derive(Default)]
@@ -103,6 +105,7 @@ impl ZellijPlugin for NiriDeepZellijBreakPlugin {
                     source_tab_index,
                     baseline_client_count: source_client_count,
                     attempts_left: TAB_RESTORE_MAX_ATTEMPTS,
+                    client_seen: false,
                 });
                 set_timeout(TAB_RESTORE_RETRY_SECONDS);
                 list_clients();
@@ -119,10 +122,10 @@ impl ZellijPlugin for NiriDeepZellijBreakPlugin {
             Event::TabUpdate(tabs) => self.tabs = tabs,
             Event::ListClients(clients) => {
                 self.clients = clients;
-                self.maybe_restore_source_tab();
+                self.maybe_restore_source_tab(false);
             }
             Event::PermissionRequestResult(_) => list_clients(),
-            Event::Timer(_) => self.maybe_restore_source_tab(),
+            Event::Timer(_) => self.maybe_restore_source_tab(true),
             _ => {}
         }
         false
@@ -143,7 +146,7 @@ fn parse_pane_id(raw: &str) -> Option<PaneId> {
 }
 
 impl NiriDeepZellijBreakPlugin {
-    fn maybe_restore_source_tab(&mut self) {
+    fn maybe_restore_source_tab(&mut self, from_timer: bool) {
         let Some(mut pending) = self.pending_tab_restore else {
             return;
         };
@@ -157,11 +160,26 @@ impl NiriDeepZellijBreakPlugin {
         }
 
         let required_client_count = pending.baseline_client_count.saturating_add(1);
-        let should_restore_now =
-            self.clients.len() >= required_client_count || pending.attempts_left <= 1;
+        if !pending.client_seen && self.clients.len() >= required_client_count {
+            pending.client_seen = true;
+            self.pending_tab_restore = Some(pending);
+            set_timeout(TAB_RESTORE_GRACE_SECONDS);
+            return;
+        }
+
+        let should_restore_now = if pending.client_seen {
+            from_timer
+        } else {
+            pending.attempts_left <= 1
+        };
         if should_restore_now {
             switch_tab_to(pending.source_tab_index);
             self.pending_tab_restore = None;
+            return;
+        }
+
+        if pending.client_seen {
+            self.pending_tab_restore = Some(pending);
             return;
         }
 
