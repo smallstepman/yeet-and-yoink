@@ -1,11 +1,11 @@
 [package]
 name = "yeet-and-yoink"
 version = "0.1.0"
+edition = "2021"
 
 [[bin]]
 name = "yny"
 path = "src/main.rs"
-edition = "2021"
 
 [dependencies]
 niri-ipc = "=25.11.0"
