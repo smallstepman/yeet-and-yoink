@@ -1,4 +1,5 @@
 pub mod emacs;
+pub mod foot;
 pub mod kitty;
 pub mod librefox;
 pub mod nvim;
@@ -267,7 +268,8 @@ mod resolve_chain_tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     use crate::adapters::apps::{
-        emacs, kitty, librefox::Librefox, nvim::Nvim, vscode::Vscode, wezterm, TopologyHandler,
+        emacs, foot, kitty, librefox::Librefox, nvim::Nvim, vscode::Vscode, wezterm,
+        TopologyHandler,
     };
     use crate::adapters::terminal_multiplexers::tmux::Tmux;
 
@@ -311,6 +313,7 @@ mod resolve_chain_tests {
     fn adapters_implement_topology_traits() {
         fn assert_topology_contracts<T: TopologyHandler>() {}
         assert_topology_contracts::<emacs::EmacsBackend>();
+        assert_topology_contracts::<foot::FootBackend>();
         assert_topology_contracts::<kitty::KittyBackend>();
         assert_topology_contracts::<wezterm::WeztermBackend>();
         assert_topology_contracts::<Tmux>();
@@ -411,6 +414,38 @@ enabled = true
         crate::config::prepare().expect("config should load");
 
         let chain = resolve_chain(kitty::APP_IDS[0], 0, "");
+        assert!(!chain.is_empty());
+        assert_eq!(
+            chain.last().map(|adapter| adapter.adapter_name()),
+            Some("terminal")
+        );
+
+        restore_env("NIRI_DEEP_CONFIG", old_override);
+        crate::config::prepare().expect("config should reload");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn foot_terminal_app_id_resolves_terminal_chain() {
+        let _guard = env_guard();
+        let root = unique_temp_dir("foot-terminal-chain");
+        let config_dir = root.join("yeet-and-yoink");
+        std::fs::create_dir_all(&config_dir).expect("config dir should be created");
+        std::fs::write(
+            config_dir.join("config.toml"),
+            r#"
+[app.terminal.foot]
+enabled = true
+"#,
+        )
+        .expect("config file should be writable");
+        let old_override = set_env(
+            "NIRI_DEEP_CONFIG",
+            Some(config_dir.join("config.toml").to_str().expect("utf-8 path")),
+        );
+        crate::config::prepare().expect("config should load");
+
+        let chain = resolve_chain(foot::APP_IDS[0], 0, "");
         assert!(!chain.is_empty());
         assert_eq!(
             chain.last().map(|adapter| adapter.adapter_name()),

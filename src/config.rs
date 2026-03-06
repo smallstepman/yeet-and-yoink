@@ -337,7 +337,7 @@ pub struct TerminalAppConfig {
     #[serde(default)]
     pub resize: PaneResizeConfig,
 
-    /// wezterm/kitty/iterm2-specific fields flattened into the same section.
+    /// terminal-host-specific fields flattened into the same section.
     #[serde(flatten)]
     pub variant: TerminalVariantConfig,
 }
@@ -345,7 +345,7 @@ pub struct TerminalAppConfig {
 /// Fields that differ per terminal emulator.
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct TerminalVariantConfig {
-    /// wezterm default: "wezterm"; kitty default: "kitty"; iterm2: tmux or zellij only.
+    /// wezterm default: "wezterm"; kitty default: "kitty"; foot/iterm2 default: "tmux".
     pub mux_backend: Option<TerminalMuxBackend>,
 
     /// Overrides the default tear-off scope (also settable via move.docking.tear_off.scope).
@@ -614,6 +614,9 @@ fn default_mux_backend_for_aliases(aliases: &[&str]) -> TerminalMuxBackend {
     if aliases.iter().any(|alias| alias == "kitty") {
         return TerminalMuxBackend::Kitty;
     }
+    if aliases.iter().any(|alias| alias == "foot") {
+        return TerminalMuxBackend::Tmux;
+    }
     if aliases
         .iter()
         .any(|alias| alias == "iterm2" || alias == "iterm")
@@ -855,6 +858,9 @@ enabled = true
         let parsed: Config = toml::from_str(sample).expect("sample config should parse");
         let kitty_policy = mux_policy_from(&parsed, &["kitty", "terminal"]);
         assert_eq!(kitty_policy.backend, TerminalMuxBackend::Kitty);
+
+        let foot_policy = mux_policy_from(&parsed, &["foot", "terminal"]);
+        assert_eq!(foot_policy.backend, TerminalMuxBackend::Tmux);
 
         let wezterm_policy = mux_policy_from(&parsed, &["wezterm", "terminal"]);
         assert_eq!(wezterm_policy.backend, TerminalMuxBackend::Wezterm);

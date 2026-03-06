@@ -1,5 +1,5 @@
 use crate::adapters::apps::{
-    self, emacs, kitty, librefox::Librefox, nvim::Nvim, vscode::Vscode, wezterm, AppAdapter,
+    self, emacs, foot, kitty, librefox::Librefox, nvim::Nvim, vscode::Vscode, wezterm, AppAdapter,
     AppKind,
 };
 use crate::adapters::terminal_multiplexers::tmux::Tmux;
@@ -46,6 +46,10 @@ fn build_kitty_terminal() -> Box<dyn AppAdapter> {
     apps::bind_policy(Box::new(kitty::KittyBackend))
 }
 
+fn build_foot_terminal() -> Box<dyn AppAdapter> {
+    apps::bind_policy(Box::new(foot::FootBackend))
+}
+
 struct TerminalHostSpec {
     aliases: &'static [&'static str],
     app_ids: &'static [&'static str],
@@ -65,6 +69,12 @@ const TERMINAL_HOSTS: &[TerminalHostSpec] = &[
         app_ids: kitty::APP_IDS,
         terminal_launch_prefix: kitty::TERMINAL_LAUNCH_PREFIX,
         build: build_kitty_terminal,
+    },
+    TerminalHostSpec {
+        aliases: foot::ADAPTER_ALIASES,
+        app_ids: foot::APP_IDS,
+        terminal_launch_prefix: foot::TERMINAL_LAUNCH_PREFIX,
+        build: build_foot_terminal,
     },
 ];
 
@@ -356,6 +366,9 @@ impl ChainResolver for RuntimeChainResolver {
 
     fn default_domain_adapters(&self) -> Vec<Box<dyn AppAdapter>> {
         let terminal_adapter = match preferred_adapter_name().as_deref() {
+            Some(preferred) if matches_adapter_alias(preferred, foot::ADAPTER_ALIASES) => {
+                build_foot_terminal()
+            }
             Some(preferred) if matches_adapter_alias(preferred, kitty::ADAPTER_ALIASES) => {
                 build_kitty_terminal()
             }
@@ -385,5 +398,84 @@ impl ChainResolver for RuntimeChainResolver {
             return domain_id_for_app_kind(kind);
         }
         WM_DOMAIN_ID
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::ffi::OsString;
+    use std::fs;
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    use super::{runtime_chain_resolver, ChainResolver};
+    use crate::adapters::apps::foot;
+
+    static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+
+    fn env_guard() -> std::sync::MutexGuard<'static, ()> {
+        crate::utils::env_guard()
+    }
+
+    fn unique_temp_dir(prefix: &str) -> PathBuf {
+        let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!(
+            "yeet-and-yoink-chain-resolver-{prefix}-{}-{id}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&path).expect("temp dir should be created");
+        path
+    }
+
+    fn set_env(key: &str, value: Option<&str>) -> Option<OsString> {
+        let old = std::env::var_os(key);
+        if let Some(value) = value {
+            std::env::set_var(key, value);
+        } else {
+            std::env::remove_var(key);
+        }
+        old
+    }
+
+    fn restore_env(key: &str, old: Option<OsString>) {
+        if let Some(value) = old {
+            std::env::set_var(key, value);
+        } else {
+            std::env::remove_var(key);
+        }
+    }
+
+    #[test]
+    fn foot_override_selects_foot_default_terminal_domain_adapter() {
+        let _guard = env_guard();
+        let root = unique_temp_dir("foot-default-domain");
+        let config_dir = root.join("yeet-and-yoink");
+        fs::create_dir_all(&config_dir).expect("config dir should be created");
+        fs::write(
+            config_dir.join("config.toml"),
+            r#"
+[app.terminal.foot]
+enabled = true
+"#,
+        )
+        .expect("config file should be writable");
+        let old_override = set_env(
+            "NIRI_DEEP_CONFIG",
+            Some(config_dir.join("config.toml").to_str().expect("utf-8 path")),
+        );
+        crate::config::prepare().expect("config should load");
+
+        let adapters = runtime_chain_resolver().default_domain_adapters();
+        assert_eq!(
+            adapters
+                .first()
+                .and_then(|adapter| adapter.config_aliases())
+                .map(|aliases| aliases[0]),
+            Some(foot::ADAPTER_ALIASES[0])
+        );
+
+        restore_env("NIRI_DEEP_CONFIG", old_override);
+        crate::config::prepare().expect("config should reload");
+        let _ = fs::remove_dir_all(root);
     }
 }

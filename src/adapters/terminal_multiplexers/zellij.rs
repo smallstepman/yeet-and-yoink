@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::{Mutex, OnceLock};
 
@@ -128,6 +128,100 @@ impl ZellijMuxProvider {
         None
     }
 
+    fn socket_inode_from_fd_target(target: &str) -> Option<u64> {
+        let value = target.trim().strip_prefix("socket:[")?.strip_suffix(']')?;
+        value.parse::<u64>().ok().filter(|inode| *inode > 0)
+    }
+
+    fn socket_inodes_for_pid(pid: u32) -> HashSet<u64> {
+        let mut inodes = HashSet::new();
+        let Ok(entries) = std::fs::read_dir(format!("/proc/{pid}/fd")) else {
+            return inodes;
+        };
+        for entry in entries.flatten() {
+            let Ok(target) = std::fs::read_link(entry.path()) else {
+                continue;
+            };
+            let target = target.to_string_lossy();
+            let Some(inode) = Self::socket_inode_from_fd_target(&target) else {
+                continue;
+            };
+            inodes.insert(inode);
+        }
+        inodes
+    }
+
+    fn session_name_from_proc_net_unix(raw: &str, socket_inodes: &HashSet<u64>) -> Option<String> {
+        if socket_inodes.is_empty() {
+            return None;
+        }
+        for line in raw.lines() {
+            let fields: Vec<&str> = line.split_whitespace().collect();
+            let Some(inode) = fields.get(6).and_then(|value| value.parse::<u64>().ok()) else {
+                continue;
+            };
+            if !socket_inodes.contains(&inode) {
+                continue;
+            }
+            let Some(path) = fields.get(7) else {
+                continue;
+            };
+            if !path.contains("zellij") {
+                continue;
+            }
+            if let Some(session) = Self::session_from_server_path(path) {
+                return Some(session);
+            }
+        }
+        None
+    }
+
+    fn session_name_from_open_socket(pid: u32) -> Option<String> {
+        let socket_inodes = Self::socket_inodes_for_pid(pid);
+        let raw = std::fs::read_to_string("/proc/net/unix").ok()?;
+        Self::session_name_from_proc_net_unix(&raw, &socket_inodes)
+    }
+
+    fn session_name_from_ss_output(raw: &str, socket_inodes: &HashSet<u64>) -> Option<String> {
+        if socket_inodes.is_empty() {
+            return None;
+        }
+        for line in raw.lines() {
+            if !socket_inodes.iter().any(|inode| {
+                line.contains(&format!(" {inode} "))
+                    || line.contains(&format!(" {inode} users:"))
+                    || line.ends_with(&format!(" {inode}"))
+            }) {
+                continue;
+            }
+            for token in line.split_whitespace() {
+                if !token.starts_with('/') || !token.contains("zellij") {
+                    continue;
+                }
+                if let Some(session) = Self::session_from_server_path(token) {
+                    return Some(session);
+                }
+            }
+        }
+        None
+    }
+
+    fn session_name_from_socket_peers(pid: u32) -> Option<String> {
+        let socket_inodes = Self::socket_inodes_for_pid(pid);
+        if socket_inodes.is_empty() {
+            return None;
+        }
+        let output = std::process::Command::new("ss")
+            .args(["-xnp"])
+            .output()
+            .ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        let raw = String::from_utf8_lossy(&output.stdout);
+        Self::session_name_from_ss_output(&raw, &socket_inodes)
+    }
+
     fn all_pids() -> Vec<u32> {
         let mut pids = Vec::new();
         let Ok(entries) = std::fs::read_dir("/proc") else {
@@ -191,6 +285,26 @@ impl ZellijMuxProvider {
                 continue;
             }
             if let Some(session) = Self::session_name_from_cmdline(*candidate) {
+                Self::store_session_name(pid, &session);
+                return Some(session);
+            }
+        }
+
+        for candidate in &candidates {
+            if runtime::process_comm(*candidate).as_deref() != Some("zellij") {
+                continue;
+            }
+            if let Some(session) = Self::session_name_from_open_socket(*candidate) {
+                Self::store_session_name(pid, &session);
+                return Some(session);
+            }
+        }
+
+        for candidate in &candidates {
+            if runtime::process_comm(*candidate).as_deref() != Some("zellij") {
+                continue;
+            }
+            if let Some(session) = Self::session_name_from_socket_peers(*candidate) {
                 Self::store_session_name(pid, &session);
                 return Some(session);
             }
@@ -1240,9 +1354,11 @@ impl TopologyHandler for ZellijMuxProvider {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
     use std::ffi::OsString;
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::net::{UnixListener, UnixStream};
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -1512,6 +1628,68 @@ exit "$status"
                 "/run/user/1000/zellij/0.43.1/jumping-quasar"
             ),
             Some("jumping-quasar".to_string())
+        );
+    }
+
+    #[test]
+    fn extracts_socket_inode_from_fd_target() {
+        assert_eq!(
+            ZellijMuxProvider::socket_inode_from_fd_target("socket:[458030]"),
+            Some(458030)
+        );
+        assert_eq!(
+            ZellijMuxProvider::socket_inode_from_fd_target("/dev/pts/1"),
+            None
+        );
+    }
+
+    #[test]
+    fn extracts_session_name_from_proc_net_unix_socket_entries() {
+        let mut inodes = HashSet::new();
+        inodes.insert(458030);
+        let raw = r#"
+Num       RefCount Protocol Flags    Type St Inode Path
+0000000000000000: 00000002 00000000 00010000 0001 01 458030 /run/user/1000/zellij/0.43.1/implacable-oboe
+0000000000000000: 00000003 00000000 00000000 0001 03 458031 /tmp/other.sock
+"#;
+        assert_eq!(
+            ZellijMuxProvider::session_name_from_proc_net_unix(raw, &inodes),
+            Some("implacable-oboe".to_string())
+        );
+    }
+
+    #[test]
+    fn session_name_from_open_socket_reads_proc_entries() {
+        let unique = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+        let base = std::env::temp_dir().join(format!(
+            "yeet-and-yoink-zellij-socket-test-{}-{unique}",
+            std::process::id()
+        ));
+        let socket_dir = base.join("zellij");
+        fs::create_dir_all(&socket_dir).expect("socket dir should be created");
+        let socket_path = socket_dir.join("mock-session");
+        let listener = UnixListener::bind(&socket_path).expect("unix listener should bind");
+        let _stream = UnixStream::connect(&socket_path).expect("unix stream should connect");
+
+        let session = ZellijMuxProvider::session_name_from_open_socket(std::process::id());
+        drop(listener);
+        let _ = fs::remove_file(&socket_path);
+        let _ = fs::remove_dir_all(&base);
+
+        assert_eq!(session, Some("mock-session".to_string()));
+    }
+
+    #[test]
+    fn extracts_session_name_from_ss_output_via_peer_inode() {
+        let mut inodes = HashSet::new();
+        inodes.insert(455551);
+        let raw = r#"
+u_str ESTAB 0 0 * 455551 * 458031 users:(("zellij",pid=134518,fd=6),("zellij",pid=134518,fd=5))
+u_str ESTAB 0 0 /run/user/1000/zellij/0.43.1/implacable-oboe 458031 * 455551 users:(("zellij",pid=134525,fd=7),("zellij",pid=134525,fd=6))
+"#;
+        assert_eq!(
+            ZellijMuxProvider::session_name_from_ss_output(raw, &inodes),
+            Some("implacable-oboe".to_string())
         );
     }
 

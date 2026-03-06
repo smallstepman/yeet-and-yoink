@@ -84,6 +84,11 @@ mux_backend = "tmux" | "zellij" | "wezterm" | none
 # default: "kitty"
 mux_backend = "tmux" | "zellij" | "kitty" | none
 
+# foot specific settings
+[app.terminal.foot]
+# default: "tmux"
+mux_backend = "tmux" | "zellij" | none
+
 # iterm2 specific settings
 [app.terminal.iterm2]
 # default: "tmux"
