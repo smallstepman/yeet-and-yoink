@@ -345,7 +345,8 @@ pub struct TerminalAppConfig {
 /// Fields that differ per terminal emulator.
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct TerminalVariantConfig {
-    /// wezterm default: "wezterm"; kitty default: "kitty"; foot/iterm2 default: "tmux".
+    /// wezterm default: "wezterm"; kitty default: "kitty";
+    /// foot/alacritty/ghostty/iterm2 default: "tmux".
     pub mux_backend: Option<TerminalMuxBackend>,
 
     /// Overrides the default tear-off scope (also settable via move.docking.tear_off.scope).
@@ -614,7 +615,10 @@ fn default_mux_backend_for_aliases(aliases: &[&str]) -> TerminalMuxBackend {
     if aliases.iter().any(|alias| alias == "kitty") {
         return TerminalMuxBackend::Kitty;
     }
-    if aliases.iter().any(|alias| alias == "foot") {
+    if aliases
+        .iter()
+        .any(|alias| alias == "foot" || alias == "alacritty" || alias == "ghostty")
+    {
         return TerminalMuxBackend::Tmux;
     }
     if aliases
@@ -861,6 +865,12 @@ enabled = true
 
         let foot_policy = mux_policy_from(&parsed, &["foot", "terminal"]);
         assert_eq!(foot_policy.backend, TerminalMuxBackend::Tmux);
+
+        let alacritty_policy = mux_policy_from(&parsed, &["alacritty", "terminal"]);
+        assert_eq!(alacritty_policy.backend, TerminalMuxBackend::Tmux);
+
+        let ghostty_policy = mux_policy_from(&parsed, &["ghostty", "terminal"]);
+        assert_eq!(ghostty_policy.backend, TerminalMuxBackend::Tmux);
 
         let wezterm_policy = mux_policy_from(&parsed, &["wezterm", "terminal"]);
         assert_eq!(wezterm_policy.backend, TerminalMuxBackend::Wezterm);

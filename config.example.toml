@@ -89,6 +89,16 @@ mux_backend = "tmux" | "zellij" | "kitty" | none
 # default: "tmux"
 mux_backend = "tmux" | "zellij" | none
 
+# alacritty specific settings
+[app.terminal.alacritty]
+# default: "tmux"
+mux_backend = "tmux" | "zellij" | none
+
+# ghostty specific settings
+[app.terminal.ghostty]
+# default: "tmux"
+mux_backend = "tmux" | "zellij" | none
+
 # iterm2 specific settings
 [app.terminal.iterm2]
 # default: "tmux"

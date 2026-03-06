@@ -252,21 +252,29 @@ impl Orchestrator {
                             format!("{adapter_name} tear-out spawn via wm failed")
                         })?;
                     }
-                    if let Err(err) = self.focus_tearout_window(
+                    let tearout_window_id = match self.focus_tearout_window(
                         wm,
                         &pre_window_ids,
                         source_window_id,
                         source_pid,
                         &app_id,
                     ) {
-                        logging::debug(format!(
-                            "orchestrator: unable to focus tear-out window adapter={} err={:#}",
-                            adapter_name, err
-                        ));
-                    }
-                    if let Err(err) =
-                        self.place_tearout_window(wm, dir, source_window_id, source_tile_index)
-                    {
+                        Ok(window_id) => window_id,
+                        Err(err) => {
+                            logging::debug(format!(
+                                "orchestrator: unable to focus tear-out window adapter={} err={:#}",
+                                adapter_name, err
+                            ));
+                            None
+                        }
+                    };
+                    if let Err(err) = self.place_tearout_window(
+                        wm,
+                        dir,
+                        source_window_id,
+                        source_tile_index,
+                        tearout_window_id,
+                    ) {
                         logging::debug(format!(
                             "orchestrator: tear-out placement fallback failed adapter={} err={:#}",
                             adapter_name, err
@@ -290,12 +298,39 @@ impl Orchestrator {
         source_window_id: u64,
         source_pid: Option<ProcessId>,
         source_app_id: &str,
-    ) -> Result<()>
+    ) -> Result<Option<u64>>
     where
         W: WindowManagerAdapter,
     {
-        const ATTEMPTS: usize = 8;
-        const DELAY: Duration = Duration::from_millis(20);
+        let target_window_id = self.wait_for_tearout_window_id(
+            wm,
+            pre_window_ids,
+            source_window_id,
+            source_pid,
+            source_app_id,
+        )?;
+        if let Some(target_window_id) = target_window_id {
+            if target_window_id != source_window_id {
+                wm.focus_window_by_id(target_window_id)?;
+                return Ok(Some(target_window_id));
+            }
+        }
+        Ok(None)
+    }
+
+    fn wait_for_tearout_window_id<W>(
+        &self,
+        wm: &mut W,
+        pre_window_ids: &BTreeSet<u64>,
+        source_window_id: u64,
+        source_pid: Option<ProcessId>,
+        source_app_id: &str,
+    ) -> Result<Option<u64>>
+    where
+        W: WindowManagerAdapter,
+    {
+        const ATTEMPTS: usize = 25;
+        const DELAY: Duration = Duration::from_millis(40);
 
         for attempt in 0..ATTEMPTS {
             match wm.windows() {
@@ -308,8 +343,7 @@ impl Orchestrator {
                         source_app_id,
                     ) {
                         if target_window_id != source_window_id {
-                            wm.focus_window_by_id(target_window_id)?;
-                            return Ok(());
+                            return Ok(Some(target_window_id));
                         }
                     }
                 }
@@ -327,7 +361,7 @@ impl Orchestrator {
             }
         }
 
-        Ok(())
+        Ok(None)
     }
 
     fn select_tearout_window_id(
@@ -382,10 +416,15 @@ impl Orchestrator {
         dir: Direction,
         source_window_id: u64,
         source_tile_index: usize,
+        target_window_id: Option<u64>,
     ) -> Result<()>
     where
         W: WindowManagerAdapter,
     {
+        if let Some(target_window_id) = target_window_id.filter(|id| *id != source_window_id) {
+            wm.focus_window_by_id(target_window_id)?;
+        }
+
         let focused_window_id = wm.with_focused_window(|window| Ok(window.id()))?;
         if focused_window_id == source_window_id {
             return Ok(());
@@ -1011,6 +1050,8 @@ mod tests {
 
     struct FakeWindowManager {
         windows: Vec<WindowRecord>,
+        window_snapshots: Vec<Vec<WindowRecord>>,
+        windows_call_count: usize,
         capabilities: WindowManagerCapabilities,
         move_calls: usize,
         move_column_calls: usize,
@@ -1049,6 +1090,10 @@ mod tests {
         }
 
         fn windows(&mut self) -> Result<Vec<WindowRecord>> {
+            if let Some(snapshot) = self.window_snapshots.get(self.windows_call_count).cloned() {
+                self.windows = snapshot;
+            }
+            self.windows_call_count += 1;
             Ok(self.windows.clone())
         }
     }
@@ -1175,6 +1220,8 @@ mod tests {
                     original_tile_index: 2,
                 },
             ],
+            window_snapshots: Vec::new(),
+            windows_call_count: 0,
             capabilities: WindowManagerCapabilities::none(),
             move_calls: 0,
             move_column_calls: 0,
@@ -1252,6 +1299,8 @@ mod tests {
                     original_tile_index: 2,
                 },
             ],
+            window_snapshots: Vec::new(),
+            windows_call_count: 0,
             capabilities: WindowManagerCapabilities::none(),
             move_calls: 0,
             move_column_calls: 0,
@@ -1311,6 +1360,8 @@ mod tests {
                     original_tile_index: 2,
                 },
             ],
+            window_snapshots: Vec::new(),
+            windows_call_count: 0,
             capabilities: WindowManagerCapabilities::none(),
             move_calls: 0,
             move_column_calls: 0,
@@ -1361,6 +1412,8 @@ mod tests {
                     original_tile_index: 2,
                 },
             ],
+            window_snapshots: Vec::new(),
+            windows_call_count: 0,
             capabilities: WindowManagerCapabilities::none(),
             move_calls: 0,
             move_column_calls: 0,
@@ -1423,6 +1476,8 @@ mod tests {
                     original_tile_index: 1,
                 },
             ],
+            window_snapshots: Vec::new(),
+            windows_call_count: 0,
             capabilities: composed_tearout_capabilities_for(Direction::West),
             move_calls: 0,
             move_column_calls: 0,
@@ -1433,7 +1488,7 @@ mod tests {
         };
 
         orchestrator
-            .place_tearout_window(&mut wm, Direction::West, 11, 4)
+            .place_tearout_window(&mut wm, Direction::West, 11, 4, None)
             .expect("tearout placement should succeed");
         assert_eq!(wm.move_column_calls, 1);
         assert_eq!(wm.consume_calls, 0);
@@ -1461,6 +1516,8 @@ mod tests {
                     original_tile_index: 1,
                 },
             ],
+            window_snapshots: Vec::new(),
+            windows_call_count: 0,
             capabilities: composed_tearout_capabilities_for(Direction::North),
             move_calls: 0,
             move_column_calls: 0,
@@ -1471,11 +1528,119 @@ mod tests {
         };
 
         orchestrator
-            .place_tearout_window(&mut wm, Direction::North, 21, 7)
+            .place_tearout_window(&mut wm, Direction::North, 21, 7, None)
             .expect("tearout placement should succeed");
         assert_eq!(wm.move_column_calls, 0);
         assert_eq!(wm.consume_calls, 1);
         assert_eq!(wm.consume_last_tile_index, Some(7));
+    }
+
+    #[test]
+    fn focus_tearout_window_retries_until_new_window_appears() {
+        let orchestrator = Orchestrator::default();
+        let source_pid = ProcessId::new(5151);
+        let mut pre_window_ids = BTreeSet::new();
+        pre_window_ids.insert(31);
+
+        let source_window = WindowRecord {
+            id: 31,
+            app_id: Some("com.mitchellh.ghostty".into()),
+            title: Some("source".into()),
+            pid: source_pid,
+            is_focused: true,
+            original_tile_index: 0,
+        };
+        let tearout_window = WindowRecord {
+            id: 32,
+            app_id: Some("com.mitchellh.ghostty".into()),
+            title: Some("tearout".into()),
+            pid: ProcessId::new(6161),
+            is_focused: false,
+            original_tile_index: 0,
+        };
+        let mut wm = FakeWindowManager {
+            windows: vec![source_window.clone()],
+            window_snapshots: vec![
+                vec![source_window.clone()],
+                vec![source_window.clone(), tearout_window],
+            ],
+            windows_call_count: 0,
+            capabilities: composed_tearout_capabilities_for(Direction::North),
+            move_calls: 0,
+            move_column_calls: 0,
+            consume_calls: 0,
+            consume_last_tile_index: None,
+            close_calls: 0,
+            closed_window_ids: Vec::new(),
+        };
+
+        let focused = orchestrator
+            .focus_tearout_window(
+                &mut wm,
+                &pre_window_ids,
+                31,
+                source_pid,
+                "com.mitchellh.ghostty",
+            )
+            .expect("tearout focus should succeed");
+
+        assert_eq!(focused, Some(32));
+        assert_eq!(wm.windows_call_count, 2);
+        assert_eq!(
+            wm.windows
+                .iter()
+                .find(|window| window.is_focused)
+                .map(|window| window.id),
+            Some(32)
+        );
+    }
+
+    #[test]
+    fn place_tearout_window_focuses_known_target_before_composed_north() {
+        let orchestrator = Orchestrator::default();
+        let mut wm = FakeWindowManager {
+            windows: vec![
+                WindowRecord {
+                    id: 41,
+                    app_id: Some("com.mitchellh.ghostty".into()),
+                    title: Some("source".into()),
+                    pid: ProcessId::new(1),
+                    is_focused: true,
+                    original_tile_index: 2,
+                },
+                WindowRecord {
+                    id: 42,
+                    app_id: Some("com.mitchellh.ghostty".into()),
+                    title: Some("tearout".into()),
+                    pid: ProcessId::new(2),
+                    is_focused: false,
+                    original_tile_index: 1,
+                },
+            ],
+            window_snapshots: Vec::new(),
+            windows_call_count: 0,
+            capabilities: composed_tearout_capabilities_for(Direction::North),
+            move_calls: 0,
+            move_column_calls: 0,
+            consume_calls: 0,
+            consume_last_tile_index: None,
+            close_calls: 0,
+            closed_window_ids: Vec::new(),
+        };
+
+        orchestrator
+            .place_tearout_window(&mut wm, Direction::North, 41, 9, Some(42))
+            .expect("tearout placement should succeed");
+
+        assert_eq!(wm.consume_calls, 1);
+        assert_eq!(wm.consume_last_tile_index, Some(9));
+        assert_eq!(
+            wm.windows
+                .iter()
+                .find(|window| window.is_focused)
+                .map(|window| window.id),
+            Some(42)
+        );
     }
 
     #[test]

@@ -34,8 +34,9 @@ resize.internal_panes.enabled = true
 move.docking.tear_off.enabled = true
 ```
 
-Foot is also supported as an external terminal host; configure it under
-`[app.terminal.foot]` with `mux_backend = "tmux"` or `mux_backend = "zellij"`.
+Foot, Alacritty, and Ghostty are also supported as external terminal hosts;
+configure them under `[app.terminal.foot]`, `[app.terminal.alacritty]`, or
+`[app.terminal.ghostty]` with `mux_backend = "tmux"` or `mux_backend = "zellij"`.
 
 ## Runtime architecture
 

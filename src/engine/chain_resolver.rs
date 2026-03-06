@@ -1,6 +1,6 @@
 use crate::adapters::apps::{
-    self, emacs, foot, kitty, librefox::Librefox, nvim::Nvim, vscode::Vscode, wezterm, AppAdapter,
-    AppKind,
+    self, alacritty, emacs, foot, ghostty, kitty, librefox::Librefox, nvim::Nvim, vscode::Vscode,
+    wezterm, AppAdapter, AppKind,
 };
 use crate::adapters::terminal_multiplexers::tmux::Tmux;
 use crate::config::AppSection;
@@ -50,6 +50,14 @@ fn build_foot_terminal() -> Box<dyn AppAdapter> {
     apps::bind_policy(Box::new(foot::FootBackend))
 }
 
+fn build_alacritty_terminal() -> Box<dyn AppAdapter> {
+    apps::bind_policy(Box::new(alacritty::AlacrittyBackend))
+}
+
+fn build_ghostty_terminal() -> Box<dyn AppAdapter> {
+    apps::bind_policy(Box::new(ghostty::GhosttyBackend))
+}
+
 struct TerminalHostSpec {
     aliases: &'static [&'static str],
     app_ids: &'static [&'static str],
@@ -75,6 +83,18 @@ const TERMINAL_HOSTS: &[TerminalHostSpec] = &[
         app_ids: foot::APP_IDS,
         terminal_launch_prefix: foot::TERMINAL_LAUNCH_PREFIX,
         build: build_foot_terminal,
+    },
+    TerminalHostSpec {
+        aliases: alacritty::ADAPTER_ALIASES,
+        app_ids: alacritty::APP_IDS,
+        terminal_launch_prefix: alacritty::TERMINAL_LAUNCH_PREFIX,
+        build: build_alacritty_terminal,
+    },
+    TerminalHostSpec {
+        aliases: ghostty::ADAPTER_ALIASES,
+        app_ids: ghostty::APP_IDS,
+        terminal_launch_prefix: ghostty::TERMINAL_LAUNCH_PREFIX,
+        build: build_ghostty_terminal,
     },
 ];
 
@@ -366,8 +386,14 @@ impl ChainResolver for RuntimeChainResolver {
 
     fn default_domain_adapters(&self) -> Vec<Box<dyn AppAdapter>> {
         let terminal_adapter = match preferred_adapter_name().as_deref() {
+            Some(preferred) if matches_adapter_alias(preferred, alacritty::ADAPTER_ALIASES) => {
+                build_alacritty_terminal()
+            }
             Some(preferred) if matches_adapter_alias(preferred, foot::ADAPTER_ALIASES) => {
                 build_foot_terminal()
+            }
+            Some(preferred) if matches_adapter_alias(preferred, ghostty::ADAPTER_ALIASES) => {
+                build_ghostty_terminal()
             }
             Some(preferred) if matches_adapter_alias(preferred, kitty::ADAPTER_ALIASES) => {
                 build_kitty_terminal()
@@ -409,7 +435,7 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     use super::{runtime_chain_resolver, ChainResolver};
-    use crate::adapters::apps::foot;
+    use crate::adapters::apps::{alacritty, foot, ghostty};
 
     static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -472,6 +498,74 @@ enabled = true
                 .and_then(|adapter| adapter.config_aliases())
                 .map(|aliases| aliases[0]),
             Some(foot::ADAPTER_ALIASES[0])
+        );
+
+        restore_env("NIRI_DEEP_CONFIG", old_override);
+        crate::config::prepare().expect("config should reload");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn alacritty_override_selects_alacritty_default_terminal_domain_adapter() {
+        let _guard = env_guard();
+        let root = unique_temp_dir("alacritty-default-domain");
+        let config_dir = root.join("yeet-and-yoink");
+        fs::create_dir_all(&config_dir).expect("config dir should be created");
+        fs::write(
+            config_dir.join("config.toml"),
+            r#"
+[app.terminal.alacritty]
+enabled = true
+"#,
+        )
+        .expect("config file should be writable");
+        let old_override = set_env(
+            "NIRI_DEEP_CONFIG",
+            Some(config_dir.join("config.toml").to_str().expect("utf-8 path")),
+        );
+        crate::config::prepare().expect("config should load");
+
+        let adapters = runtime_chain_resolver().default_domain_adapters();
+        assert_eq!(
+            adapters
+                .first()
+                .and_then(|adapter| adapter.config_aliases())
+                .map(|aliases| aliases[0]),
+            Some(alacritty::ADAPTER_ALIASES[0])
+        );
+
+        restore_env("NIRI_DEEP_CONFIG", old_override);
+        crate::config::prepare().expect("config should reload");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn ghostty_override_selects_ghostty_default_terminal_domain_adapter() {
+        let _guard = env_guard();
+        let root = unique_temp_dir("ghostty-default-domain");
+        let config_dir = root.join("yeet-and-yoink");
+        fs::create_dir_all(&config_dir).expect("config dir should be created");
+        fs::write(
+            config_dir.join("config.toml"),
+            r#"
+[app.terminal.ghostty]
+enabled = true
+"#,
+        )
+        .expect("config file should be writable");
+        let old_override = set_env(
+            "NIRI_DEEP_CONFIG",
+            Some(config_dir.join("config.toml").to_str().expect("utf-8 path")),
+        );
+        crate::config::prepare().expect("config should load");
+
+        let adapters = runtime_chain_resolver().default_domain_adapters();
+        assert_eq!(
+            adapters
+                .first()
+                .and_then(|adapter| adapter.config_aliases())
+                .map(|aliases| aliases[0]),
+            Some(ghostty::ADAPTER_ALIASES[0])
         );
 
         restore_env("NIRI_DEEP_CONFIG", old_override);
