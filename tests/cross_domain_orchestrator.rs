@@ -233,6 +233,15 @@ impl WindowManagerExecution for FakeWindowManager {
         }
         Ok(())
     }
+
+    fn close_window_by_id(&mut self, id: u64) -> Result<()> {
+        let original_len = self.windows.len();
+        self.windows.retain(|window| window.id != id);
+        if self.windows.len() == original_len {
+            return Err(anyhow!("window id {id} not found"));
+        }
+        Ok(())
+    }
 }
 
 #[test]

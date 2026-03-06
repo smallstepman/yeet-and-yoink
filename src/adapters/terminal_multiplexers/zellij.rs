@@ -28,6 +28,7 @@ pub(crate) struct ZellijMuxProvider;
 
 pub(crate) static ZELLIJ_MUX_PROVIDER: ZellijMuxProvider = ZellijMuxProvider;
 static SESSION_CACHE: OnceLock<Mutex<HashMap<u32, String>>> = OnceLock::new();
+const SOURCE_PANE_ENV: &str = "YEET_AND_YOINK_ZELLIJ_SOURCE_PANE_ID";
 
 impl ZellijMuxProvider {
     fn direction_name(dir: Direction) -> &'static str {
@@ -348,7 +349,13 @@ impl ZellijMuxProvider {
                     &format!("file:{permission_key}"),
                     "ReadApplicationState",
                 );
-        if has_change && has_read {
+        let has_pipe_read = Self::permission_block_contains(&cache, permission_key, "ReadCliPipes")
+            || Self::permission_block_contains(
+                &cache,
+                &format!("file:{permission_key}"),
+                "ReadCliPipes",
+            );
+        if has_change && has_read && has_pipe_read {
             return Ok(());
         }
 
@@ -367,7 +374,7 @@ impl ZellijMuxProvider {
         }
         let escaped_key = permission_key.replace('\\', "\\\\").replace('"', "\\\"");
         updated.push_str(&format!(
-            "\"{escaped_key}\" {{\n    ChangeApplicationState\n    ReadApplicationState\n}}\n"
+            "\"{escaped_key}\" {{\n    ChangeApplicationState\n    ReadApplicationState\n    ReadCliPipes\n}}\n"
         ));
         std::fs::write(&cache_path, updated).with_context(|| {
             format!(
@@ -564,6 +571,11 @@ impl ZellijMuxProvider {
         candidates.sort_unstable();
         candidates.dedup();
         for candidate in candidates {
+            if let Some(pane_id) = Self::read_environ_var(candidate, SOURCE_PANE_ENV) {
+                if let Some(pane_id) = Self::normalize_pane_id(&pane_id) {
+                    return Some(pane_id);
+                }
+            }
             let Some(pane_id) = Self::read_environ_var(candidate, "ZELLIJ_PANE_ID") else {
                 continue;
             };
@@ -574,8 +586,82 @@ impl ZellijMuxProvider {
         None
     }
 
+    fn parse_pipe_query_pane_id(stdout: &str) -> Option<String> {
+        for line in stdout.lines() {
+            let trimmed = line.trim();
+            if let Some(value) = trimmed.strip_prefix("pane_id=") {
+                if let Some(pane_id) = Self::normalize_pane_id(value) {
+                    return Some(pane_id);
+                }
+            }
+            if let Some(pane_id) = Self::normalize_pane_id(trimmed) {
+                return Some(pane_id);
+            }
+        }
+        None
+    }
+
+    fn focused_pane_id_via_plugin(&self, pid: u32) -> Result<Option<String>> {
+        if pid == 0 {
+            return Ok(None);
+        }
+        let Some(plugin_url) = Self::break_plugin_url() else {
+            return Ok(None);
+        };
+        if let Err(err) = Self::ensure_break_plugin_permissions(&plugin_url) {
+            logging::debug(format!(
+                "zellij: failed to update permission cache for {} err={:#}",
+                plugin_url, err
+            ));
+        }
+        let timeout = std::time::Duration::from_secs(2);
+        for _ in 0..3 {
+            let output = self.cli_output_for_pid_with_timeout(
+                pid,
+                &[
+                    "pipe",
+                    "--plugin",
+                    &plugin_url,
+                    "--name",
+                    "yeet_and_yoink_break",
+                    "--args",
+                    "action=query-pane-id",
+                    "--",
+                    "query-pane-id",
+                ],
+                timeout,
+            )?;
+            let Some(output) = output else {
+                break;
+            };
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            if Self::session_required_prompt(&stderr) {
+                bail!(
+                    "zellij session is required for pane query plugin; unable to resolve session for pid {}",
+                    pid
+                );
+            }
+            if !output.status.success() {
+                bail!("zellij pane query plugin command failed: {}", stderr);
+            }
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            if let Some(pane_id) = Self::parse_pipe_query_pane_id(&stdout) {
+                if Self::is_terminal_pane_id(&pane_id) {
+                    return Ok(Some(pane_id));
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        Ok(None)
+    }
+
     fn focused_pane_id_for_pid(&self, pid: u32) -> Result<Option<String>> {
         if let Some(pane_id) = Self::pane_id_from_environ(pid) {
+            if Self::is_terminal_pane_id(&pane_id) {
+                return Ok(Some(pane_id));
+            }
+        }
+        if let Some(pane_id) = self.focused_pane_id_via_plugin(pid)? {
             if Self::is_terminal_pane_id(&pane_id) {
                 return Ok(Some(pane_id));
             }
@@ -1087,15 +1173,27 @@ impl TopologyHandler for ZellijMuxProvider {
         }
 
         let attach_command = if let Some(config_path) = Self::no_mirror_config_path() {
-            vec![
+            let mut command = Vec::new();
+            if let Some(pane_id) = pane_id.as_deref() {
+                command.push("env".to_string());
+                command.push(format!("{SOURCE_PANE_ENV}={pane_id}"));
+            }
+            command.extend([
                 "zellij".to_string(),
                 "--config".to_string(),
                 config_path,
                 "attach".to_string(),
                 session.clone(),
-            ]
+            ]);
+            command
         } else {
-            vec!["zellij".to_string(), "attach".to_string(), session.clone()]
+            let mut command = Vec::new();
+            if let Some(pane_id) = pane_id.as_deref() {
+                command.push("env".to_string());
+                command.push(format!("{SOURCE_PANE_ENV}={pane_id}"));
+            }
+            command.extend(["zellij".to_string(), "attach".to_string(), session.clone()]);
+            command
         };
 
         Ok(TearResult {
@@ -1148,7 +1246,7 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};
 
-    use super::ZellijMuxProvider;
+    use super::{ZellijMuxProvider, SOURCE_PANE_ENV};
     use crate::engine::contract::{MoveDecision, TerminalMultiplexerProvider, TopologyHandler};
     use crate::engine::runtime::ProcessId;
     use crate::engine::topology::Direction;
@@ -1510,6 +1608,70 @@ exit "$status"
     }
 
     #[test]
+    fn focused_pane_id_for_pid_prefers_spawned_source_pane_env() {
+        let _guard = env_guard();
+        let harness = ZellijHarness::new();
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .env(SOURCE_PANE_ENV, "terminal_27")
+            .spawn()
+            .expect("sleep should spawn");
+        let provider = ZellijMuxProvider;
+        let pane_id = provider
+            .focused_pane_id_for_pid(child.id())
+            .expect("query should succeed");
+        let _ = child.kill();
+        let _ = child.wait();
+        assert_eq!(pane_id, Some("terminal_27".to_string()));
+        assert!(!harness.command_log().contains("action list-clients"));
+    }
+
+    #[test]
+    fn parse_pipe_query_pane_id_accepts_plain_and_prefixed_values() {
+        assert_eq!(
+            ZellijMuxProvider::parse_pipe_query_pane_id("terminal_8\n"),
+            Some("terminal_8".to_string())
+        );
+        assert_eq!(
+            ZellijMuxProvider::parse_pipe_query_pane_id("pane_id=terminal_12\n"),
+            Some("terminal_12".to_string())
+        );
+        assert_eq!(ZellijMuxProvider::parse_pipe_query_pane_id(""), None);
+    }
+
+    #[test]
+    fn focused_pane_id_for_pid_uses_plugin_query_before_list_clients() {
+        let _guard = env_guard();
+        let harness = ZellijHarness::new();
+        let plugin_path = harness.base.join("yeet_and_yoink_zellij_break.wasm");
+        fs::write(&plugin_path, "fake wasm").expect("plugin placeholder should be written");
+        std::env::set_var(
+            "NIRI_DEEP_ZELLIJ_BREAK_PLUGIN",
+            plugin_path.to_str().expect("utf-8 plugin path"),
+        );
+        ZellijMuxProvider::store_session_name(92, "query-pane");
+        let plugin_url = ZellijMuxProvider::break_plugin_url().expect("plugin URL should resolve");
+        harness.set_response(
+            &format!(
+                "--session query-pane pipe --plugin {plugin_url} --name yeet_and_yoink_break --args action=query-pane-id -- query-pane-id"
+            ),
+            0,
+            "terminal_19\n",
+            "",
+        );
+
+        let provider = ZellijMuxProvider;
+        let pane_id = provider
+            .focused_pane_id_for_pid(92)
+            .expect("query should succeed");
+        assert_eq!(pane_id, Some("terminal_19".to_string()));
+        let log = harness.command_log();
+        assert!(log.contains("action=query-pane-id"));
+        assert!(!log.contains("action list-clients"));
+        std::env::remove_var("NIRI_DEEP_ZELLIJ_BREAK_PLUGIN");
+    }
+
+    #[test]
     fn permission_block_contains_scans_all_matching_nodes() {
         let raw = r#"
         "/tmp/yeet-and-yoink-zellij-break.wasm" {
@@ -1575,7 +1737,9 @@ exit "$status"
             .move_out(Direction::North, 42)
             .expect("move_out should succeed");
         let command = tear.spawn_command.expect("spawn command should exist");
-        assert_eq!(command.first(), Some(&"zellij".to_string()));
+        assert_eq!(command.first(), Some(&"env".to_string()));
+        assert!(command.contains(&format!("{SOURCE_PANE_ENV}=terminal_9")));
+        assert!(command.contains(&"zellij".to_string()));
         assert!(command.contains(&"attach".to_string()));
         assert!(command.contains(&"jumping-quasar".to_string()));
         if command.contains(&"--config".to_string()) {
@@ -1805,7 +1969,9 @@ exit "$status"
             )
             .expect_err("cross-session merge should fail");
         assert!(err.to_string().contains("sessions differ"));
-        assert!(!harness.command_log().contains("pipe --plugin"));
+        let log = harness.command_log();
+        assert!(!log.contains("action=merge"));
+        assert!(!log.contains("-- merge"));
         std::env::remove_var("NIRI_DEEP_ZELLIJ_BREAK_PLUGIN");
     }
 }

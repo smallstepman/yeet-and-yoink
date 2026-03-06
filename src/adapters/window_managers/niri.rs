@@ -148,6 +148,10 @@ impl Niri {
         self.send_action(Action::FocusWindow { id })
     }
 
+    pub fn close_window_by_id(&mut self, id: u64) -> Result<()> {
+        self.send_action(Action::CloseWindow { id: Some(id) })
+    }
+
     pub fn move_window_to_workspace(
         &mut self,
         window_id: u64,

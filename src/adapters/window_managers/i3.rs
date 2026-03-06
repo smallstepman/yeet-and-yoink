@@ -237,6 +237,11 @@ impl WindowManagerExecution for I3Adapter {
         let criteria = format!("[con_id=\"{id}\"]");
         Self::command_status("focus_window_by_id", &[&criteria, "focus"])
     }
+
+    fn close_window_by_id(&mut self, id: u64) -> Result<()> {
+        let criteria = format!("[con_id=\"{id}\"]");
+        Self::command_status("close_window_by_id", &[&criteria, "kill"])
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]

@@ -27,7 +27,10 @@ register_plugin!(NiriDeepZellijBreakPlugin);
 impl ZellijPlugin for NiriDeepZellijBreakPlugin {
     fn load(&mut self, _configuration: BTreeMap<String, String>) {
         set_selectable(false);
-        request_permission(&[PermissionType::ChangeApplicationState]);
+        request_permission(&[
+            PermissionType::ChangeApplicationState,
+            PermissionType::ReadCliPipes,
+        ]);
         subscribe(&[
             EventType::PaneUpdate,
             EventType::TabUpdate,
@@ -45,6 +48,16 @@ impl ZellijPlugin for NiriDeepZellijBreakPlugin {
             .map(String::as_str)
             .or(pipe_message.payload.as_deref())
             .unwrap_or("break");
+        if action == "query-pane-id" {
+            if let Some(source) = cli_pipe_source_name(&pipe_message) {
+                if let Some(pane_id) = self.focused_pane_id_from_state() {
+                    cli_pipe_output(source, &pane_id_to_string(&pane_id));
+                } else {
+                    list_clients();
+                }
+            }
+            return false;
+        }
         if action == "merge" {
             let source_pane_id = pipe_message
                 .args
@@ -145,6 +158,20 @@ fn parse_pane_id(raw: &str) -> Option<PaneId> {
     (pane_id > 0).then_some(PaneId::Terminal(pane_id))
 }
 
+fn pane_id_to_string(pane_id: &PaneId) -> String {
+    match pane_id {
+        PaneId::Terminal(id) => format!("terminal_{id}"),
+        PaneId::Plugin(id) => format!("plugin_{id}"),
+    }
+}
+
+fn cli_pipe_source_name(pipe_message: &PipeMessage) -> Option<&str> {
+    match &pipe_message.source {
+        PipeSource::Cli(name) => Some(name.as_str()),
+        _ => None,
+    }
+}
+
 impl NiriDeepZellijBreakPlugin {
     fn maybe_restore_source_tab(&mut self, from_timer: bool) {
         let Some(mut pending) = self.pending_tab_restore else {
@@ -206,7 +233,11 @@ impl NiriDeepZellijBreakPlugin {
         {
             return Some(pane_id);
         }
-        let tab_position = self.tabs.iter().find(|tab| tab.active).map(|tab| tab.position)?;
+        let tab_position = self
+            .tabs
+            .iter()
+            .find(|tab| tab.active)
+            .map(|tab| tab.position)?;
         let pane_manifest = self.pane_manifest.as_ref()?;
         if let Some(pane_info) = get_focused_pane(tab_position, pane_manifest) {
             if !pane_info.is_plugin && pane_info.id > 0 {

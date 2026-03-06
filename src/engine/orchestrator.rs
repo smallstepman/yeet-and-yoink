@@ -560,6 +560,12 @@ impl Orchestrator {
                     preparation,
                 ) {
                     Ok(()) => {
+                        self.cleanup_merged_source_window(
+                            wm,
+                            source_window_id,
+                            target_window.id,
+                            adapter_name,
+                        );
                         logging::debug(format!(
                             "orchestrator: app move handled by {adapter_name} decision=MergeSourceFocused"
                         ));
@@ -594,6 +600,12 @@ impl Orchestrator {
                     preparation,
                 ) {
                     Ok(()) => {
+                        self.cleanup_merged_source_window(
+                            wm,
+                            source_window_id,
+                            target_window.id,
+                            adapter_name,
+                        );
                         logging::debug(format!(
                             "orchestrator: app move handled by {adapter_name} decision=MergeTargetFocused"
                         ));
@@ -609,6 +621,32 @@ impl Orchestrator {
                     }
                 }
             }
+        }
+    }
+
+    fn cleanup_merged_source_window<W>(
+        &self,
+        wm: &mut W,
+        source_window_id: u64,
+        target_window_id: u64,
+        adapter_name: &str,
+    ) where
+        W: WindowManagerAdapter,
+    {
+        if source_window_id == target_window_id {
+            return;
+        }
+        if let Err(err) = wm.focus_window_by_id(target_window_id) {
+            logging::debug(format!(
+                "orchestrator: merge cleanup focus failed adapter={} target_window_id={} err={:#}",
+                adapter_name, target_window_id, err
+            ));
+        }
+        if let Err(err) = wm.close_window_by_id(source_window_id) {
+            logging::debug(format!(
+                "orchestrator: merge cleanup close failed adapter={} source_window_id={} err={:#}",
+                adapter_name, source_window_id, err
+            ));
         }
     }
 
@@ -978,6 +1016,8 @@ mod tests {
         move_column_calls: usize,
         consume_calls: usize,
         consume_last_tile_index: Option<usize>,
+        close_calls: usize,
+        closed_window_ids: Vec<u64>,
     }
 
     impl WindowManagerMetadata for FakeWindowManager {
@@ -1080,6 +1120,17 @@ mod tests {
             }
             Ok(())
         }
+
+        fn close_window_by_id(&mut self, id: u64) -> Result<()> {
+            let original_len = self.windows.len();
+            self.windows.retain(|window| window.id != id);
+            if self.windows.len() == original_len {
+                return Err(anyhow!("window id {id} not found"));
+            }
+            self.close_calls += 1;
+            self.closed_window_ids.push(id);
+            Ok(())
+        }
     }
 
     #[test]
@@ -1129,6 +1180,8 @@ mod tests {
             move_column_calls: 0,
             consume_calls: 0,
             consume_last_tile_index: None,
+            close_calls: 0,
+            closed_window_ids: Vec::new(),
         };
 
         orchestrator
@@ -1204,6 +1257,8 @@ mod tests {
             move_column_calls: 0,
             consume_calls: 0,
             consume_last_tile_index: None,
+            close_calls: 0,
+            closed_window_ids: Vec::new(),
         };
 
         orchestrator
@@ -1261,6 +1316,8 @@ mod tests {
             move_column_calls: 0,
             consume_calls: 0,
             consume_last_tile_index: None,
+            close_calls: 0,
+            closed_window_ids: Vec::new(),
         };
 
         orchestrator
@@ -1280,6 +1337,46 @@ mod tests {
             counters.snapshot_calls.load(Ordering::Relaxed) > 0,
             "domain should resync after within-domain transfer"
         );
+    }
+
+    #[test]
+    fn cleanup_merged_source_window_closes_source_and_keeps_target_focused() {
+        let orchestrator = Orchestrator::default();
+        let mut wm = FakeWindowManager {
+            windows: vec![
+                WindowRecord {
+                    id: 301,
+                    app_id: Some("kitty".into()),
+                    title: Some("source".into()),
+                    pid: ProcessId::new(1),
+                    is_focused: true,
+                    original_tile_index: 1,
+                },
+                WindowRecord {
+                    id: 302,
+                    app_id: Some("kitty".into()),
+                    title: Some("target".into()),
+                    pid: ProcessId::new(2),
+                    is_focused: false,
+                    original_tile_index: 2,
+                },
+            ],
+            capabilities: WindowManagerCapabilities::none(),
+            move_calls: 0,
+            move_column_calls: 0,
+            consume_calls: 0,
+            consume_last_tile_index: None,
+            close_calls: 0,
+            closed_window_ids: Vec::new(),
+        };
+
+        orchestrator.cleanup_merged_source_window(&mut wm, 301, 302, "terminal");
+
+        assert_eq!(wm.close_calls, 1);
+        assert_eq!(wm.closed_window_ids, vec![301]);
+        assert_eq!(wm.windows.len(), 1);
+        assert_eq!(wm.windows[0].id, 302);
+        assert!(wm.windows[0].is_focused);
     }
 
     fn composed_tearout_capabilities_for(direction: Direction) -> WindowManagerCapabilities {
@@ -1331,6 +1428,8 @@ mod tests {
             move_column_calls: 0,
             consume_calls: 0,
             consume_last_tile_index: None,
+            close_calls: 0,
+            closed_window_ids: Vec::new(),
         };
 
         orchestrator
@@ -1367,6 +1466,8 @@ mod tests {
             move_column_calls: 0,
             consume_calls: 0,
             consume_last_tile_index: None,
+            close_calls: 0,
+            closed_window_ids: Vec::new(),
         };
 
         orchestrator

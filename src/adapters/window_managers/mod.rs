@@ -260,6 +260,7 @@ pub trait WindowManagerExecution {
     fn resize_with_intent(&mut self, intent: ResizeIntent) -> Result<()>;
     fn spawn(&mut self, command: Vec<String>) -> Result<()>;
     fn focus_window_by_id(&mut self, id: u64) -> Result<()>;
+    fn close_window_by_id(&mut self, id: u64) -> Result<()>;
 }
 
 /// Compile-time guardrail: callers cannot treat a type as an adapter
@@ -429,6 +430,10 @@ impl WindowManagerExecution for NiriAdapter {
 
     fn focus_window_by_id(&mut self, id: u64) -> Result<()> {
         self.inner.focus_window_by_id(id)
+    }
+
+    fn close_window_by_id(&mut self, id: u64) -> Result<()> {
+        self.inner.close_window_by_id(id)
     }
 }
 
@@ -666,6 +671,13 @@ impl WindowManagerExecution for SelectedWindowManager {
         match self {
             Self::Niri(inner) => inner.focus_window_by_id(id),
             Self::I3(inner) => inner.focus_window_by_id(id),
+        }
+    }
+
+    fn close_window_by_id(&mut self, id: u64) -> Result<()> {
+        match self {
+            Self::Niri(inner) => inner.close_window_by_id(id),
+            Self::I3(inner) => inner.close_window_by_id(id),
         }
     }
 }
