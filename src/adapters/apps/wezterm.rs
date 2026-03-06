@@ -146,16 +146,7 @@
 //!
 //! Keep this comment aligned with upstream semantics whenever WezTerm changes CLI/mux APIs.
 //!
-use anyhow::Result;
-
-use crate::adapters::apps::AppAdapter;
 use crate::adapters::terminal_multiplexers;
-use crate::engine::contract::{
-    AdapterCapabilities, AppKind, MergeExecutionMode, MergePreparation, MoveDecision, TearResult,
-    TerminalMultiplexerProvider, TopologyHandler,
-};
-use crate::engine::runtime::ProcessId;
-use crate::engine::topology::Direction;
 
 /// Terminal app adapter surface (domain identity + integration helpers).
 pub struct WeztermBackend;
@@ -166,109 +157,7 @@ pub const APP_IDS: &[&str] = &["org.wezfurlong.wezterm"];
 /// Terminal launch prefix for composing spawn commands (e.g. `["wezterm", "-e"]`).
 pub const TERMINAL_LAUNCH_PREFIX: &[&str] = &["wezterm", "-e"];
 
-impl WeztermBackend {
-    pub(crate) fn mux_provider() -> &'static dyn TerminalMultiplexerProvider {
-        terminal_multiplexers::active_mux_provider(ADAPTER_ALIASES)
-    }
-
-    pub fn spawn_attach_command(target: String) -> Option<Vec<String>> {
-        terminal_multiplexers::spawn_attach_command(ADAPTER_ALIASES, TERMINAL_LAUNCH_PREFIX, target)
-    }
-}
-
-impl AppAdapter for WeztermBackend {
-    fn adapter_name(&self) -> &'static str {
-        ADAPTER_NAME
-    }
-
-    fn config_aliases(&self) -> Option<&'static [&'static str]> {
-        Some(ADAPTER_ALIASES)
-    }
-
-    fn kind(&self) -> AppKind {
-        AppKind::Terminal
-    }
-
-    fn capabilities(&self) -> AdapterCapabilities {
-        Self::mux_provider().capabilities()
-    }
-}
-
-/// Delegate all TopologyHandler methods to the config-selected mux provider.
-/// `move_out` composes the terminal launch prefix onto any mux-level spawn command,
-/// so mux providers return only their own args (e.g. `["tmux", "attach", "-t", "..."]`)
-/// and the terminal host prepends `["wezterm", "-e"]`.
-macro_rules! delegate_topology_to_mux_provider {
-    ($ty:ty) => {
-        impl TopologyHandler for $ty {
-            fn can_focus(&self, dir: Direction, pid: u32) -> Result<bool> {
-                Self::mux_provider().can_focus(dir, pid)
-            }
-            fn move_decision(&self, dir: Direction, pid: u32) -> Result<MoveDecision> {
-                Self::mux_provider().move_decision(dir, pid)
-            }
-            fn can_resize(&self, dir: Direction, grow: bool, pid: u32) -> Result<bool> {
-                Self::mux_provider().can_resize(dir, grow, pid)
-            }
-            fn focus(&self, dir: Direction, pid: u32) -> Result<()> {
-                Self::mux_provider().focus(dir, pid)
-            }
-            fn move_internal(&self, dir: Direction, pid: u32) -> Result<()> {
-                Self::mux_provider().move_internal(dir, pid)
-            }
-            fn resize_internal(
-                &self,
-                dir: Direction,
-                grow: bool,
-                step: i32,
-                pid: u32,
-            ) -> Result<()> {
-                Self::mux_provider().resize_internal(dir, grow, step, pid)
-            }
-            fn rearrange(&self, dir: Direction, pid: u32) -> Result<()> {
-                Self::mux_provider().rearrange(dir, pid)
-            }
-            fn move_out(&self, dir: Direction, pid: u32) -> Result<TearResult> {
-                let mut tear = Self::mux_provider().move_out(dir, pid)?;
-                // Mux providers return only mux-level args; compose the terminal prefix.
-                if let Some(mux_args) = tear.spawn_command.take() {
-                    let mut cmd: Vec<String> = TERMINAL_LAUNCH_PREFIX
-                        .iter()
-                        .map(|s| s.to_string())
-                        .collect();
-                    cmd.extend(mux_args);
-                    tear.spawn_command = Some(cmd);
-                }
-                Ok(tear)
-            }
-            fn merge_execution_mode(&self) -> MergeExecutionMode {
-                Self::mux_provider().merge_execution_mode()
-            }
-            fn prepare_merge(&self, source_pid: Option<ProcessId>) -> Result<MergePreparation> {
-                Self::mux_provider().prepare_merge(source_pid)
-            }
-            fn augment_merge_preparation_for_target(
-                &self,
-                preparation: MergePreparation,
-                target_window_id: Option<u64>,
-            ) -> MergePreparation {
-                Self::mux_provider()
-                    .augment_merge_preparation_for_target(preparation, target_window_id)
-            }
-            fn merge_into_target(
-                &self,
-                dir: Direction,
-                source_pid: Option<ProcessId>,
-                target_pid: Option<ProcessId>,
-                preparation: MergePreparation,
-            ) -> Result<()> {
-                Self::mux_provider().merge_into_target(dir, source_pid, target_pid, preparation)
-            }
-        }
-    };
-}
-
-delegate_topology_to_mux_provider!(WeztermBackend);
+crate::adapters::apps::impl_terminal_host_backend!(WeztermBackend, TERMINAL_LAUNCH_PREFIX);
 
 #[cfg(test)]
 mod tests {

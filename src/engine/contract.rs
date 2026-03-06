@@ -64,6 +64,24 @@ pub trait TerminalMultiplexerProvider: TopologyHandler + ChainResolver {
             .context("no terminal multiplexer pane exists in requested direction")
     }
 
+    fn directional_neighbors_from_pane_lookup(&self, pid: u32) -> Result<DirectionalNeighbors> {
+        let pane_id = self.focused_pane_for_pid(pid)?;
+        let mut neighbors = DirectionalNeighbors::default();
+        for direction in Direction::ALL {
+            neighbors.set(
+                direction,
+                self.pane_in_direction_for_pid(pid, pane_id, direction)?
+                    .is_some(),
+            );
+        }
+        Ok(neighbors)
+    }
+
+    fn can_focus_from_pane_lookup(&self, dir: Direction, pid: u32) -> Result<bool> {
+        let pane_id = self.focused_pane_for_pid(pid)?;
+        Ok(self.pane_in_direction_for_pid(pid, pane_id, dir)?.is_some())
+    }
+
     fn send_text_to_pane(&self, pid: u32, pane_id: u64, text: &str) -> Result<()>;
     /// Returns the mux-specific attach arguments (e.g. `["tmux", "attach", "-t", target]`),
     /// or `None` if the mux manages windows directly (built-in mux).
@@ -194,6 +212,33 @@ impl AppCapabilities {
             merge: false,
         }
     }
+
+    pub const fn terminal_mux_defaults() -> Self {
+        Self {
+            probe: true,
+            focus: true,
+            move_internal: true,
+            resize_internal: false,
+            rearrange: false,
+            tear_out: true,
+            merge: true,
+        }
+    }
+
+    pub const fn with_resize_internal(mut self, resize_internal: bool) -> Self {
+        self.resize_internal = resize_internal;
+        self
+    }
+
+    pub const fn with_rearrange(mut self, rearrange: bool) -> Self {
+        self.rearrange = rearrange;
+        self
+    }
+
+    pub const fn with_merge(mut self, merge: bool) -> Self {
+        self.merge = merge;
+        self
+    }
 }
 
 pub type AdapterCapabilities = AppCapabilities;
@@ -303,6 +348,20 @@ pub trait TopologyHandler {
         Ok(MergePreparation::none())
     }
 
+    fn prepare_merge_payload<T>(
+        &self,
+        source_pid: Option<ProcessId>,
+        missing_source_pid: &'static str,
+        capture: impl FnOnce(u32) -> Result<T>,
+    ) -> Result<MergePreparation>
+    where
+        Self: Sized,
+        T: Send + 'static,
+    {
+        let source_pid = source_pid.context(missing_source_pid)?;
+        Ok(MergePreparation::with_payload(capture(source_pid.get())?))
+    }
+
     fn augment_merge_preparation_for_target(
         &self,
         preparation: MergePreparation,
@@ -319,6 +378,27 @@ pub trait TopologyHandler {
         _preparation: MergePreparation,
     ) -> Result<()> {
         self.merge_into(dir, legacy_pid(source_pid))
+    }
+
+    fn resolve_target_focused_merge<T>(
+        &self,
+        source_pid: Option<ProcessId>,
+        target_pid: Option<ProcessId>,
+        preparation: MergePreparation,
+        missing_source_pid: &'static str,
+        missing_target_pid: &'static str,
+        missing_preparation: &'static str,
+    ) -> Result<(u32, u32, T)>
+    where
+        Self: Sized,
+        T: Send + 'static,
+    {
+        let source_pid = source_pid.context(missing_source_pid)?;
+        let target_pid = target_pid.context(missing_target_pid)?;
+        let preparation = preparation
+            .into_payload::<T>()
+            .context(missing_preparation)?;
+        Ok((source_pid.get(), target_pid.get(), preparation))
     }
 }
 

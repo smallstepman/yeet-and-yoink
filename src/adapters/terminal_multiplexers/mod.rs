@@ -1,7 +1,7 @@
 use anyhow::Result;
 
 use crate::config::TerminalMuxBackend;
-use crate::engine::contract::TerminalMultiplexerProvider;
+use crate::engine::contract::{TearResult, TerminalMultiplexerProvider};
 
 pub mod kitty;
 pub mod tmux;
@@ -31,6 +31,21 @@ pub fn spawn_attach_command(
         .collect();
     command.extend(mux_args);
     Some(command)
+}
+
+pub fn prepend_terminal_launch_prefix(
+    terminal_launch_prefix: &[&str],
+    mut tear: TearResult,
+) -> TearResult {
+    if let Some(mux_args) = tear.spawn_command.take() {
+        let mut command: Vec<String> = terminal_launch_prefix
+            .iter()
+            .map(|segment| segment.to_string())
+            .collect();
+        command.extend(mux_args);
+        tear.spawn_command = Some(command);
+    }
+    tear
 }
 
 pub fn active_foreground_process(aliases: &[&str], pid: u32) -> Option<String> {

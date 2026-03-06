@@ -513,15 +513,7 @@ impl TmuxMuxProvider {
 
 impl TerminalMultiplexerProvider for TmuxMuxProvider {
     fn capabilities(&self) -> AdapterCapabilities {
-        AdapterCapabilities {
-            probe: true,
-            focus: true,
-            move_internal: true,
-            resize_internal: false,
-            rearrange: false,
-            tear_out: true,
-            merge: true,
-        }
+        AdapterCapabilities::terminal_mux_defaults()
     }
 
     fn focused_pane_for_pid(&self, pid: u32) -> Result<u64> {
@@ -701,35 +693,41 @@ impl TopologyHandler for TmuxMuxProvider {
     }
 
     fn prepare_merge(&self, source_pid: Option<ProcessId>) -> Result<MergePreparation> {
-        let source_pid = source_pid.context("source tmux merge missing pid")?;
-        let (pane_id, session_name) = self.with_session(source_pid.get(), |session| {
-            let pane_id = session.focused_pane_id_for_client()?;
-            let session_name = session.query_pane(pane_id, "#{session_name}")?;
-            Ok((pane_id, session_name))
-        })?;
-        Ok(MergePreparation::with_payload(TmuxMuxMergePreparation {
-            pane_id,
-            session_name,
-        }))
+        self.prepare_merge_payload(source_pid, "source tmux merge missing pid", |source_pid| {
+            let (pane_id, session_name) = self.with_session(source_pid, |session| {
+                let pane_id = session.focused_pane_id_for_client()?;
+                let session_name = session.query_pane(pane_id, "#{session_name}")?;
+                Ok((pane_id, session_name))
+            })?;
+            Ok(TmuxMuxMergePreparation {
+                pane_id,
+                session_name,
+            })
+        })
     }
 
     fn merge_into_target(
         &self,
         dir: Direction,
-        _source_pid: Option<ProcessId>,
+        source_pid: Option<ProcessId>,
         target_pid: Option<ProcessId>,
         preparation: MergePreparation,
     ) -> Result<()> {
-        let target_pid = target_pid.context("target tmux merge missing pid")?;
+        let (_, target_pid, preparation) = self
+            .resolve_target_focused_merge::<TmuxMuxMergePreparation>(
+                source_pid,
+                target_pid,
+                preparation,
+                "source tmux merge missing pid",
+                "target tmux merge missing pid",
+                "source tmux merge missing pane/session metadata",
+            )?;
         let target_session_name =
-            self.with_session(target_pid.get(), |session| Ok(session.name.clone()))?;
-        let preparation = preparation
-            .into_payload::<TmuxMuxMergePreparation>()
-            .context("source tmux merge missing pane/session metadata")?;
+            self.with_session(target_pid, |session| Ok(session.name.clone()))?;
         self.merge_source_pane_into_focused_target(
-            target_pid.get(),
+            target_pid,
             preparation.pane_id,
-            target_pid.get(),
+            target_pid,
             None,
             dir,
         )?;
@@ -768,15 +766,7 @@ impl AppAdapter for Tmux {
     }
 
     fn capabilities(&self) -> AdapterCapabilities {
-        AdapterCapabilities {
-            probe: true,
-            focus: true,
-            move_internal: true,
-            resize_internal: false,
-            rearrange: false,
-            tear_out: true,
-            merge: false,
-        }
+        AdapterCapabilities::terminal_mux_defaults().with_merge(false)
     }
 }
 

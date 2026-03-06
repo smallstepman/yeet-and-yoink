@@ -1,3 +1,162 @@
+use crate::config::AppSection;
+
+pub use crate::engine::contract::{
+    unsupported_operation, AdapterCapabilities, AppAdapter, AppCapabilities, AppKind,
+    ChainResolver, MergeExecutionMode, MergePreparation, MoveDecision, TearResult, TopologyHandler,
+    TopologySnapshot,
+};
+
+macro_rules! delegate_topology_to_mux_provider {
+    ($ty:ty, $launch_prefix:expr) => {
+        impl crate::engine::contract::TopologyHandler for $ty {
+            fn can_focus(
+                &self,
+                dir: crate::engine::topology::Direction,
+                pid: u32,
+            ) -> anyhow::Result<bool> {
+                Self::mux_provider().can_focus(dir, pid)
+            }
+
+            fn move_decision(
+                &self,
+                dir: crate::engine::topology::Direction,
+                pid: u32,
+            ) -> anyhow::Result<crate::engine::contract::MoveDecision> {
+                Self::mux_provider().move_decision(dir, pid)
+            }
+
+            fn can_resize(
+                &self,
+                dir: crate::engine::topology::Direction,
+                grow: bool,
+                pid: u32,
+            ) -> anyhow::Result<bool> {
+                Self::mux_provider().can_resize(dir, grow, pid)
+            }
+
+            fn focus(
+                &self,
+                dir: crate::engine::topology::Direction,
+                pid: u32,
+            ) -> anyhow::Result<()> {
+                Self::mux_provider().focus(dir, pid)
+            }
+
+            fn move_internal(
+                &self,
+                dir: crate::engine::topology::Direction,
+                pid: u32,
+            ) -> anyhow::Result<()> {
+                Self::mux_provider().move_internal(dir, pid)
+            }
+
+            fn resize_internal(
+                &self,
+                dir: crate::engine::topology::Direction,
+                grow: bool,
+                step: i32,
+                pid: u32,
+            ) -> anyhow::Result<()> {
+                Self::mux_provider().resize_internal(dir, grow, step, pid)
+            }
+
+            fn rearrange(
+                &self,
+                dir: crate::engine::topology::Direction,
+                pid: u32,
+            ) -> anyhow::Result<()> {
+                Self::mux_provider().rearrange(dir, pid)
+            }
+
+            fn move_out(
+                &self,
+                dir: crate::engine::topology::Direction,
+                pid: u32,
+            ) -> anyhow::Result<crate::engine::contract::TearResult> {
+                Ok(
+                    crate::adapters::terminal_multiplexers::prepend_terminal_launch_prefix(
+                        $launch_prefix,
+                        Self::mux_provider().move_out(dir, pid)?,
+                    ),
+                )
+            }
+
+            fn merge_execution_mode(&self) -> crate::engine::contract::MergeExecutionMode {
+                Self::mux_provider().merge_execution_mode()
+            }
+
+            fn prepare_merge(
+                &self,
+                source_pid: Option<crate::engine::runtime::ProcessId>,
+            ) -> anyhow::Result<crate::engine::contract::MergePreparation> {
+                Self::mux_provider().prepare_merge(source_pid)
+            }
+
+            fn augment_merge_preparation_for_target(
+                &self,
+                preparation: crate::engine::contract::MergePreparation,
+                target_window_id: Option<u64>,
+            ) -> crate::engine::contract::MergePreparation {
+                Self::mux_provider()
+                    .augment_merge_preparation_for_target(preparation, target_window_id)
+            }
+
+            fn merge_into_target(
+                &self,
+                dir: crate::engine::topology::Direction,
+                source_pid: Option<crate::engine::runtime::ProcessId>,
+                target_pid: Option<crate::engine::runtime::ProcessId>,
+                preparation: crate::engine::contract::MergePreparation,
+            ) -> anyhow::Result<()> {
+                Self::mux_provider().merge_into_target(dir, source_pid, target_pid, preparation)
+            }
+        }
+    };
+}
+
+pub(crate) use delegate_topology_to_mux_provider;
+
+macro_rules! impl_terminal_host_backend {
+    ($ty:ty, $launch_prefix:expr) => {
+        impl $ty {
+            pub(crate) fn mux_provider(
+            ) -> &'static dyn crate::engine::contract::TerminalMultiplexerProvider {
+                crate::adapters::terminal_multiplexers::active_mux_provider(ADAPTER_ALIASES)
+            }
+
+            pub fn spawn_attach_command(target: String) -> Option<Vec<String>> {
+                crate::adapters::terminal_multiplexers::spawn_attach_command(
+                    ADAPTER_ALIASES,
+                    $launch_prefix,
+                    target,
+                )
+            }
+        }
+
+        impl crate::adapters::apps::AppAdapter for $ty {
+            fn adapter_name(&self) -> &'static str {
+                ADAPTER_NAME
+            }
+
+            fn config_aliases(&self) -> Option<&'static [&'static str]> {
+                Some(ADAPTER_ALIASES)
+            }
+
+            fn kind(&self) -> crate::engine::contract::AppKind {
+                crate::engine::contract::AppKind::Terminal
+            }
+
+            fn capabilities(&self) -> crate::engine::contract::AdapterCapabilities {
+                Self::mux_provider().capabilities()
+            }
+        }
+
+        crate::adapters::apps::delegate_topology_to_mux_provider!($ty, $launch_prefix);
+    };
+}
+
+pub(crate) use impl_terminal_host_backend;
+
 pub mod alacritty;
 pub mod emacs;
 pub mod foot;
@@ -7,14 +166,6 @@ pub mod librefox;
 pub mod nvim;
 pub mod vscode;
 pub mod wezterm;
-
-use crate::config::AppSection;
-
-pub use crate::engine::contract::{
-    unsupported_operation, AdapterCapabilities, AppAdapter, AppCapabilities, AppKind,
-    ChainResolver, MergeExecutionMode, MergePreparation, MoveDecision, TearResult, TopologyHandler,
-    TopologySnapshot,
-};
 
 /// Developer note for adding a new adapter:
 /// 1. Implement `AppAdapter` and declare all booleans in `capabilities`.

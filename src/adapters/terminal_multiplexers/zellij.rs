@@ -1084,15 +1084,7 @@ impl TerminalMultiplexerProvider for ZellijMuxProvider {
     }
 
     fn capabilities(&self) -> AdapterCapabilities {
-        AdapterCapabilities {
-            probe: true,
-            focus: true,
-            move_internal: true,
-            resize_internal: false,
-            rearrange: false,
-            tear_out: true,
-            merge: true,
-        }
+        AdapterCapabilities::terminal_mux_defaults()
     }
 
     fn list_panes_for_pid(&self, pid: u32) -> Result<Vec<TerminalPaneSnapshot>> {
@@ -1183,11 +1175,7 @@ impl TerminalMultiplexerProvider for ZellijMuxProvider {
 
 impl TopologyHandler for ZellijMuxProvider {
     fn directional_neighbors(&self, pid: u32) -> Result<DirectionalNeighbors> {
-        let mut neighbors = DirectionalNeighbors::default();
-        for direction in Direction::ALL {
-            neighbors.set(direction, self.can_focus(direction, pid)?);
-        }
-        Ok(neighbors)
+        self.directional_neighbors_from_pane_lookup(pid)
     }
 
     fn supports_rearrange_decision(&self) -> bool {
@@ -1199,7 +1187,7 @@ impl TopologyHandler for ZellijMuxProvider {
     }
 
     fn can_focus(&self, dir: Direction, pid: u32) -> Result<bool> {
-        Ok(self.probe_neighbor(pid, dir)?.is_some())
+        self.can_focus_from_pane_lookup(dir, pid)
     }
 
     fn move_decision(&self, dir: Direction, pid: u32) -> Result<MoveDecision> {
@@ -1320,14 +1308,19 @@ impl TopologyHandler for ZellijMuxProvider {
     }
 
     fn prepare_merge(&self, source_pid: Option<ProcessId>) -> Result<MergePreparation> {
-        let source_pid = source_pid.context("source zellij merge missing pid")?;
-        let pane_id = self
-            .focused_pane_id_for_pid(source_pid.get())?
-            .and_then(|pane_id| Self::pane_id_number(&pane_id))
-            .context("source zellij merge missing pane id")?;
-        Ok(MergePreparation::with_payload(ZellijMergePreparation {
-            source_pane_id: pane_id,
-        }))
+        self.prepare_merge_payload(
+            source_pid,
+            "source zellij merge missing pid",
+            |source_pid| {
+                let pane_id = self
+                    .focused_pane_id_for_pid(source_pid)?
+                    .and_then(|pane_id| Self::pane_id_number(&pane_id))
+                    .context("source zellij merge missing pane id")?;
+                Ok(ZellijMergePreparation {
+                    source_pane_id: pane_id,
+                })
+            },
+        )
     }
 
     fn merge_into_target(
@@ -1337,15 +1330,19 @@ impl TopologyHandler for ZellijMuxProvider {
         target_pid: Option<ProcessId>,
         preparation: MergePreparation,
     ) -> Result<()> {
-        let source_pid = source_pid.context("source zellij merge missing pid")?;
-        let target_pid = target_pid.context("target zellij merge missing pid")?;
-        let preparation = preparation
-            .into_payload::<ZellijMergePreparation>()
-            .context("source zellij merge missing pane metadata")?;
+        let (source_pid, target_pid, preparation) = self
+            .resolve_target_focused_merge::<ZellijMergePreparation>(
+                source_pid,
+                target_pid,
+                preparation,
+                "source zellij merge missing pid",
+                "target zellij merge missing pid",
+                "source zellij merge missing pane metadata",
+            )?;
         self.merge_source_pane_into_focused_target(
-            source_pid.get(),
+            source_pid,
             preparation.source_pane_id,
-            target_pid.get(),
+            target_pid,
             None,
             dir,
         )

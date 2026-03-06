@@ -298,15 +298,9 @@ impl TerminalMultiplexerProvider for WeztermMux {
     }
 
     fn capabilities(&self) -> AdapterCapabilities {
-        AdapterCapabilities {
-            probe: true,
-            focus: true,
-            move_internal: true,
-            resize_internal: true,
-            rearrange: true,
-            tear_out: true,
-            merge: true,
-        }
+        AdapterCapabilities::terminal_mux_defaults()
+            .with_resize_internal(true)
+            .with_rearrange(true)
     }
 
     fn focused_pane_for_pid(&self, pid: u32) -> Result<u64> {
@@ -537,16 +531,7 @@ impl TerminalMultiplexerProvider for WeztermMux {
 
 impl TopologyHandler for WeztermMux {
     fn directional_neighbors(&self, pid: u32) -> Result<DirectionalNeighbors> {
-        let pane_id = self.focused_pane_for_pid(pid)?;
-        let mut neighbors = DirectionalNeighbors::default();
-        for direction in Direction::ALL {
-            neighbors.set(
-                direction,
-                self.pane_in_direction_for_pid(pid, pane_id, direction)?
-                    .is_some(),
-            );
-        }
-        Ok(neighbors)
+        self.directional_neighbors_from_pane_lookup(pid)
     }
 
     fn window_count(&self, pid: u32) -> Result<u32> {
@@ -564,8 +549,7 @@ impl TopologyHandler for WeztermMux {
     }
 
     fn can_focus(&self, dir: Direction, pid: u32) -> Result<bool> {
-        let pane_id = self.focused_pane_for_pid(pid)?;
-        Ok(self.pane_in_direction_for_pid(pid, pane_id, dir)?.is_some())
+        self.can_focus_from_pane_lookup(dir, pid)
     }
 
     fn move_decision(&self, dir: Direction, pid: u32) -> Result<MoveDecision> {
@@ -756,12 +740,16 @@ impl TopologyHandler for WeztermMux {
     }
 
     fn prepare_merge(&self, source_pid: Option<ProcessId>) -> Result<MergePreparation> {
-        let source_pid = source_pid.context("source wezterm merge missing pid")?;
-        let source_pane_id = self.focused_pane_for_pid(source_pid.get())?;
-        Ok(MergePreparation::with_payload(WeztermMuxMergePreparation {
-            pane_id: source_pane_id,
-            target_window_id: None,
-        }))
+        self.prepare_merge_payload(
+            source_pid,
+            "source wezterm merge missing pid",
+            |source_pid| {
+                Ok(WeztermMuxMergePreparation {
+                    pane_id: self.focused_pane_for_pid(source_pid)?,
+                    target_window_id: None,
+                })
+            },
+        )
     }
 
     fn augment_merge_preparation_for_target(
@@ -782,15 +770,19 @@ impl TopologyHandler for WeztermMux {
         target_pid: Option<ProcessId>,
         preparation: MergePreparation,
     ) -> Result<()> {
-        let source_pid = source_pid.context("source wezterm merge missing pid")?;
-        let preparation = preparation
-            .into_payload::<WeztermMuxMergePreparation>()
-            .context("source wezterm merge missing pane id")?;
-        let target_pid = target_pid.context("target wezterm merge missing pid")?;
+        let (source_pid, target_pid, preparation) = self
+            .resolve_target_focused_merge::<WeztermMuxMergePreparation>(
+                source_pid,
+                target_pid,
+                preparation,
+                "source wezterm merge missing pid",
+                "target wezterm merge missing pid",
+                "source wezterm merge missing pane id",
+            )?;
         self.merge_source_pane_into_focused_target(
-            source_pid.get(),
+            source_pid,
             preparation.pane_id,
-            target_pid.get(),
+            target_pid,
             preparation.target_window_id,
             dir,
         )

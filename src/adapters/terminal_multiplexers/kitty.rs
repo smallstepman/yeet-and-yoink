@@ -325,15 +325,9 @@ impl TerminalMultiplexerProvider for KittyMux {
     }
 
     fn capabilities(&self) -> AdapterCapabilities {
-        AdapterCapabilities {
-            probe: true,
-            focus: true,
-            move_internal: true,
-            resize_internal: true,
-            rearrange: true,
-            tear_out: true,
-            merge: true,
-        }
+        AdapterCapabilities::terminal_mux_defaults()
+            .with_resize_internal(true)
+            .with_rearrange(true)
     }
 
     fn focused_pane_for_pid(&self, pid: u32) -> Result<u64> {
@@ -477,16 +471,7 @@ impl TerminalMultiplexerProvider for KittyMux {
 
 impl TopologyHandler for KittyMux {
     fn directional_neighbors(&self, pid: u32) -> Result<DirectionalNeighbors> {
-        let focused_pane = self.focused_pane_for_pid(pid)?;
-        let mut neighbors = DirectionalNeighbors::default();
-        for direction in Direction::ALL {
-            neighbors.set(
-                direction,
-                self.pane_in_direction_for_pid(pid, focused_pane, direction)?
-                    .is_some(),
-            );
-        }
-        Ok(neighbors)
+        self.directional_neighbors_from_pane_lookup(pid)
     }
 
     fn window_count(&self, pid: u32) -> Result<u32> {
@@ -500,10 +485,7 @@ impl TopologyHandler for KittyMux {
     }
 
     fn can_focus(&self, dir: Direction, pid: u32) -> Result<bool> {
-        let focused_pane = self.focused_pane_for_pid(pid)?;
-        Ok(self
-            .pane_in_direction_for_pid(pid, focused_pane, dir)?
-            .is_some())
+        self.can_focus_from_pane_lookup(dir, pid)
     }
 
     fn move_decision(&self, dir: Direction, pid: u32) -> Result<MoveDecision> {
@@ -569,11 +551,11 @@ impl TopologyHandler for KittyMux {
     }
 
     fn prepare_merge(&self, source_pid: Option<ProcessId>) -> Result<MergePreparation> {
-        let source_pid = source_pid.context("source kitty merge missing pid")?;
-        let pane_id = self.focused_pane_for_pid(source_pid.get())?;
-        Ok(MergePreparation::with_payload(KittyMuxMergePreparation {
-            pane_id,
-        }))
+        self.prepare_merge_payload(source_pid, "source kitty merge missing pid", |source_pid| {
+            Ok(KittyMuxMergePreparation {
+                pane_id: self.focused_pane_for_pid(source_pid)?,
+            })
+        })
     }
 
     fn merge_into_target(
@@ -583,15 +565,19 @@ impl TopologyHandler for KittyMux {
         target_pid: Option<ProcessId>,
         preparation: MergePreparation,
     ) -> Result<()> {
-        let source_pid = source_pid.context("source kitty merge missing pid")?;
-        let target_pid = target_pid.context("target kitty merge missing pid")?;
-        let preparation = preparation
-            .into_payload::<KittyMuxMergePreparation>()
-            .context("source kitty merge missing pane id")?;
+        let (source_pid, target_pid, preparation) = self
+            .resolve_target_focused_merge::<KittyMuxMergePreparation>(
+                source_pid,
+                target_pid,
+                preparation,
+                "source kitty merge missing pid",
+                "target kitty merge missing pid",
+                "source kitty merge missing pane id",
+            )?;
         self.merge_source_pane_into_focused_target(
-            source_pid.get(),
+            source_pid,
             preparation.pane_id,
-            target_pid.get(),
+            target_pid,
             None,
             dir,
         )
