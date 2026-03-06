@@ -173,7 +173,7 @@ fn summon_state_path() -> PathBuf {
     let base = std::env::var_os("XDG_RUNTIME_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("/tmp"));
-    base.join("niri-deep").join("summon-state.json")
+    base.join("yeet-and-yoink").join("summon-state.json")
 }
 
 fn load_summon_state() -> Result<SummonState> {

@@ -1,6 +1,6 @@
 ## Why
 
-The current `niri-deep` architecture is a niri-centric planner/executor pipeline that relies on per-adapter edge probes and layer-order heuristics. It does not build one global topology for nested domains, so cross-domain focus/move/tear-off behavior is not deterministic across heterogeneous tiling models.
+The current `yeet-and-yoink` architecture is a niri-centric planner/executor pipeline that relies on per-adapter edge probes and layer-order heuristics. It does not build one global topology for nested domains, so cross-domain focus/move/tear-off behavior is not deterministic across heterogeneous tiling models.
 
 ## What Changes
 

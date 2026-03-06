@@ -1,6 +1,6 @@
 use std::any::Any;
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
 
 use crate::engine::runtime::ProcessId;
 use crate::engine::topology::{Direction, DirectionalNeighbors, DomainId, MoveSurface};
@@ -17,10 +17,53 @@ pub trait ChainResolver {
 }
 
 pub trait TerminalMultiplexerProvider: TopologyHandler + ChainResolver {
+    fn cli_output_for_pid(&self, _pid: u32, _args: &[&str]) -> Result<std::process::Output> {
+        Err(unsupported_operation(
+            std::any::type_name::<Self>(),
+            "cli_output_for_pid",
+        ))
+    }
+
+    fn cli_stdout_for_pid(&self, pid: u32, args: &[&str]) -> Result<String> {
+        let output = self.cli_output_for_pid(pid, args)?;
+        if !output.status.success() {
+            return Err(anyhow!(
+                "terminal multiplexer command {:?} failed: {}",
+                args,
+                String::from_utf8_lossy(&output.stderr).trim()
+            ));
+        }
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    }
+
+    fn list_panes_for_pid(&self, _pid: u32) -> Result<Vec<TerminalPaneSnapshot>> {
+        Err(unsupported_operation(
+            std::any::type_name::<Self>(),
+            "list_panes_for_pid",
+        ))
+    }
+
     /// Capabilities this mux backend supports (pane focus, move, resize, etc).
     fn capabilities(&self) -> AdapterCapabilities;
     fn focused_pane_for_pid(&self, pid: u32) -> Result<u64>;
-    fn pane_neighbor_for_pid(&self, pid: u32, pane_id: u64, dir: Direction) -> Result<u64>;
+
+    fn pane_in_direction_for_pid(
+        &self,
+        _pid: u32,
+        _pane_id: u64,
+        _dir: Direction,
+    ) -> Result<Option<u64>> {
+        Err(unsupported_operation(
+            std::any::type_name::<Self>(),
+            "pane_in_direction_for_pid",
+        ))
+    }
+
+    fn pane_neighbor_for_pid(&self, pid: u32, pane_id: u64, dir: Direction) -> Result<u64> {
+        self.pane_in_direction_for_pid(pid, pane_id, dir)?
+            .context("no terminal multiplexer pane exists in requested direction")
+    }
+
     fn send_text_to_pane(&self, pid: u32, pane_id: u64, text: &str) -> Result<()>;
     /// Returns the mux-specific attach arguments (e.g. `["tmux", "attach", "-t", target]`),
     /// or `None` if the mux manages windows directly (built-in mux).
@@ -35,6 +78,15 @@ pub trait TerminalMultiplexerProvider: TopologyHandler + ChainResolver {
         dir: Direction,
     ) -> Result<()>;
     fn active_foreground_process(&self, pid: u32) -> Option<String>;
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TerminalPaneSnapshot {
+    pub pane_id: u64,
+    pub tab_id: Option<u64>,
+    pub window_id: Option<u64>,
+    pub is_active: bool,
+    pub foreground_process_name: Option<String>,
 }
 /// What the app wants to do for a move operation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

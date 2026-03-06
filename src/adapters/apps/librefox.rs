@@ -40,7 +40,7 @@ impl Librefox {
             .ok()
             .map(|value| value.trim().to_string())
             .filter(|value| !value.is_empty())
-            .unwrap_or_else(|| "niri-deep-firefox-bridge".to_string())
+            .unwrap_or_else(|| "yeet-and-yoink-firefox-bridge".to_string())
     }
 
     fn send_request(request: &FirefoxRequest) -> Result<Value> {
@@ -323,7 +323,7 @@ mod tests {
         fn new() -> Self {
             let unique = NEXT_ID.fetch_add(1, Ordering::Relaxed);
             let base = std::env::temp_dir().join(format!(
-                "niri-deep-firefox-bridge-test-{}-{unique}",
+                "yeet-and-yoink-firefox-bridge-test-{}-{unique}",
                 std::process::id()
             ));
             let responses_dir = base.join("responses");

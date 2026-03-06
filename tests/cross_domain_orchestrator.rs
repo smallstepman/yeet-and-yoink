@@ -4,17 +4,17 @@ use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
 
-use niri_deep::adapters::window_managers::{
+use yeet_and_yoink::adapters::window_managers::{
     FocusedWindowView, ResizeIntent, WindowManagerCapabilities, WindowManagerExecution,
     WindowManagerIntrospection, WindowManagerMetadata, WindowRecord,
 };
-use niri_deep::engine::domain::PaneState;
-use niri_deep::engine::domain::{DomainLeafSnapshot, DomainSnapshot, ErasedDomain};
-use niri_deep::engine::domain::{EDITOR_DOMAIN_ID, TERMINAL_DOMAIN_ID, WM_DOMAIN_ID};
-use niri_deep::engine::orchestrator::{ActionKind, ActionRequest, Orchestrator};
-use niri_deep::engine::runtime::ProcessId;
-use niri_deep::engine::topology::Direction;
-use niri_deep::engine::topology::Rect;
+use yeet_and_yoink::engine::domain::PaneState;
+use yeet_and_yoink::engine::domain::{DomainLeafSnapshot, DomainSnapshot, ErasedDomain};
+use yeet_and_yoink::engine::domain::{EDITOR_DOMAIN_ID, TERMINAL_DOMAIN_ID, WM_DOMAIN_ID};
+use yeet_and_yoink::engine::orchestrator::{ActionKind, ActionRequest, Orchestrator};
+use yeet_and_yoink::engine::runtime::ProcessId;
+use yeet_and_yoink::engine::topology::Direction;
+use yeet_and_yoink::engine::topology::Rect;
 
 #[derive(Clone, Default)]
 struct DomainCounters {

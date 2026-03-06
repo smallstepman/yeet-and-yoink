@@ -10,7 +10,7 @@ use super::WEZTERM_HOST_ALIASES;
 use crate::config::TerminalMuxBackend;
 use crate::engine::contract::{
     AdapterCapabilities, MergeExecutionMode, MergePreparation, MoveDecision, TearResult,
-    TerminalMultiplexerProvider, TopologyHandler,
+    TerminalMultiplexerProvider, TerminalPaneSnapshot, TopologyHandler,
 };
 use crate::engine::runtime::ProcessId;
 use crate::engine::topology::{Direction, DirectionalNeighbors, MoveSurface};
@@ -58,56 +58,8 @@ struct WeztermMuxMergePreparation {
 }
 
 impl WeztermMux {
-    fn cli_output(pid: u32, args: &[&str]) -> Result<std::process::Output> {
-        let runtime_dir = std::env::var("XDG_RUNTIME_DIR")
-            .context("XDG_RUNTIME_DIR is not set; cannot locate wezterm socket")?;
-        let sock_path = PathBuf::from(format!("{runtime_dir}/wezterm/gui-sock-{pid}"));
-        if !sock_path.exists() {
-            bail!("wezterm socket not found: {}", sock_path.display());
-        }
-        let sock = sock_path.to_string_lossy().to_string();
-        logging::debug(format!(
-            "wezterm: pid={} cli {:?} via WEZTERM_UNIX_SOCKET",
-            pid, args
-        ));
-        let output = Command::new("wezterm")
-            .env("WEZTERM_UNIX_SOCKET", &sock)
-            .args(["cli"])
-            .args(args)
-            .output()
-            .context("failed to run wezterm cli")?;
-        logging::debug(format!(
-            "wezterm: pid={} cli {:?} status={} stdout={:?} stderr={:?}",
-            pid,
-            args,
-            output.status,
-            String::from_utf8_lossy(&output.stdout).trim(),
-            String::from_utf8_lossy(&output.stderr).trim()
-        ));
-        Ok(output)
-    }
-
-    fn cli_stdout(pid: u32, args: &[&str]) -> Result<String> {
-        let output = Self::cli_output(pid, args)?;
-        if !output.status.success() {
-            bail!(
-                "wezterm cli {:?} failed: {}",
-                args,
-                String::from_utf8_lossy(&output.stderr).trim()
-            );
-        }
-        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
-    }
-
-    fn list_panes(pid: u32) -> Result<Vec<WeztermMuxPane>> {
-        let stdout = Self::cli_stdout(pid, &["list", "--format", "json"])?;
-        let panes: Vec<WeztermMuxPane> =
-            serde_json::from_str(&stdout).context("failed to parse wezterm pane list json")?;
-        Ok(panes)
-    }
-
-    fn list_clients(pid: u32) -> Result<Vec<WeztermMuxClient>> {
-        let output = match Self::cli_output(pid, &["list-clients", "--format", "json"]) {
+    fn list_clients(&self, pid: u32) -> Result<Vec<WeztermMuxClient>> {
+        let output = match self.cli_output_for_pid(pid, &["list-clients", "--format", "json"]) {
             Ok(output) => output,
             // Graceful fallback for older wezterm builds that may not support list-clients.
             Err(e) => {
@@ -165,45 +117,6 @@ impl WeztermMux {
             })
     }
 
-    fn focused_pane_id(pid: u32) -> Result<u64> {
-        let clients = Self::list_clients(pid)?;
-        logging::debug(format!(
-            "wezterm: pid={} focused-pane lookup clients={}",
-            pid,
-            clients.len()
-        ));
-
-        if let Some(selection) = Self::select_client_focused_pane(&clients, pid, |_| true) {
-            let pane_id = selection.pane_id();
-            match selection {
-                WeztermMuxFocusSelection::MatchingPid(_) => logging::debug(format!(
-                    "wezterm: pid={} focused pane from matching client = {}",
-                    pid, pane_id
-                )),
-                WeztermMuxFocusSelection::AnyClient(_) => logging::debug(format!(
-                    "wezterm: pid={} focused pane from any client fallback = {}",
-                    pid, pane_id
-                )),
-            }
-            return Ok(pane_id);
-        }
-
-        let panes = Self::list_panes(pid)?;
-        if let Some(pane_id) = panes.iter().find(|p| p.is_active).map(|p| p.pane_id) {
-            logging::debug(format!(
-                "wezterm: pid={} focused pane from active pane fallback = {}",
-                pid, pane_id
-            ));
-            return Ok(pane_id);
-        }
-
-        logging::debug(format!(
-            "wezterm: pid={} unable to determine focused pane",
-            pid
-        ));
-        bail!("unable to determine focused wezterm pane")
-    }
-
     fn direction_name(dir: Direction) -> &'static str {
         match dir.egocentric() {
             "left" => "Left",
@@ -225,19 +138,22 @@ impl WeztermMux {
     }
 
     fn merge_target_pane_id(
+        &self,
         pid: u32,
         source_pane_id: u64,
         target_window_id: Option<u64>,
     ) -> Result<u64> {
-        let panes = Self::list_panes(pid)?;
-        let clients = Self::list_clients(pid)?;
+        let panes = self.list_panes_for_pid(pid)?;
+        let clients = self.list_clients(pid)?;
         let pane_exists = |pane_id: u64| panes.iter().any(|p| p.pane_id == pane_id);
         let not_source = |pane_id: u64| pane_id != source_pane_id;
 
         if let Some(target_window_id) = target_window_id {
-            let mut candidates: Vec<&WeztermMuxPane> = panes
+            let mut candidates: Vec<&TerminalPaneSnapshot> = panes
                 .iter()
-                .filter(|pane| pane.window_id == target_window_id && pane.pane_id != source_pane_id)
+                .filter(|pane| {
+                    pane.window_id == Some(target_window_id) && pane.pane_id != source_pane_id
+                })
                 .collect();
             candidates.sort_by_key(|pane| pane.pane_id);
             if let Some(active) = candidates.iter().copied().find(|pane| pane.is_active) {
@@ -274,11 +190,11 @@ impl WeztermMux {
         if let Some(source_window_id) = panes
             .iter()
             .find(|p| p.pane_id == source_pane_id)
-            .map(|p| p.window_id)
+            .and_then(|p| p.window_id)
         {
             let mut different_window_candidates: Vec<u64> = panes
                 .iter()
-                .filter(|p| p.window_id != source_window_id)
+                .filter(|p| p.window_id != Some(source_window_id))
                 .map(|p| p.pane_id)
                 .collect();
             different_window_candidates.sort_unstable();
@@ -294,7 +210,7 @@ impl WeztermMux {
 
             let mut active_different_window_candidates: Vec<u64> = panes
                 .iter()
-                .filter(|p| p.window_id != source_window_id && p.is_active)
+                .filter(|p| p.window_id != Some(source_window_id) && p.is_active)
                 .map(|p| p.pane_id)
                 .collect();
             active_different_window_candidates.sort_unstable();
@@ -333,10 +249,113 @@ impl WeztermMux {
 
         bail!("unable to resolve merge target pane (ambiguous)")
     }
+}
 
-    fn pane_in_direction(pid: u32, pane_id: u64, dir: Direction) -> Result<Option<u64>> {
+impl TerminalMultiplexerProvider for WeztermMux {
+    fn cli_output_for_pid(&self, pid: u32, args: &[&str]) -> Result<std::process::Output> {
+        let runtime_dir = std::env::var("XDG_RUNTIME_DIR")
+            .context("XDG_RUNTIME_DIR is not set; cannot locate wezterm socket")?;
+        let sock_path = PathBuf::from(format!("{runtime_dir}/wezterm/gui-sock-{pid}"));
+        if !sock_path.exists() {
+            bail!("wezterm socket not found: {}", sock_path.display());
+        }
+        let sock = sock_path.to_string_lossy().to_string();
+        logging::debug(format!(
+            "wezterm: pid={} cli {:?} via WEZTERM_UNIX_SOCKET",
+            pid, args
+        ));
+        let output = Command::new("wezterm")
+            .env("WEZTERM_UNIX_SOCKET", &sock)
+            .args(["cli"])
+            .args(args)
+            .output()
+            .context("failed to run wezterm cli")?;
+        logging::debug(format!(
+            "wezterm: pid={} cli {:?} status={} stdout={:?} stderr={:?}",
+            pid,
+            args,
+            output.status,
+            String::from_utf8_lossy(&output.stdout).trim(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+        Ok(output)
+    }
+
+    fn list_panes_for_pid(&self, pid: u32) -> Result<Vec<TerminalPaneSnapshot>> {
+        let stdout = self.cli_stdout_for_pid(pid, &["list", "--format", "json"])?;
+        let panes: Vec<WeztermMuxPane> =
+            serde_json::from_str(&stdout).context("failed to parse wezterm pane list json")?;
+        Ok(panes
+            .into_iter()
+            .map(|pane| TerminalPaneSnapshot {
+                pane_id: pane.pane_id,
+                tab_id: Some(pane.tab_id),
+                window_id: Some(pane.window_id),
+                is_active: pane.is_active,
+                foreground_process_name: Some(pane.foreground_process_name),
+            })
+            .collect())
+    }
+
+    fn capabilities(&self) -> AdapterCapabilities {
+        AdapterCapabilities {
+            probe: true,
+            focus: true,
+            move_internal: true,
+            resize_internal: true,
+            rearrange: true,
+            tear_out: true,
+            merge: true,
+        }
+    }
+
+    fn focused_pane_for_pid(&self, pid: u32) -> Result<u64> {
+        let clients = self.list_clients(pid)?;
+        logging::debug(format!(
+            "wezterm: pid={} focused-pane lookup clients={}",
+            pid,
+            clients.len()
+        ));
+
+        if let Some(selection) = Self::select_client_focused_pane(&clients, pid, |_| true) {
+            let pane_id = selection.pane_id();
+            match selection {
+                WeztermMuxFocusSelection::MatchingPid(_) => logging::debug(format!(
+                    "wezterm: pid={} focused pane from matching client = {}",
+                    pid, pane_id
+                )),
+                WeztermMuxFocusSelection::AnyClient(_) => logging::debug(format!(
+                    "wezterm: pid={} focused pane from any client fallback = {}",
+                    pid, pane_id
+                )),
+            }
+            return Ok(pane_id);
+        }
+
+        let panes = self.list_panes_for_pid(pid)?;
+        if let Some(pane_id) = panes.iter().find(|p| p.is_active).map(|p| p.pane_id) {
+            logging::debug(format!(
+                "wezterm: pid={} focused pane from active pane fallback = {}",
+                pid, pane_id
+            ));
+            return Ok(pane_id);
+        }
+
+        logging::debug(format!(
+            "wezterm: pid={} unable to determine focused pane",
+            pid
+        ));
+        bail!("unable to determine focused wezterm pane")
+    }
+
+    fn pane_in_direction_for_pid(
+        &self,
+        pid: u32,
+        pane_id: u64,
+        dir: Direction,
+    ) -> Result<Option<u64>> {
         let pane_id_str = pane_id.to_string();
-        let output = Self::cli_output(
+        let output = self.cli_output_for_pid(
             pid,
             &[
                 "get-pane-direction",
@@ -359,33 +378,10 @@ impl WeztermMux {
         })?;
         Ok(Some(id))
     }
-}
-
-impl TerminalMultiplexerProvider for WeztermMux {
-    fn capabilities(&self) -> AdapterCapabilities {
-        AdapterCapabilities {
-            probe: true,
-            focus: true,
-            move_internal: true,
-            resize_internal: true,
-            rearrange: true,
-            tear_out: true,
-            merge: true,
-        }
-    }
-
-    fn focused_pane_for_pid(&self, pid: u32) -> Result<u64> {
-        Self::focused_pane_id(pid)
-    }
-
-    fn pane_neighbor_for_pid(&self, pid: u32, pane_id: u64, dir: Direction) -> Result<u64> {
-        Self::pane_in_direction(pid, pane_id, dir)?
-            .context("no terminal multiplexer pane exists in requested direction")
-    }
 
     fn send_text_to_pane(&self, pid: u32, pane_id: u64, text: &str) -> Result<()> {
         let pane_id_str = pane_id.to_string();
-        let output = Self::cli_output(
+        let output = self.cli_output_for_pid(
             pid,
             &["send-text", "--pane-id", &pane_id_str, "--no-paste", text],
         )?;
@@ -435,7 +431,7 @@ impl TerminalMultiplexerProvider for WeztermMux {
             let command = format!("merge {source_pane_id} {dir_name}\n");
             let runtime_dir =
                 std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".to_string());
-            let bridge_dir = PathBuf::from(runtime_dir).join("niri-deep-wezterm-mux");
+            let bridge_dir = PathBuf::from(runtime_dir).join("yeet-and-yoink-wezterm-mux");
             fs::create_dir_all(&bridge_dir).with_context(|| {
                 format!("failed to create mux bridge dir: {}", bridge_dir.display())
             })?;
@@ -468,15 +464,15 @@ impl TerminalMultiplexerProvider for WeztermMux {
         logging::debug("wezterm: mux bridge unavailable; using direct cli merge path");
 
         let target_pane_id = if let Some(window_id) = target_window_id {
-            Self::merge_target_pane_id(target_pid, source_pane_id, Some(window_id))?
+            self.merge_target_pane_id(target_pid, source_pane_id, Some(window_id))?
         } else {
             // Poll for focus transition away from source pane.
             const POLL_ATTEMPTS: usize = 3;
             const POLL_DELAY: Duration = Duration::from_millis(10);
             let mut transitioned_pane = None;
             for attempt in 0..POLL_ATTEMPTS {
-                let panes = Self::list_panes(target_pid)?;
-                let clients = Self::list_clients(target_pid)?;
+                let panes = self.list_panes_for_pid(target_pid)?;
+                let clients = self.list_clients(target_pid)?;
                 let pane_exists = |pane_id: u64| panes.iter().any(|p| p.pane_id == pane_id);
                 if let Some(selection) =
                     Self::select_client_focused_pane(&clients, target_pid, pane_exists)
@@ -498,7 +494,7 @@ impl TerminalMultiplexerProvider for WeztermMux {
                 ));
                 pane_id
             } else {
-                Self::merge_target_pane_id(target_pid, source_pane_id, None)?
+                self.merge_target_pane_id(target_pid, source_pane_id, None)?
             }
         };
         if target_pane_id == source_pane_id {
@@ -512,7 +508,7 @@ impl TerminalMultiplexerProvider for WeztermMux {
             "wezterm: merge source pane {} into target pane {} side={}",
             source_pane_id, target_pane_id, target_side
         ));
-        Self::cli_stdout(
+        self.cli_stdout_for_pid(
             target_pid,
             &[
                 "split-pane",
@@ -527,13 +523,13 @@ impl TerminalMultiplexerProvider for WeztermMux {
     }
 
     fn active_foreground_process(&self, pid: u32) -> Option<String> {
-        let pane_id = Self::focused_pane_id(pid).ok()?;
-        let panes = Self::list_panes(pid).ok()?;
+        let pane_id = self.focused_pane_for_pid(pid).ok()?;
+        let panes = self.list_panes_for_pid(pid).ok()?;
         panes
             .into_iter()
             .find(|p| p.pane_id == pane_id)
             .and_then(|p| {
-                let name = p.foreground_process_name.trim().to_string();
+                let name = p.foreground_process_name?.trim().to_string();
                 (!name.is_empty()).then_some(name)
             })
     }
@@ -541,64 +537,78 @@ impl TerminalMultiplexerProvider for WeztermMux {
 
 impl TopologyHandler for WeztermMux {
     fn directional_neighbors(&self, pid: u32) -> Result<DirectionalNeighbors> {
-        let pane_id = Self::focused_pane_id(pid)?;
+        let pane_id = self.focused_pane_for_pid(pid)?;
         let mut neighbors = DirectionalNeighbors::default();
         for direction in Direction::ALL {
             neighbors.set(
                 direction,
-                Self::pane_in_direction(pid, pane_id, direction)?.is_some(),
+                self.pane_in_direction_for_pid(pid, pane_id, direction)?
+                    .is_some(),
             );
         }
         Ok(neighbors)
     }
 
     fn window_count(&self, pid: u32) -> Result<u32> {
-        let pane_id = Self::focused_pane_id(pid)?;
-        let panes = Self::list_panes(pid)?;
+        let pane_id = self.focused_pane_for_pid(pid)?;
+        let panes = self.list_panes_for_pid(pid)?;
         let active_tab_id = panes
             .iter()
             .find(|p| p.pane_id == pane_id)
-            .map(|p| p.tab_id)
+            .and_then(|p| p.tab_id)
             .context("active pane is not present in wezterm pane list")?;
-        Ok(panes.iter().filter(|p| p.tab_id == active_tab_id).count() as u32)
+        Ok(panes
+            .iter()
+            .filter(|p| p.tab_id == Some(active_tab_id))
+            .count() as u32)
     }
 
     fn can_focus(&self, dir: Direction, pid: u32) -> Result<bool> {
-        let pane_id = Self::focused_pane_id(pid)?;
-        Ok(Self::pane_in_direction(pid, pane_id, dir)?.is_some())
+        let pane_id = self.focused_pane_for_pid(pid)?;
+        Ok(self.pane_in_direction_for_pid(pid, pane_id, dir)?.is_some())
     }
 
     fn move_decision(&self, dir: Direction, pid: u32) -> Result<MoveDecision> {
-        let pane_id = Self::focused_pane_id(pid)?;
-        let panes = Self::list_panes(pid)?;
+        let pane_id = self.focused_pane_for_pid(pid)?;
+        let panes = self.list_panes_for_pid(pid)?;
         let active_tab_id = panes
             .iter()
             .find(|p| p.pane_id == pane_id)
-            .map(|p| p.tab_id)
+            .and_then(|p| p.tab_id)
             .context("active pane is not present in wezterm pane list")?;
-        let pane_count = panes.iter().filter(|p| p.tab_id == active_tab_id).count() as u32;
+        let pane_count = panes
+            .iter()
+            .filter(|p| p.tab_id == Some(active_tab_id))
+            .count() as u32;
         let mut neighbors = DirectionalNeighbors::default();
-        neighbors.set(dir, Self::pane_in_direction(pid, pane_id, dir)?.is_some());
+        neighbors.set(
+            dir,
+            self.pane_in_direction_for_pid(pid, pane_id, dir)?.is_some(),
+        );
         if !neighbors.in_direction(dir) {
             match dir {
                 Direction::North | Direction::South => {
                     neighbors.set(
                         Direction::West,
-                        Self::pane_in_direction(pid, pane_id, Direction::West)?.is_some(),
+                        self.pane_in_direction_for_pid(pid, pane_id, Direction::West)?
+                            .is_some(),
                     );
                     neighbors.set(
                         Direction::East,
-                        Self::pane_in_direction(pid, pane_id, Direction::East)?.is_some(),
+                        self.pane_in_direction_for_pid(pid, pane_id, Direction::East)?
+                            .is_some(),
                     );
                 }
                 Direction::West | Direction::East => {
                     neighbors.set(
                         Direction::North,
-                        Self::pane_in_direction(pid, pane_id, Direction::North)?.is_some(),
+                        self.pane_in_direction_for_pid(pid, pane_id, Direction::North)?
+                            .is_some(),
                     );
                     neighbors.set(
                         Direction::South,
-                        Self::pane_in_direction(pid, pane_id, Direction::South)?.is_some(),
+                        self.pane_in_direction_for_pid(pid, pane_id, Direction::South)?
+                            .is_some(),
                     );
                 }
             }
@@ -621,9 +631,9 @@ impl TopologyHandler for WeztermMux {
     }
 
     fn focus(&self, dir: Direction, pid: u32) -> Result<()> {
-        let pane_id = Self::focused_pane_id(pid)?;
+        let pane_id = self.focused_pane_for_pid(pid)?;
         let pane_id_str = pane_id.to_string();
-        Self::cli_stdout(
+        self.cli_stdout_for_pid(
             pid,
             &[
                 "activate-pane-direction",
@@ -636,12 +646,13 @@ impl TopologyHandler for WeztermMux {
     }
 
     fn move_internal(&self, dir: Direction, pid: u32) -> Result<()> {
-        let pane_id = Self::focused_pane_id(pid)?;
-        let neighbor = Self::pane_in_direction(pid, pane_id, dir)?
+        let pane_id = self.focused_pane_for_pid(pid)?;
+        let neighbor = self
+            .pane_in_direction_for_pid(pid, pane_id, dir)?
             .context("no wezterm pane exists in the requested move direction")?;
         let pane_id_str = pane_id.to_string();
         let neighbor_str = neighbor.to_string();
-        Self::cli_stdout(
+        self.cli_stdout_for_pid(
             pid,
             &[
                 "split-pane",
@@ -656,11 +667,11 @@ impl TopologyHandler for WeztermMux {
     }
 
     fn resize_internal(&self, dir: Direction, grow: bool, step: i32, pid: u32) -> Result<()> {
-        let pane_id = Self::focused_pane_id(pid)?;
+        let pane_id = self.focused_pane_for_pid(pid)?;
         let pane_id_str = pane_id.to_string();
         let amount = step.max(1).to_string();
         let direction = if grow { dir } else { dir.opposite() };
-        Self::cli_stdout(
+        self.cli_stdout_for_pid(
             pid,
             &[
                 "adjust-pane-size",
@@ -675,31 +686,28 @@ impl TopologyHandler for WeztermMux {
     }
 
     fn rearrange(&self, dir: Direction, pid: u32) -> Result<()> {
-        let pane_id = Self::focused_pane_id(pid)?;
-        let target =
-            match dir {
-                Direction::North | Direction::South => {
-                    Self::pane_in_direction(pid, pane_id, Direction::West)?
-                        .or(Self::pane_in_direction(pid, pane_id, Direction::East)?)
-                }
-                Direction::West | Direction::East => {
-                    Self::pane_in_direction(pid, pane_id, Direction::North)?
-                        .or(Self::pane_in_direction(pid, pane_id, Direction::South)?)
-                }
-            };
+        let pane_id = self.focused_pane_for_pid(pid)?;
+        let target = match dir {
+            Direction::North | Direction::South => self
+                .pane_in_direction_for_pid(pid, pane_id, Direction::West)?
+                .or(self.pane_in_direction_for_pid(pid, pane_id, Direction::East)?),
+            Direction::West | Direction::East => self
+                .pane_in_direction_for_pid(pid, pane_id, Direction::North)?
+                .or(self.pane_in_direction_for_pid(pid, pane_id, Direction::South)?),
+        };
         // Fallback: pick any other pane in the same tab.
         let target = match target {
             Some(t) => t,
             None => {
-                let panes = Self::list_panes(pid)?;
+                let panes = self.list_panes_for_pid(pid)?;
                 let active_tab_id = panes
                     .iter()
                     .find(|p| p.pane_id == pane_id)
-                    .map(|p| p.tab_id)
+                    .and_then(|p| p.tab_id)
                     .context("active pane is not present in wezterm pane list")?;
                 let mut candidates: Vec<u64> = panes
                     .into_iter()
-                    .filter(|p| p.tab_id == active_tab_id && p.pane_id != pane_id)
+                    .filter(|p| p.tab_id == Some(active_tab_id) && p.pane_id != pane_id)
                     .map(|p| p.pane_id)
                     .collect();
                 candidates.sort_unstable();
@@ -712,7 +720,7 @@ impl TopologyHandler for WeztermMux {
 
         let pane_id_str = pane_id.to_string();
         let target_str = target.to_string();
-        Self::cli_stdout(
+        self.cli_stdout_for_pid(
             pid,
             &[
                 "split-pane",
@@ -727,9 +735,9 @@ impl TopologyHandler for WeztermMux {
     }
 
     fn move_out(&self, _dir: Direction, pid: u32) -> Result<TearResult> {
-        let pane_id = Self::focused_pane_id(pid)?;
+        let pane_id = self.focused_pane_for_pid(pid)?;
         let pane_id_str = pane_id.to_string();
-        Self::cli_stdout(
+        self.cli_stdout_for_pid(
             pid,
             &[
                 "move-pane-to-new-tab",
@@ -749,7 +757,7 @@ impl TopologyHandler for WeztermMux {
 
     fn prepare_merge(&self, source_pid: Option<ProcessId>) -> Result<MergePreparation> {
         let source_pid = source_pid.context("source wezterm merge missing pid")?;
-        let source_pane_id = Self::focused_pane_id(source_pid.get())?;
+        let source_pane_id = self.focused_pane_for_pid(source_pid.get())?;
         Ok(MergePreparation::with_payload(WeztermMuxMergePreparation {
             pane_id: source_pane_id,
             target_window_id: None,

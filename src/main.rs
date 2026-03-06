@@ -1,14 +1,23 @@
 use clap::{Parser, Subcommand};
-use niri_deep::commands;
-use niri_deep::commands::focus_or_cycle::FocusOrCycleArgs;
-use niri_deep::commands::resize::ResizeMode;
-use niri_deep::config;
-use niri_deep::engine::topology::Direction;
-use niri_deep::logging;
+use yeet_and_yoink::commands;
+use yeet_and_yoink::commands::focus_or_cycle::FocusOrCycleArgs;
+use yeet_and_yoink::commands::resize::ResizeMode;
+use yeet_and_yoink::config;
+use yeet_and_yoink::engine::topology::Direction;
+use yeet_and_yoink::logging;
+use std::path::PathBuf;
 
 #[derive(Parser)]
-#[command(name = "niri-deep", about = "Deep focus/move integration for niri")]
+#[command(name = "yeet-and-yoink", about = "Deep focus/move integration for niri")]
 struct Cli {
+    /// Write debug logs to a file.
+    #[arg(long, global = true, value_name = "PATH")]
+    log_file: Option<PathBuf>,
+
+    /// Append to --log-file instead of truncating the file.
+    #[arg(long, global = true, requires = "log_file")]
+    log_append: bool,
+
     #[command(subcommand)]
     command: Cmd,
 }
@@ -40,10 +49,9 @@ enum Cmd {
 }
 
 fn main() {
-    logging::init();
-    logging::debug(format!("argv={:?}", std::env::args().collect::<Vec<_>>()));
-
     let cli = Cli::parse();
+    logging::init(cli.log_file.as_deref(), cli.log_append);
+    logging::debug(format!("argv={:?}", std::env::args().collect::<Vec<_>>()));
 
     let result = match config::prepare() {
         Ok(()) => match cli.command {
@@ -57,7 +65,7 @@ fn main() {
 
     if let Err(e) = result {
         logging::debug(format!("command failed: {e:#}"));
-        eprintln!("niri-deep: {e:#}");
+        eprintln!("yeet-and-yoink: {e:#}");
         std::process::exit(1);
     }
 

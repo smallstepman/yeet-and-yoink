@@ -1,5 +1,5 @@
 {
-  description = "niri-deep package and home-manager module";
+  description = "yeet-and-yoink package and home-manager module";
 
   inputs = {
     nixpkgs.url = "github:nixos/nixpkgs/nixos-25.11";
@@ -17,35 +17,35 @@
       forAllSystems = f: nixpkgs.lib.genAttrs systems (system: f (import nixpkgs { inherit system; }));
 
       mkPackage = pkgs: pkgs.rustPlatform.buildRustPackage {
-        pname = "niri-deep";
+        pname = "yeet-and-yoink";
         version = "0.1.0";
         src = ./.;
         cargoLock.lockFile = ./Cargo.lock;
         meta = with pkgs.lib; {
           description = "Deep focus/move integration between niri and apps";
-          mainProgram = "niri-deep";
+          mainProgram = "yeet-and-yoink";
           platforms = platforms.all;
         };
       };
 
       hmModule = { config, lib, pkgs, ... }:
         let
-          cfg = config.programs.niri-deep;
+          cfg = config.programs.yeet-and-yoink;
           tomlFormat = pkgs.formats.toml {};
-          generatedConfig = tomlFormat.generate "niri-deep-config.toml" (lib.filterAttrs (name: _: name != "raw") cfg.config);
+          generatedConfig = tomlFormat.generate "yeet-and-yoink-config.toml" (lib.filterAttrs (name: _: name != "raw") cfg.config);
           configSource =
             if cfg.config.raw != null
-            then pkgs.writeText "niri-deep-config.toml" cfg.config.raw
+            then pkgs.writeText "yeet-and-yoink-config.toml" cfg.config.raw
             else generatedConfig;
         in {
-          options.programs.niri-deep = {
-            enable = lib.mkEnableOption "niri-deep";
+          options.programs.yeet-and-yoink = {
+            enable = lib.mkEnableOption "yeet-and-yoink";
 
             package = lib.mkOption {
               type = lib.types.package;
               default = self.packages.${pkgs.system}.default;
-              defaultText = lib.literalExpression "inputs.niri-deep.packages.${pkgs.system}.default";
-              description = "niri-deep package to install.";
+              defaultText = lib.literalExpression "inputs.yeet-and-yoink.packages.${pkgs.system}.default";
+              description = "yeet-and-yoink package to install.";
             };
 
             config = lib.mkOption {
@@ -55,30 +55,30 @@
                   type = lib.types.nullOr lib.types.lines;
                   default = null;
                   description = ''
-                    Raw TOML for niri-deep written as-is. When non-null, this value
-                    overrides all other programs.niri-deep.config.* fields.
+                    Raw TOML for yeet-and-yoink written as-is. When non-null, this value
+                    overrides all other programs.yeet-and-yoink.config.* fields.
                   '';
                 };
               });
               default = {};
-              description = "niri-deep runtime configuration.";
+              description = "yeet-and-yoink runtime configuration.";
             };
           };
 
           config = lib.mkIf cfg.enable {
             home.packages = [ cfg.package ];
-            xdg.configFile."niri-deep/config.toml".source = configSource;
+            xdg.configFile."yeet-and-yoink/config.toml".source = configSource;
           };
         };
     in {
       packages = forAllSystems (pkgs:
         rec {
-          niri-deep = mkPackage pkgs;
-          default = niri-deep;
+          yeet-and-yoink = mkPackage pkgs;
+          default = yeet-and-yoink;
         });
 
       overlays.default = final: prev: {
-        niri-deep = self.packages.${prev.system}.default;
+        yeet-and-yoink = self.packages.${prev.system}.default;
       };
 
       homeManagerModules.default = hmModule;

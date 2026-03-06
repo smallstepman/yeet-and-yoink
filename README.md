@@ -1,6 +1,6 @@
-# niri-deep
+# yeet-and-yoink
 
-`niri-deep` routes `focus`, `move`, and `resize` through a geometry-first orchestrator with
+`yeet-and-yoink` routes `focus`, `move`, and `resize` through a geometry-first orchestrator with
 domain plugins (WM / terminal / editor), plus a transfer pipeline for cross-domain moves.
 
 ## Config discovery
@@ -8,7 +8,7 @@ domain plugins (WM / terminal / editor), plus a transfer pipeline for cross-doma
 `config.toml` is loaded in this order:
 
 1. `NIRI_DEEP_CONFIG` (explicit file path)
-2. Platform config dir from `etcetera` (typically `$XDG_CONFIG_HOME/niri-deep/config.toml` on Linux)
+2. Platform config dir from `etcetera` (typically `$XDG_CONFIG_HOME/yeet-and-yoink/config.toml` on Linux)
 
 If no file is present, defaults from `src/config.rs` are used.
 

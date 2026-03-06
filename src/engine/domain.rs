@@ -650,7 +650,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::{decode_native_window_ref, domain_id_for_window, encode_native_window_ref};
-    use crate::adapters::apps::wezterm;
+    use crate::adapters::apps::{kitty, wezterm};
     use crate::engine::runtime::ProcessId;
 
     #[test]
@@ -666,6 +666,43 @@ mod tests {
     fn terminal_app_ids_classify_to_terminal_domain() {
         let domain = domain_id_for_window(Some(wezterm::APP_IDS[0]), None, Some("term"));
         assert_eq!(domain, super::TERMINAL_DOMAIN_ID);
+    }
+
+    #[test]
+    fn kitty_app_ids_classify_to_terminal_domain() {
+        let _guard = crate::utils::env_guard();
+        let root = std::env::temp_dir().join(format!(
+            "yeet-and-yoink-domain-kitty-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock should be monotonic")
+                .as_nanos()
+        ));
+        let config_dir = root.join("yeet-and-yoink");
+        std::fs::create_dir_all(&config_dir).expect("config dir should be created");
+        std::fs::write(
+            config_dir.join("config.toml"),
+            r#"
+[app.terminal.kitty]
+enabled = true
+"#,
+        )
+        .expect("config file should be writable");
+        let old_override = std::env::var_os("NIRI_DEEP_CONFIG");
+        std::env::set_var("NIRI_DEEP_CONFIG", config_dir.join("config.toml"));
+        crate::config::prepare().expect("config should load");
+
+        let domain = domain_id_for_window(Some(kitty::APP_IDS[0]), None, Some("term"));
+        assert_eq!(domain, super::TERMINAL_DOMAIN_ID);
+
+        if let Some(previous) = old_override {
+            std::env::set_var("NIRI_DEEP_CONFIG", previous);
+        } else {
+            std::env::remove_var("NIRI_DEEP_CONFIG");
+        }
+        crate::config::prepare().expect("config should reload");
+        let _ = std::fs::remove_dir_all(root);
     }
 }
 

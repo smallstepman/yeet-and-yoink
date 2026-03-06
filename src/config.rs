@@ -477,7 +477,7 @@ fn resolve_config_path() -> Result<(PathBuf, bool)> {
 
     let strategy = choose_base_strategy().context("failed to resolve config directory")?;
     Ok((
-        strategy.config_dir().join("niri-deep").join("config.toml"),
+        strategy.config_dir().join("yeet-and-yoink").join("config.toml"),
         false,
     ))
 }
@@ -604,6 +604,20 @@ fn alias_keys(aliases: &[&str]) -> Vec<String> {
         }
     }
     keys
+}
+
+fn default_mux_backend_for_aliases(aliases: &[&str]) -> TerminalMuxBackend {
+    let aliases = alias_keys(aliases);
+    if aliases.iter().any(|alias| alias == "kitty") {
+        return TerminalMuxBackend::Kitty;
+    }
+    if aliases
+        .iter()
+        .any(|alias| alias == "iterm2" || alias == "iterm")
+    {
+        return TerminalMuxBackend::Tmux;
+    }
+    TerminalMuxBackend::Wezterm
 }
 
 fn profile_by_aliases<'a, T>(profiles: &'a HashMap<String, T>, aliases: &[&str]) -> Option<&'a T> {
@@ -740,7 +754,7 @@ fn mux_policy_from(cfg: &Config, aliases: &[&str]) -> MuxPolicy {
         integration_enabled,
         backend: profile
             .and_then(|profile| profile.variant.mux_backend)
-            .unwrap_or(TerminalMuxBackend::Wezterm),
+            .unwrap_or_else(|| default_mux_backend_for_aliases(aliases)),
         enable_override: profile.and_then(|profile| profile.variant.mux.enable),
     }
 }
@@ -827,5 +841,19 @@ enabled = true
             AppSection::Editor,
             &["editor", "emacs"]
         ));
+    }
+
+    #[test]
+    fn mux_policy_defaults_follow_terminal_host_alias() {
+        let sample = r#"
+[app.terminal.kitty]
+enabled = true
+"#;
+        let parsed: Config = toml::from_str(sample).expect("sample config should parse");
+        let kitty_policy = mux_policy_from(&parsed, &["kitty", "terminal"]);
+        assert_eq!(kitty_policy.backend, TerminalMuxBackend::Kitty);
+
+        let wezterm_policy = mux_policy_from(&parsed, &["wezterm", "terminal"]);
+        assert_eq!(wezterm_policy.backend, TerminalMuxBackend::Wezterm);
     }
 }

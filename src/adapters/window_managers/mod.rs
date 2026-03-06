@@ -230,7 +230,7 @@ pub trait WindowManagerIntrospection {
     /// without declaring its GAT window view and required methods.
     ///
     /// ```compile_fail
-    /// use niri_deep::wm::WindowManagerIntrospection;
+    /// use yeet_and_yoink::wm::WindowManagerIntrospection;
     ///
     /// struct MissingPieces;
     ///
@@ -266,7 +266,7 @@ pub trait WindowManagerExecution {
 /// unless all supertraits are implemented.
 ///
 /// ```compile_fail
-/// use niri_deep::wm::WindowManagerAdapter;
+/// use yeet_and_yoink::wm::WindowManagerAdapter;
 ///
 /// struct NotAnAdapter;
 ///

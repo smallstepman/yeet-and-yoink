@@ -1,5 +1,6 @@
 use crate::adapters::apps::{
-    self, emacs, librefox::Librefox, nvim::Nvim, vscode::Vscode, wezterm, AppAdapter, AppKind,
+    self, emacs, kitty, librefox::Librefox, nvim::Nvim, vscode::Vscode, wezterm, AppAdapter,
+    AppKind,
 };
 use crate::adapters::terminal_multiplexers::tmux::Tmux;
 use crate::config::AppSection;
@@ -36,6 +37,36 @@ fn build_librefox() -> Box<dyn AppAdapter> {
 fn build_vscode() -> Box<dyn AppAdapter> {
     apps::bind_policy(Box::new(Vscode))
 }
+
+fn build_wezterm_terminal() -> Box<dyn AppAdapter> {
+    apps::bind_policy(Box::new(wezterm::WeztermBackend))
+}
+
+fn build_kitty_terminal() -> Box<dyn AppAdapter> {
+    apps::bind_policy(Box::new(kitty::KittyBackend))
+}
+
+struct TerminalHostSpec {
+    aliases: &'static [&'static str],
+    app_ids: &'static [&'static str],
+    terminal_launch_prefix: &'static [&'static str],
+    build: fn() -> Box<dyn AppAdapter>,
+}
+
+const TERMINAL_HOSTS: &[TerminalHostSpec] = &[
+    TerminalHostSpec {
+        aliases: wezterm::ADAPTER_ALIASES,
+        app_ids: wezterm::APP_IDS,
+        terminal_launch_prefix: wezterm::TERMINAL_LAUNCH_PREFIX,
+        build: build_wezterm_terminal,
+    },
+    TerminalHostSpec {
+        aliases: kitty::ADAPTER_ALIASES,
+        app_ids: kitty::APP_IDS,
+        terminal_launch_prefix: kitty::TERMINAL_LAUNCH_PREFIX,
+        build: build_kitty_terminal,
+    },
+];
 
 const DIRECT_ADAPTERS: &[DirectAdapterSpec] = &[
     DirectAdapterSpec {
@@ -119,9 +150,12 @@ fn tmux_candidate_pids(root_pid: u32) -> Vec<u32> {
     candidates
 }
 
-fn resolve_tmux_for_root(root_pid: u32) -> (Vec<u32>, Option<Tmux>) {
+fn resolve_tmux_for_root(
+    root_pid: u32,
+    terminal_launch_prefix: &[&str],
+) -> (Vec<u32>, Option<Tmux>) {
     let candidates = tmux_candidate_pids(root_pid);
-    let launch_prefix: Vec<String> = wezterm::TERMINAL_LAUNCH_PREFIX
+    let launch_prefix: Vec<String> = terminal_launch_prefix
         .iter()
         .map(|s| s.to_string())
         .collect();
@@ -132,11 +166,11 @@ fn resolve_tmux_for_root(root_pid: u32) -> (Vec<u32>, Option<Tmux>) {
     (candidates, tmux)
 }
 
-fn resolve_terminal_chain(terminal_pid: u32) -> Vec<Box<dyn AppAdapter>> {
+fn resolve_terminal_chain(terminal_pid: u32, host: &TerminalHostSpec) -> Vec<Box<dyn AppAdapter>> {
     let mut chain: Vec<Box<dyn AppAdapter>> = Vec::new();
 
     let fg_hint = crate::adapters::terminal_multiplexers::active_foreground_process(
-        wezterm::ADAPTER_ALIASES,
+        host.aliases,
         terminal_pid,
     );
     let fg_base = fg_hint
@@ -194,7 +228,8 @@ fn resolve_terminal_chain(terminal_pid: u32) -> Vec<Box<dyn AppAdapter>> {
             fallback_roots.push(terminal_pid);
         }
         'tmux_fallback: for root_pid in fallback_roots {
-            let (tmux_pids, found_tmux) = resolve_tmux_for_root(root_pid);
+            let (tmux_pids, found_tmux) =
+                resolve_tmux_for_root(root_pid, host.terminal_launch_prefix);
             logging::debug(format!(
                 "resolve_terminal_chain: tmux fallback root={root_pid} candidates={tmux_pids:?}"
             ));
@@ -208,7 +243,7 @@ fn resolve_terminal_chain(terminal_pid: u32) -> Vec<Box<dyn AppAdapter>> {
                 break 'tmux_fallback;
             }
         }
-        chain.push(apps::bind_policy(Box::new(wezterm::WeztermBackend)));
+        chain.push((host.build)());
         return chain;
     };
     logging::debug(format!(
@@ -217,7 +252,8 @@ fn resolve_terminal_chain(terminal_pid: u32) -> Vec<Box<dyn AppAdapter>> {
 
     match fg_base.as_str() {
         "tmux" => {
-            let (tmux_pids, found_tmux) = resolve_tmux_for_root(search_pid);
+            let (tmux_pids, found_tmux) =
+                resolve_tmux_for_root(search_pid, host.terminal_launch_prefix);
             logging::debug(format!(
                 "resolve_terminal_chain: tmux descendants under shell {} => {:?}",
                 search_pid, tmux_pids
@@ -246,7 +282,8 @@ fn resolve_terminal_chain(terminal_pid: u32) -> Vec<Box<dyn AppAdapter>> {
         _ => {
             // fg_base is an arbitrary process running inside a mux (e.g. "node", "python").
             // Try tmux detection under the shell regardless.
-            let (tmux_pids, found_tmux) = resolve_tmux_for_root(search_pid);
+            let (tmux_pids, found_tmux) =
+                resolve_tmux_for_root(search_pid, host.terminal_launch_prefix);
             logging::debug(format!(
                 "resolve_terminal_chain: fg={fg_base} tmux descendants under shell {search_pid} => {tmux_pids:?}"
             ));
@@ -261,7 +298,7 @@ fn resolve_terminal_chain(terminal_pid: u32) -> Vec<Box<dyn AppAdapter>> {
         }
     }
 
-    chain.push(apps::bind_policy(Box::new(wezterm::WeztermBackend)));
+    chain.push((host.build)());
     logging::debug(format!(
         "resolve_terminal_chain: final depth={}",
         chain.len()
@@ -286,9 +323,12 @@ impl ChainResolver for RuntimeChainResolver {
         ));
         let preferred = preferred_adapter_name();
 
-        if wezterm::APP_IDS.contains(&app_id) {
+        if let Some(host) = TERMINAL_HOSTS
+            .iter()
+            .find(|host| host.app_ids.contains(&app_id))
+        {
             if let Some(preferred) = preferred.as_deref() {
-                if !matches_adapter_alias(preferred, wezterm::ADAPTER_ALIASES) {
+                if !matches_adapter_alias(preferred, host.aliases) {
                     logging::debug(format!(
                         "resolve_chain: adapter override '{}' disables terminal chain",
                         preferred
@@ -296,14 +336,11 @@ impl ChainResolver for RuntimeChainResolver {
                     return vec![];
                 }
             }
-            if !crate::config::app_integration_enabled(
-                AppSection::Terminal,
-                wezterm::ADAPTER_ALIASES,
-            ) {
+            if !crate::config::app_integration_enabled(AppSection::Terminal, host.aliases) {
                 logging::debug("resolve_chain: terminal integration disabled via config");
                 return vec![];
             }
-            let chain = resolve_terminal_chain(pid);
+            let chain = resolve_terminal_chain(pid, host);
             logging::debug(format!("resolve_chain: terminal depth={}", chain.len()));
             return chain;
         }
@@ -318,8 +355,14 @@ impl ChainResolver for RuntimeChainResolver {
     }
 
     fn default_domain_adapters(&self) -> Vec<Box<dyn AppAdapter>> {
+        let terminal_adapter = match preferred_adapter_name().as_deref() {
+            Some(preferred) if matches_adapter_alias(preferred, kitty::ADAPTER_ALIASES) => {
+                build_kitty_terminal()
+            }
+            _ => build_wezterm_terminal(),
+        };
         vec![
-            apps::bind_policy(Box::new(wezterm::WeztermBackend)),
+            terminal_adapter,
             apps::bind_policy(Box::new(emacs::EmacsBackend)),
         ]
     }

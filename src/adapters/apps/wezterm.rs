@@ -1,7 +1,7 @@
-//! # WezTerm integration capability map (for niri-deep)
+//! # WezTerm integration capability map (for yeet-and-yoink)
 //!
 //! This module implements the WezTerm side of directional focus/move semantics used by
-//! `niri-deep`, including:
+//! `yeet-and-yoink`, including:
 //!
 //! - pane-local directional focus,
 //! - in-window pane rearrange,
@@ -23,7 +23,7 @@
 //! 3. **GUI plane** (`window`, `wezterm.gui.*`)
 //!    - Represents visible windows and focus state, and can be mapped to mux objects.
 //!
-//! niri-deep currently uses CLI-first control, with an optional Lua/mux bridge path
+//! yeet-and-yoink currently uses CLI-first control, with an optional Lua/mux bridge path
 //! for cases where deciding merge targets purely from
 //! transient CLI focus metadata is less reliable.
 //!
@@ -47,7 +47,7 @@
 //! - `$WEZTERM_UNIX_SOCKET` can force CLI commands to a specific running instance.
 //! - If `--pane-id` is omitted, CLI uses `$WEZTERM_PANE` or most-recent client focus
 //!   heuristics, which is often too implicit for cross-window orchestration.
-//! - `wezterm cli` can prefer the mux server with `--prefer-mux`; niri-deep currently
+//! - `wezterm cli` can prefer the mux server with `--prefer-mux`; yeet-and-yoink currently
 //!   relies primarily on explicit pane IDs and instance targeting instead.
 //!
 //! ## Lua/mux capabilities relevant to this problem
@@ -95,7 +95,7 @@
 //! - Workspace operations (`wezterm.mux.set_active_workspace`, etc.) can affect whether a
 //!   mux window has a GUI representation at a given moment.
 //!
-//! These matter if niri-deep is later extended to cross-domain or workspace-aware routing.
+//! These matter if yeet-and-yoink is later extended to cross-domain or workspace-aware routing.
 //!
 //! ## Practical edge cases this module must handle
 //!
@@ -296,7 +296,7 @@ mod tests {
     fn unique_temp_dir(prefix: &str) -> PathBuf {
         let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
         let path = std::env::temp_dir().join(format!(
-            "niri-deep-wezterm-config-{prefix}-{}-{id}",
+            "yeet-and-yoink-wezterm-config-{prefix}-{}-{id}",
             std::process::id()
         ));
         std::fs::create_dir_all(&path).expect("temp dir should be created");
@@ -352,7 +352,7 @@ mod tests {
     fn capabilities_follow_tmux_mux_backend() {
         let _guard = env_guard();
         let root = unique_temp_dir("caps-tmux");
-        let config_dir = root.join("niri-deep");
+        let config_dir = root.join("yeet-and-yoink");
         fs::create_dir_all(&config_dir).expect("config dir should be created");
         fs::write(
             config_dir.join("config.toml"),
@@ -387,7 +387,7 @@ mux_backend = "tmux"
     fn zellij_backend_selects_zellij_attach_command() {
         let _guard = env_guard();
         let root = unique_temp_dir("zellij-attach");
-        let config_dir = root.join("niri-deep");
+        let config_dir = root.join("yeet-and-yoink");
         fs::create_dir_all(&config_dir).expect("config dir should be created");
         fs::write(
             config_dir.join("config.toml"),
@@ -425,7 +425,7 @@ mux_backend = "zellij"
     fn wezterm_mux_backend_has_no_attach_spawn_command() {
         let _guard = env_guard();
         let root = unique_temp_dir("wezterm-attach-none");
-        let config_dir = root.join("niri-deep");
+        let config_dir = root.join("yeet-and-yoink");
         fs::create_dir_all(&config_dir).expect("config dir should be created");
         fs::write(
             config_dir.join("config.toml"),
@@ -465,7 +465,7 @@ mux_backend = "wezterm"
     impl WeztermHarness {
         fn new(pid: u32) -> Self {
             let unique = NEXT_ID.fetch_add(1, Ordering::Relaxed);
-            let base = std::env::temp_dir().join(format!("niri-deep-wezterm-test-{pid}-{unique}"));
+            let base = std::env::temp_dir().join(format!("yeet-and-yoink-wezterm-test-{pid}-{unique}"));
             let bin_dir = base.join("bin");
             let runtime_dir = base.join("runtime");
             let responses_dir = base.join("responses");
@@ -936,7 +936,7 @@ exit "$status"
 
         let bridge_cmd = harness
             .runtime_dir
-            .join("niri-deep-wezterm-mux")
+            .join("yeet-and-yoink-wezterm-mux")
             .join("merge.cmd");
         let payload = fs::read_to_string(&bridge_cmd).expect("bridge command file should exist");
         assert_eq!(payload.trim(), "merge 10 west");
@@ -957,7 +957,7 @@ exit "$status"
 
         let bridge_cmd = harness
             .runtime_dir
-            .join("niri-deep-wezterm-mux")
+            .join("yeet-and-yoink-wezterm-mux")
             .join("merge.cmd");
         let payload = fs::read_to_string(&bridge_cmd).expect("bridge command file should exist");
         assert_eq!(payload.trim(), "merge 10 west");
@@ -996,7 +996,7 @@ exit "$status"
         assert!(log.contains("split-pane --pane-id 20 --right --move-pane-id 10"));
         let bridge_cmd = harness
             .runtime_dir
-            .join("niri-deep-wezterm-mux")
+            .join("yeet-and-yoink-wezterm-mux")
             .join("merge.cmd");
         assert!(!bridge_cmd.exists());
     }
@@ -1033,7 +1033,7 @@ exit "$status"
 
         let bridge_cmd = harness
             .runtime_dir
-            .join("niri-deep-wezterm-mux")
+            .join("yeet-and-yoink-wezterm-mux")
             .join("merge.cmd");
         assert!(!bridge_cmd.exists());
 
@@ -1140,7 +1140,7 @@ exit "$status"
         assert!(log.contains("split-pane --pane-id 9 --right --move-pane-id 10"));
         let bridge_cmd = harness
             .runtime_dir
-            .join("niri-deep-wezterm-mux")
+            .join("yeet-and-yoink-wezterm-mux")
             .join("merge.cmd");
         assert!(!bridge_cmd.exists());
     }

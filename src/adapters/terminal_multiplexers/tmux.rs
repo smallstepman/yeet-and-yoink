@@ -4,7 +4,7 @@ use anyhow::{bail, Context, Result};
 
 use crate::engine::contract::{
     AdapterCapabilities, AppAdapter, AppKind, MergeExecutionMode, MergePreparation, MoveDecision,
-    TearResult, TerminalMultiplexerProvider, TopologyHandler,
+    TearResult, TerminalMultiplexerProvider, TerminalPaneSnapshot, TopologyHandler,
 };
 use crate::engine::runtime::{self, CommandContext, ProcessId};
 use crate::engine::topology::{Direction, DirectionalNeighbors};
@@ -29,7 +29,7 @@ pub(crate) struct TmuxMuxProvider;
 
 pub(crate) static TMUX_MUX_PROVIDER: TmuxMuxProvider = TmuxMuxProvider;
 
-const DETACHED_SESSION_PREFIX: &str = "niri-deep-";
+const DETACHED_SESSION_PREFIX: &str = "yeet-and-yoink-";
 
 struct TmuxMuxMergePreparation {
     pane_id: u64,
@@ -45,22 +45,77 @@ struct TmuxPaneGeom {
     height: i32,
 }
 
-trait TmuxSessionAccess: Sized {
-    fn from_client_pid(client_pid: u32) -> Option<Self>;
-    fn for_terminal_pid(terminal_pid: u32) -> Result<Self>;
-    fn focused_pane_id_for_client(&self) -> Result<u64>;
-    fn query_pane(&self, pane_id: u64, format: &str) -> Result<String>;
-    fn query_client_pane(&self, format: &str) -> Result<String>;
-    fn list_panes_for_window(&self, window_ref: &str) -> Result<Vec<TmuxPaneGeom>>;
-    fn overlap_len(a_start: i32, a_len: i32, b_start: i32, b_len: i32) -> i32;
-    fn directional_neighbor_pane_id(&self, source_pane_id: u64, dir: Direction) -> Result<u64>;
-    fn directional_neighbors(&self) -> Result<DirectionalNeighbors>;
-    fn window_count(&self) -> Result<u32>;
-    fn focus(&self, dir: Direction) -> Result<()>;
-    fn move_internal(&self, dir: Direction) -> Result<()>;
-    fn detach_target_for_new_client(&self, break_target: &str) -> Result<String>;
-    fn move_out(&self, terminal_launch_prefix: &[String]) -> Result<TearResult>;
-    fn nvim_in_current_pane(&self) -> Option<u32>;
+fn overlap_len(a_start: i32, a_len: i32, b_start: i32, b_len: i32) -> i32 {
+    let a_end = a_start + a_len;
+    let b_end = b_start + b_len;
+    (a_end.min(b_end) - a_start.max(b_start)).max(0)
+}
+
+fn select_directional_neighbor(
+    panes: &[TmuxPaneGeom],
+    source_pane_id: u64,
+    dir: Direction,
+) -> Option<u64> {
+    let source = panes.iter().find(|pane| pane.pane_id == source_pane_id)?;
+    let mut best: Option<(u64, i32, i32)> = None;
+    for pane in panes
+        .iter()
+        .copied()
+        .filter(|pane| pane.pane_id != source_pane_id)
+    {
+        let (distance, overlap) = match dir {
+            Direction::West => {
+                if pane.left + pane.width <= source.left {
+                    (
+                        source.left - (pane.left + pane.width),
+                        overlap_len(source.top, source.height, pane.top, pane.height),
+                    )
+                } else {
+                    (i32::MAX, 0)
+                }
+            }
+            Direction::East => {
+                if pane.left >= source.left + source.width {
+                    (
+                        pane.left - (source.left + source.width),
+                        overlap_len(source.top, source.height, pane.top, pane.height),
+                    )
+                } else {
+                    (i32::MAX, 0)
+                }
+            }
+            Direction::North => {
+                if pane.top + pane.height <= source.top {
+                    (
+                        source.top - (pane.top + pane.height),
+                        overlap_len(source.left, source.width, pane.left, pane.width),
+                    )
+                } else {
+                    (i32::MAX, 0)
+                }
+            }
+            Direction::South => {
+                if pane.top >= source.top + source.height {
+                    (
+                        pane.top - (source.top + source.height),
+                        overlap_len(source.left, source.width, pane.left, pane.width),
+                    )
+                } else {
+                    (i32::MAX, 0)
+                }
+            }
+        };
+        if overlap <= 0 || distance == i32::MAX {
+            continue;
+        }
+        match best {
+            Some((_, best_distance, best_overlap))
+                if best_distance < distance
+                    || (best_distance == distance && best_overlap >= overlap) => {}
+            _ => best = Some((pane.pane_id, distance, overlap)),
+        }
+    }
+    best.map(|(pane_id, _, _)| pane_id)
 }
 
 // ---------------------------------------------------------------------------
@@ -89,7 +144,7 @@ impl Tmux {
     }
 }
 
-impl TmuxSessionAccess for TmuxSession {
+impl TmuxSession {
     fn from_client_pid(client_pid: u32) -> Option<TmuxSession> {
         let output = runtime::run_command_output(
             "tmux",
@@ -277,82 +332,21 @@ impl TmuxSessionAccess for TmuxSession {
         Ok(panes)
     }
 
-    fn overlap_len(a_start: i32, a_len: i32, b_start: i32, b_len: i32) -> i32 {
-        let a_end = a_start + a_len;
-        let b_end = b_start + b_len;
-        (a_end.min(b_end) - a_start.max(b_start)).max(0)
-    }
-
-    fn directional_neighbor_pane_id(&self, source_pane_id: u64, dir: Direction) -> Result<u64> {
+    fn pane_in_direction(&self, source_pane_id: u64, dir: Direction) -> Result<Option<u64>> {
         let window_ref = self.query_pane(source_pane_id, "#{window_id}")?;
         let panes = self.list_panes_for_window(&window_ref)?;
-        let source = panes
+        panes
             .iter()
             .find(|pane| pane.pane_id == source_pane_id)
             .with_context(|| format!("source tmux pane %{source_pane_id} missing from window"))?;
+        Ok(select_directional_neighbor(&panes, source_pane_id, dir))
+    }
 
-        let mut best: Option<(u64, i32, i32)> = None;
-        for pane in panes
-            .iter()
-            .copied()
-            .filter(|pane| pane.pane_id != source_pane_id)
-        {
-            let (distance, overlap) = match dir {
-                Direction::West => {
-                    if pane.left + pane.width <= source.left {
-                        (
-                            source.left - (pane.left + pane.width),
-                            Self::overlap_len(source.top, source.height, pane.top, pane.height),
-                        )
-                    } else {
-                        (i32::MAX, 0)
-                    }
-                }
-                Direction::East => {
-                    if pane.left >= source.left + source.width {
-                        (
-                            pane.left - (source.left + source.width),
-                            Self::overlap_len(source.top, source.height, pane.top, pane.height),
-                        )
-                    } else {
-                        (i32::MAX, 0)
-                    }
-                }
-                Direction::North => {
-                    if pane.top + pane.height <= source.top {
-                        (
-                            source.top - (pane.top + pane.height),
-                            Self::overlap_len(source.left, source.width, pane.left, pane.width),
-                        )
-                    } else {
-                        (i32::MAX, 0)
-                    }
-                }
-                Direction::South => {
-                    if pane.top >= source.top + source.height {
-                        (
-                            pane.top - (source.top + source.height),
-                            Self::overlap_len(source.left, source.width, pane.left, pane.width),
-                        )
-                    } else {
-                        (i32::MAX, 0)
-                    }
-                }
-            };
-            if overlap <= 0 || distance == i32::MAX {
-                continue;
-            }
-            match best {
-                Some((_, best_distance, best_overlap))
-                    if best_distance < distance
-                        || (best_distance == distance && best_overlap >= overlap) => {}
-                _ => best = Some((pane.pane_id, distance, overlap)),
-            }
-        }
-
-        best.map(|(pane_id, _, _)| pane_id).with_context(|| {
-            format!("no tmux pane exists in requested direction {dir} from %{source_pane_id}")
-        })
+    fn directional_neighbor_pane_id(&self, source_pane_id: u64, dir: Direction) -> Result<u64> {
+        self.pane_in_direction(source_pane_id, dir)?
+            .with_context(|| {
+                format!("no tmux pane exists in requested direction {dir} from %{source_pane_id}")
+            })
     }
 
     fn directional_neighbors(&self) -> Result<DirectionalNeighbors> {
@@ -534,10 +528,31 @@ impl TerminalMultiplexerProvider for TmuxMuxProvider {
         self.with_session(pid, TmuxSession::focused_pane_id_for_client)
     }
 
-    fn pane_neighbor_for_pid(&self, pid: u32, pane_id: u64, dir: Direction) -> Result<u64> {
+    fn list_panes_for_pid(&self, pid: u32) -> Result<Vec<TerminalPaneSnapshot>> {
         self.with_session(pid, |session| {
-            session.directional_neighbor_pane_id(pane_id, dir)
+            let focused_pane_id = session.focused_pane_id_for_client()?;
+            let window_ref = session.query_pane(focused_pane_id, "#{window_id}")?;
+            let panes = session.list_panes_for_window(&window_ref)?;
+            Ok(panes
+                .into_iter()
+                .map(|pane| TerminalPaneSnapshot {
+                    pane_id: pane.pane_id,
+                    tab_id: None,
+                    window_id: None,
+                    is_active: pane.pane_id == focused_pane_id,
+                    foreground_process_name: None,
+                })
+                .collect())
         })
+    }
+
+    fn pane_in_direction_for_pid(
+        &self,
+        pid: u32,
+        pane_id: u64,
+        dir: Direction,
+    ) -> Result<Option<u64>> {
+        self.with_session(pid, |session| session.pane_in_direction(pane_id, dir))
     }
 
     fn send_text_to_pane(&self, pid: u32, pane_id: u64, text: &str) -> Result<()> {
@@ -801,8 +816,9 @@ impl TopologyHandler for Tmux {
 
 #[cfg(test)]
 mod tests {
-    use super::{Tmux, TmuxSession};
+    use super::{select_directional_neighbor, Tmux, TmuxPaneGeom, TmuxSession};
     use crate::engine::contract::AppAdapter;
+    use crate::engine::topology::Direction;
 
     #[test]
     fn declares_explicit_capability_contract() {
@@ -821,5 +837,60 @@ mod tests {
         assert!(caps.tear_out);
         assert!(!caps.rearrange);
         assert!(!caps.merge);
+    }
+
+    #[test]
+    fn directional_neighbor_prefers_closest_with_overlap() {
+        let panes = vec![
+            TmuxPaneGeom {
+                pane_id: 1,
+                left: 10,
+                top: 10,
+                width: 10,
+                height: 10,
+            },
+            TmuxPaneGeom {
+                pane_id: 2,
+                left: 0,
+                top: 12,
+                width: 9,
+                height: 8,
+            },
+            TmuxPaneGeom {
+                pane_id: 3,
+                left: -20,
+                top: 12,
+                width: 10,
+                height: 8,
+            },
+        ];
+        assert_eq!(
+            select_directional_neighbor(&panes, 1, Direction::West),
+            Some(2)
+        );
+    }
+
+    #[test]
+    fn directional_neighbor_returns_none_without_overlap() {
+        let panes = vec![
+            TmuxPaneGeom {
+                pane_id: 1,
+                left: 10,
+                top: 10,
+                width: 10,
+                height: 10,
+            },
+            TmuxPaneGeom {
+                pane_id: 2,
+                left: 0,
+                top: 100,
+                width: 9,
+                height: 8,
+            },
+        ];
+        assert_eq!(
+            select_directional_neighbor(&panes, 1, Direction::West),
+            None
+        );
     }
 }

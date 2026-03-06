@@ -1,4 +1,5 @@
 pub mod emacs;
+pub mod kitty;
 pub mod librefox;
 pub mod nvim;
 pub mod vscode;
@@ -266,7 +267,7 @@ mod resolve_chain_tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     use crate::adapters::apps::{
-        emacs, librefox::Librefox, nvim::Nvim, vscode::Vscode, wezterm, TopologyHandler,
+        emacs, kitty, librefox::Librefox, nvim::Nvim, vscode::Vscode, wezterm, TopologyHandler,
     };
     use crate::adapters::terminal_multiplexers::tmux::Tmux;
 
@@ -281,7 +282,7 @@ mod resolve_chain_tests {
     fn unique_temp_dir(prefix: &str) -> PathBuf {
         let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
         let path = std::env::temp_dir().join(format!(
-            "niri-deep-app-resolve-{prefix}-{}-{id}",
+            "yeet-and-yoink-app-resolve-{prefix}-{}-{id}",
             std::process::id()
         ));
         std::fs::create_dir_all(&path).expect("temp dir should be created");
@@ -310,6 +311,7 @@ mod resolve_chain_tests {
     fn adapters_implement_topology_traits() {
         fn assert_topology_contracts<T: TopologyHandler>() {}
         assert_topology_contracts::<emacs::EmacsBackend>();
+        assert_topology_contracts::<kitty::KittyBackend>();
         assert_topology_contracts::<wezterm::WeztermBackend>();
         assert_topology_contracts::<Tmux>();
         assert_topology_contracts::<Nvim>();
@@ -334,7 +336,7 @@ mod resolve_chain_tests {
     fn override_filters_non_matching_direct_adapter() {
         let _guard = env_guard();
         let root = unique_temp_dir("override-filter");
-        let config_dir = root.join("niri-deep");
+        let config_dir = root.join("yeet-and-yoink");
         std::fs::create_dir_all(&config_dir).expect("config dir should be created");
         std::fs::write(
             config_dir.join("config.toml"),
@@ -363,7 +365,7 @@ enabled = true
     fn override_applies_to_terminal_chain_selection() {
         let _guard = env_guard();
         let root = unique_temp_dir("override-terminal");
-        let config_dir = root.join("niri-deep");
+        let config_dir = root.join("yeet-and-yoink");
         std::fs::create_dir_all(&config_dir).expect("config dir should be created");
         std::fs::write(
             config_dir.join("config.toml"),
@@ -389,10 +391,42 @@ enabled = true
     }
 
     #[test]
+    fn kitty_terminal_app_id_resolves_terminal_chain() {
+        let _guard = env_guard();
+        let root = unique_temp_dir("kitty-terminal-chain");
+        let config_dir = root.join("yeet-and-yoink");
+        std::fs::create_dir_all(&config_dir).expect("config dir should be created");
+        std::fs::write(
+            config_dir.join("config.toml"),
+            r#"
+[app.terminal.kitty]
+enabled = true
+"#,
+        )
+        .expect("config file should be writable");
+        let old_override = set_env(
+            "NIRI_DEEP_CONFIG",
+            Some(config_dir.join("config.toml").to_str().expect("utf-8 path")),
+        );
+        crate::config::prepare().expect("config should load");
+
+        let chain = resolve_chain(kitty::APP_IDS[0], 0, "");
+        assert!(!chain.is_empty());
+        assert_eq!(
+            chain.last().map(|adapter| adapter.adapter_name()),
+            Some("terminal")
+        );
+
+        restore_env("NIRI_DEEP_CONFIG", old_override);
+        crate::config::prepare().expect("config should reload");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn resolved_editor_capabilities_follow_config_policy() {
         let _guard = env_guard();
         let root = unique_temp_dir("policy-editor");
-        let config_dir = root.join("niri-deep");
+        let config_dir = root.join("yeet-and-yoink");
         std::fs::create_dir_all(&config_dir).expect("config dir should be created");
         std::fs::write(
             config_dir.join("config.toml"),
@@ -423,7 +457,7 @@ focus.internal_panes.enabled = false
     fn resolved_terminal_capabilities_follow_config_policy() {
         let _guard = env_guard();
         let root = unique_temp_dir("policy-terminal");
-        let config_dir = root.join("niri-deep");
+        let config_dir = root.join("yeet-and-yoink");
         std::fs::create_dir_all(&config_dir).expect("config dir should be created");
         std::fs::write(
             config_dir.join("config.toml"),

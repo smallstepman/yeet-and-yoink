@@ -271,10 +271,10 @@ impl TopologyHandler for EmacsBackend {
 
     fn prepare_merge(&self, _source_pid: Option<ProcessId>) -> Result<MergePreparation> {
         let frame_id = eval_in_frame_mut(
-            "(let ((id (frame-parameter nil 'niri-deep-frame-id))) \
+            "(let ((id (frame-parameter nil 'yeet-and-yoink-frame-id))) \
                (unless id \
-                 (setq id (format \"niri-deep-%d-%d\" (emacs-pid) (random 1000000000))) \
-                 (set-frame-parameter nil 'niri-deep-frame-id id)) \
+                 (setq id (format \"yeet-and-yoink-%d-%d\" (emacs-pid) (random 1000000000))) \
+                 (set-frame-parameter nil 'yeet-and-yoink-frame-id id)) \
                id)",
         )?;
         let frame_id = frame_id.trim().trim_matches('"').to_string();
@@ -299,7 +299,7 @@ impl TopologyHandler for EmacsBackend {
             .context("source emacs frame id missing")?;
         let frame_id_lit = frame_id.replace('\\', "\\\\").replace('\"', "\\\"");
         let focused_is_source = eval_in_frame(&format!(
-            "(equal (frame-parameter nil 'niri-deep-frame-id) \"{frame_id_lit}\")"
+            "(equal (frame-parameter nil 'yeet-and-yoink-frame-id) \"{frame_id_lit}\")"
         ))? == "t";
         if focused_is_source {
             return TopologyHandler::merge_into(
@@ -316,7 +316,7 @@ impl TopologyHandler for EmacsBackend {
                     (src nil)) \
                (dolist (f (filtered-frame-list #'frame-visible-p)) \
                  (when (and (not (eq f target)) \
-                            (equal (frame-parameter f 'niri-deep-frame-id) src-id)) \
+                            (equal (frame-parameter f 'yeet-and-yoink-frame-id) src-id)) \
                    (setq src f))) \
                (unless src (error \"source frame id not found\")) \
                (let ((buf (with-selected-frame src (window-buffer (frame-selected-window src))))) \

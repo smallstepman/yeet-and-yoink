@@ -1,6 +1,10 @@
 [package]
-name = "niri-deep"
+name = "yeet-and-yoink"
 version = "0.1.0"
+
+[[bin]]
+name = "yny"
+path = "src/main.rs"
 edition = "2021"
 
 [dependencies]

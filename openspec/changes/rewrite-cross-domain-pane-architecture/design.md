@@ -1,6 +1,6 @@
 ## Context
 
-`niri-deep` currently resolves actions by probing an ordered adapter chain (`resolve_chain`) and selecting the first supported operation in planner/executor fallback order. This model is tightly coupled to current app adapter contracts, only has one built-in WM adapter (`niri`), and does not maintain a global nested topology that can answer cross-domain routing deterministically.
+`yeet-and-yoink` currently resolves actions by probing an ordered adapter chain (`resolve_chain`) and selecting the first supported operation in planner/executor fallback order. This model is tightly coupled to current app adapter contracts, only has one built-in WM adapter (`niri`), and does not maintain a global nested topology that can answer cross-domain routing deterministically.
 
 The target architecture from `rectangularly dualizable graph vs binary space par.md` requires:
 - geometry-based directional solving across all panes/windows,
