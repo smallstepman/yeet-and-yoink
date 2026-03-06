@@ -37,6 +37,13 @@ move.docking.tear_off.enabled = true
 Foot, Alacritty, and Ghostty are also supported as external terminal hosts;
 configure them under `[app.terminal.foot]`, `[app.terminal.alacritty]`, or
 `[app.terminal.ghostty]` with `mux_backend = "tmux"` or `mux_backend = "zellij"`.
+For kitty native mux (`mux_backend = "kitty"`), kitty itself must expose remote
+control to detached callers; add this to `~/.config/kitty/kitty.conf` and restart kitty:
+
+```conf
+allow_remote_control socket-only
+listen_on unix:@kitty-{kitty_pid}
+```
 
 ## Runtime architecture
 

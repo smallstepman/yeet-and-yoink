@@ -167,10 +167,10 @@ mod tests {
         assert!(caps.probe);
         assert!(caps.focus);
         assert!(caps.move_internal);
-        assert!(!caps.resize_internal);
+        assert!(caps.resize_internal);
         assert!(caps.rearrange);
         assert!(caps.tear_out);
-        assert!(!caps.merge);
+        assert!(caps.merge);
 
         restore_env("NIRI_DEEP_CONFIG", old_override);
         crate::config::prepare().expect("config should reload");

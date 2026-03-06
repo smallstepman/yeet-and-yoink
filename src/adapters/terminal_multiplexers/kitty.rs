@@ -4,11 +4,12 @@ use anyhow::{bail, Context, Result};
 use serde::Deserialize;
 
 use crate::engine::contract::{
-    AdapterCapabilities, MoveDecision, TearResult, TerminalMultiplexerProvider,
-    TerminalPaneSnapshot, TopologyHandler,
+    AdapterCapabilities, MergeExecutionMode, MergePreparation, MoveDecision, TearResult,
+    TerminalMultiplexerProvider, TerminalPaneSnapshot, TopologyHandler,
 };
-use crate::engine::runtime;
+use crate::engine::runtime::{self, ProcessId};
 use crate::engine::topology::{Direction, DirectionalNeighbors};
+use crate::logging;
 
 #[derive(Debug, Deserialize)]
 struct KittyOsWindow {
@@ -52,6 +53,11 @@ pub struct KittyMux;
 
 pub(crate) static KITTY_MUX_PROVIDER: KittyMux = KittyMux;
 
+#[derive(Debug, Clone, Copy)]
+struct KittyMuxMergePreparation {
+    pane_id: u64,
+}
+
 impl KittyPane {
     fn foreground_process_name(&self) -> Option<String> {
         let command = self
@@ -70,12 +76,69 @@ impl KittyMux {
         dir.positional()
     }
 
+    fn action_direction_name(dir: Direction) -> &'static str {
+        dir.egocentric()
+    }
+
     fn no_match(stderr: &str) -> bool {
         let value = stderr.to_ascii_lowercase();
         value.contains("no matching window")
             || value.contains("no matching windows")
             || value.contains("no matching tabs")
             || value.contains("matches no windows")
+    }
+
+    fn missing_tty_remote_control(stderr: &str) -> bool {
+        let value = stderr.to_ascii_lowercase();
+        value.contains("/dev/tty") || value.contains("controlling terminal")
+    }
+
+    fn detached_remote_control_help(pid: u32, stderr: &str) -> String {
+        format!(
+            "kitty native mux requires kitty remote control to be reachable from outside kitty \
+             for detached invocations such as WM keybindings. No KITTY_LISTEN_ON socket was \
+             found for pid {pid}, so kitty fell back to the controlling tty and failed. \
+             Add this to kitty.conf, restart kitty, and try again:\n\
+\n\
+allow_remote_control socket-only\n\
+listen_on unix:@kitty-{{kitty_pid}}\n\
+\n\
+Original error: {stderr}"
+        )
+    }
+
+    fn status_error(pid: u32, args: &[&str], stderr: &str) -> anyhow::Error {
+        if Self::missing_tty_remote_control(stderr) && Self::socket_for_pid(pid).is_none() {
+            anyhow::anyhow!(Self::detached_remote_control_help(pid, stderr))
+        } else {
+            anyhow::anyhow!(
+                "terminal multiplexer command {:?} failed: {}",
+                args,
+                stderr.trim()
+            )
+        }
+    }
+
+    fn action_spec(action: &str, dir: Direction) -> String {
+        format!("{action} {}", Self::action_direction_name(dir))
+    }
+
+    fn move_window_action(dir: Direction) -> String {
+        Self::action_spec("move_window", dir)
+    }
+
+    fn move_to_screen_edge_action(dir: Direction) -> String {
+        format!(
+            "layout_action move_to_screen_edge {}",
+            Self::direction_name(dir)
+        )
+    }
+
+    fn target_merge_layout(dir: Direction) -> &'static str {
+        match dir {
+            Direction::West | Direction::East => "splits:split_axis=horizontal",
+            Direction::North | Direction::South => "splits:split_axis=vertical",
+        }
     }
 
     fn read_environ_var(pid: u32, key: &str) -> Option<String> {
@@ -153,10 +216,63 @@ impl KittyMux {
             .collect())
     }
 
+    fn active_tab_id_for_pid(&self, pid: u32) -> Result<u64> {
+        self.active_tab_panes(pid)?
+            .first()
+            .and_then(|pane| pane.tab_id)
+            .context("kitty active tab is missing an id")
+    }
+
     fn focus_pane_by_id(&self, pid: u32, pane_id: u64) -> Result<()> {
         let matcher = format!("id:{pane_id}");
         self.cli_stdout_for_pid(pid, &["focus-window", "--match", &matcher])?;
         Ok(())
+    }
+
+    fn run_action_for_pane(&self, pid: u32, pane_id: u64, action: &str) -> Result<()> {
+        let matcher = format!("id:{pane_id}");
+        self.cli_stdout_for_pid(pid, &["action", "--match", &matcher, action])?;
+        Ok(())
+    }
+
+    fn set_tab_layout(&self, pid: u32, tab_id: u64, layout: &str) -> Result<()> {
+        let matcher = format!("id:{tab_id}");
+        self.cli_stdout_for_pid(pid, &["goto-layout", "--match", &matcher, layout])?;
+        Ok(())
+    }
+
+    fn axis_name(dir: Direction) -> &'static str {
+        match dir {
+            Direction::West | Direction::East => "horizontal",
+            Direction::North | Direction::South => "vertical",
+        }
+    }
+
+    fn resize_increment(dir: Direction, grow: bool, step: i32) -> i32 {
+        let magnitude = step.abs().max(1);
+        let directional_delta = match dir {
+            Direction::East | Direction::South => magnitude,
+            Direction::West | Direction::North => -magnitude,
+        };
+        if grow {
+            directional_delta
+        } else {
+            -directional_delta
+        }
+    }
+
+    fn axis_neighbors_exist(&self, pid: u32, dir: Direction) -> Result<bool> {
+        let pane_id = self.focused_pane_for_pid(pid)?;
+        let axis = match dir {
+            Direction::West | Direction::East => [Direction::West, Direction::East],
+            Direction::North | Direction::South => [Direction::North, Direction::South],
+        };
+        Ok(self
+            .pane_in_direction_for_pid(pid, pane_id, axis[0])?
+            .is_some()
+            || self
+                .pane_in_direction_for_pid(pid, pane_id, axis[1])?
+                .is_some())
     }
 
     fn try_focus_neighbor(&self, pid: u32, dir: Direction) -> Result<bool> {
@@ -169,11 +285,11 @@ impl KittyMux {
         if Self::no_match(&stderr) {
             return Ok(false);
         }
-        bail!(
-            "kitty focus-window --match {} failed: {}",
-            matcher,
-            stderr.trim()
-        );
+        return Err(Self::status_error(
+            pid,
+            &["focus-window", "--match", &matcher],
+            &stderr,
+        ));
     }
 }
 
@@ -183,11 +299,25 @@ impl TerminalMultiplexerProvider for KittyMux {
         command.arg("@");
         if let Some(socket) = Self::socket_for_pid(pid) {
             command.args(["--to", &socket]);
+        } else {
+            logging::debug(format!(
+                "kitty: no KITTY_LISTEN_ON discovered for pid {}; falling back to controlling tty",
+                pid
+            ));
         }
         command.args(args);
         command
             .output()
             .context("failed to run kitty remote-control command")
+    }
+
+    fn cli_stdout_for_pid(&self, pid: u32, args: &[&str]) -> Result<String> {
+        let output = self.cli_output_for_pid(pid, args)?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            return Err(Self::status_error(pid, args, &stderr));
+        }
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
     }
 
     fn list_panes_for_pid(&self, pid: u32) -> Result<Vec<TerminalPaneSnapshot>> {
@@ -199,10 +329,10 @@ impl TerminalMultiplexerProvider for KittyMux {
             probe: true,
             focus: true,
             move_internal: true,
-            resize_internal: false,
+            resize_internal: true,
             rearrange: true,
             tear_out: true,
-            merge: false,
+            merge: true,
         }
     }
 
@@ -244,10 +374,12 @@ impl TerminalMultiplexerProvider for KittyMux {
         let output =
             self.cli_output_for_pid(pid, &["send-text", "--match", &matcher, "--", text])?;
         if !output.status.success() {
-            bail!(
-                "kitty send-text failed: {}",
-                String::from_utf8_lossy(&output.stderr).trim()
-            );
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            return Err(Self::status_error(
+                pid,
+                &["send-text", "--match", &matcher, "--", text],
+                &stderr,
+            ));
         }
         Ok(())
     }
@@ -258,16 +390,76 @@ impl TerminalMultiplexerProvider for KittyMux {
 
     fn merge_source_pane_into_focused_target(
         &self,
-        _source_pid: u32,
-        _source_pane_id: u64,
-        _target_pid: u32,
+        source_pid: u32,
+        source_pane_id: u64,
+        target_pid: u32,
         _target_window_id: Option<u64>,
-        _dir: Direction,
+        dir: Direction,
     ) -> Result<()> {
-        Err(crate::engine::contract::unsupported_operation(
-            "kitty",
-            "merge_source_pane_into_focused_target",
-        ))
+        if let (Some(source_socket), Some(target_socket)) = (
+            Self::socket_for_pid(source_pid),
+            Self::socket_for_pid(target_pid),
+        ) {
+            if source_socket != target_socket {
+                bail!(
+                    "source and target kitty instances differ ({} != {})",
+                    source_socket,
+                    target_socket
+                );
+            }
+        }
+
+        let target_pane_id = self.focused_pane_for_pid(target_pid)?;
+        if target_pane_id == source_pane_id {
+            bail!("source and target kitty panes are the same");
+        }
+
+        let target_tab_pane_count = self.active_tab_panes(target_pid)?.len();
+        let target_tab_id = self.active_tab_id_for_pid(target_pid)?;
+        if target_tab_pane_count == 1 {
+            self.set_tab_layout(target_pid, target_tab_id, Self::target_merge_layout(dir))?;
+        }
+        let source_match = format!("id:{source_pane_id}");
+        let target_tab_match = format!("id:{target_tab_id}");
+        self.cli_stdout_for_pid(
+            target_pid,
+            &[
+                "detach-window",
+                "--match",
+                &source_match,
+                "--target-tab",
+                &target_tab_match,
+            ],
+        )?;
+
+        let target_side = dir.opposite();
+        if let Err(err) = self.run_action_for_pane(
+            target_pid,
+            source_pane_id,
+            &Self::move_to_screen_edge_action(target_side),
+        ) {
+            logging::debug(format!(
+                "kitty: merge post-placement move_to_screen_edge failed source_pane_id={} target_pid={} dir={} err={:#}",
+                source_pane_id,
+                target_pid,
+                target_side.positional(),
+                err
+            ));
+            if let Err(edge_err) = self.run_action_for_pane(
+                target_pid,
+                source_pane_id,
+                &Self::move_window_action(target_side),
+            ) {
+                logging::debug(format!(
+                    "kitty: merge post-placement move_window failed source_pane_id={} target_pid={} dir={} err={:#}",
+                    source_pane_id,
+                    target_pid,
+                    target_side.positional(),
+                    edge_err
+                ));
+            }
+        }
+        Ok(())
     }
 
     fn active_foreground_process(&self, pid: u32) -> Option<String> {
@@ -301,6 +493,12 @@ impl TopologyHandler for KittyMux {
         Ok(self.active_tab_panes(pid)?.len() as u32)
     }
 
+    fn supports_rearrange_decision(&self) -> bool {
+        // Kitty can rearrange panes, but without a split tree its perpendicular-neighbor
+        // heuristic is too eager and blocks expected edge tear-outs from WM keybindings.
+        false
+    }
+
     fn can_focus(&self, dir: Direction, pid: u32) -> Result<bool> {
         let focused_pane = self.focused_pane_for_pid(pid)?;
         Ok(self
@@ -312,6 +510,13 @@ impl TopologyHandler for KittyMux {
         Ok(self.move_surface(pid)?.decision_for(dir))
     }
 
+    fn can_resize(&self, dir: Direction, _grow: bool, pid: u32) -> Result<bool> {
+        if self.window_count(pid)? <= 1 {
+            return Ok(false);
+        }
+        self.axis_neighbors_exist(pid, dir)
+    }
+
     fn focus(&self, dir: Direction, pid: u32) -> Result<()> {
         if !self.try_focus_neighbor(pid, dir)? {
             bail!("no kitty pane exists in requested direction");
@@ -321,21 +526,33 @@ impl TopologyHandler for KittyMux {
 
     fn move_internal(&self, dir: Direction, pid: u32) -> Result<()> {
         let pane_id = self.focused_pane_for_pid(pid)?;
+        self.run_action_for_pane(pid, pane_id, &Self::move_window_action(dir))?;
+        Ok(())
+    }
+
+    fn resize_internal(&self, dir: Direction, grow: bool, step: i32, pid: u32) -> Result<()> {
+        let pane_id = self.focused_pane_for_pid(pid)?;
         let matcher = format!("id:{pane_id}");
+        let increment = Self::resize_increment(dir, grow, step).to_string();
         self.cli_stdout_for_pid(
             pid,
             &[
-                "move-window",
+                "resize-window",
                 "--match",
                 &matcher,
-                Self::direction_name(dir),
+                "--axis",
+                Self::axis_name(dir),
+                "--increment",
+                &increment,
             ],
         )?;
         Ok(())
     }
 
     fn rearrange(&self, dir: Direction, pid: u32) -> Result<()> {
-        self.move_internal(dir, pid)
+        let pane_id = self.focused_pane_for_pid(pid)?;
+        self.run_action_for_pane(pid, pane_id, &Self::move_to_screen_edge_action(dir))?;
+        Ok(())
     }
 
     fn move_out(&self, _dir: Direction, pid: u32) -> Result<TearResult> {
@@ -345,6 +562,40 @@ impl TopologyHandler for KittyMux {
         Ok(TearResult {
             spawn_command: None,
         })
+    }
+
+    fn merge_execution_mode(&self) -> MergeExecutionMode {
+        MergeExecutionMode::TargetFocused
+    }
+
+    fn prepare_merge(&self, source_pid: Option<ProcessId>) -> Result<MergePreparation> {
+        let source_pid = source_pid.context("source kitty merge missing pid")?;
+        let pane_id = self.focused_pane_for_pid(source_pid.get())?;
+        Ok(MergePreparation::with_payload(KittyMuxMergePreparation {
+            pane_id,
+        }))
+    }
+
+    fn merge_into_target(
+        &self,
+        dir: Direction,
+        source_pid: Option<ProcessId>,
+        target_pid: Option<ProcessId>,
+        preparation: MergePreparation,
+    ) -> Result<()> {
+        let source_pid = source_pid.context("source kitty merge missing pid")?;
+        let target_pid = target_pid.context("target kitty merge missing pid")?;
+        let preparation = preparation
+            .into_payload::<KittyMuxMergePreparation>()
+            .context("source kitty merge missing pane id")?;
+        self.merge_source_pane_into_focused_target(
+            source_pid.get(),
+            preparation.pane_id,
+            target_pid.get(),
+            None,
+            dir,
+        )
+        .context("kitty merge failed")
     }
 }
 
@@ -531,7 +782,34 @@ exit "$status"
     }
 
     #[test]
-    fn move_internal_uses_move_window_command() {
+    fn move_internal_uses_action_move_window_command() {
+        let _guard = env_guard();
+        let harness = KittyHarness::new();
+        harness.set_response(
+            "ls --output-format json",
+            0,
+            r#"[
+              {"id": 1, "is_focused": true, "tabs": [
+                {"id": 10, "is_focused": true, "windows": [
+                  {"id": 100, "is_focused": true, "foreground_processes": [{"cmdline": ["zsh"]}]}
+                ]}
+              ]}
+             ]"#,
+            "",
+        );
+        harness.set_response("action --match id:100 move_window left", 0, "", "");
+
+        let provider = KittyMux;
+        provider
+            .move_internal(Direction::West, 0)
+            .expect("move_internal should succeed");
+        assert!(harness
+            .command_log()
+            .contains("action --match id:100 move_window left"));
+    }
+
+    #[test]
+    fn rearrange_uses_layout_action_move_to_screen_edge() {
         let _guard = env_guard();
         let harness = KittyHarness::new();
         harness.set_response(
@@ -546,15 +824,119 @@ exit "$status"
             ]"#,
             "",
         );
-        harness.set_response("move-window --match id:100 left", 0, "", "");
+        harness.set_response(
+            "action --match id:100 layout_action move_to_screen_edge top",
+            0,
+            "",
+            "",
+        );
 
         let provider = KittyMux;
         provider
-            .move_internal(Direction::West, 0)
-            .expect("move_internal should succeed");
+            .rearrange(Direction::North, 0)
+            .expect("rearrange should succeed");
         assert!(harness
             .command_log()
-            .contains("move-window --match id:100 left"));
+            .contains("action --match id:100 layout_action move_to_screen_edge top"));
+    }
+
+    #[test]
+    fn resize_internal_uses_resize_window_command() {
+        let _guard = env_guard();
+        let harness = KittyHarness::new();
+        harness.set_response(
+            "ls --output-format json",
+            0,
+            r#"[
+              {"id": 1, "is_focused": true, "tabs": [
+                {"id": 10, "is_focused": true, "windows": [
+                  {"id": 100, "is_focused": true, "foreground_processes": [{"cmdline": ["zsh"]}]},
+                  {"id": 101, "is_focused": false, "foreground_processes": [{"cmdline": ["nvim"]}]}
+                ]}
+              ]}
+            ]"#,
+            "",
+        );
+        harness.set_response(
+            "resize-window --match id:100 --axis horizontal --increment -3",
+            0,
+            "",
+            "",
+        );
+
+        let provider = KittyMux;
+        provider
+            .resize_internal(Direction::West, true, 3, 0)
+            .expect("resize_internal should succeed");
+        assert!(harness
+            .command_log()
+            .contains("resize-window --match id:100 --axis horizontal --increment -3"));
+    }
+
+    #[test]
+    fn move_policy_prefers_tearout_over_auto_rearrange() {
+        let provider = KittyMux;
+        assert!(!TopologyHandler::supports_rearrange_decision(&provider));
+    }
+
+    #[test]
+    fn merge_moves_source_window_into_target_tab_and_repositions() {
+        let _guard = env_guard();
+        let harness = KittyHarness::new();
+        harness.set_response(
+            "ls --output-format json",
+            0,
+            r#"[
+              {"id": 1, "is_focused": true, "tabs": [
+                {"id": 10, "is_focused": true, "windows": [
+                  {"id": 100, "is_focused": true, "foreground_processes": [{"cmdline": ["zsh"]}]}
+                ]}
+              ]}
+            ]"#,
+            "",
+        );
+        harness.set_response(
+            "goto-layout --match id:10 splits:split_axis=horizontal",
+            0,
+            "",
+            "",
+        );
+        harness.set_response("detach-window --match id:200 --target-tab id:10", 0, "", "");
+        harness.set_response(
+            "action --match id:200 layout_action move_to_screen_edge right",
+            0,
+            "",
+            "",
+        );
+
+        let provider = KittyMux;
+        provider
+            .merge_source_pane_into_focused_target(0, 200, 0, None, Direction::West)
+            .expect("merge should succeed");
+        let log = harness.command_log();
+        assert!(log.contains("goto-layout --match id:10 splits:split_axis=horizontal"));
+        assert!(log.contains("detach-window --match id:200 --target-tab id:10"));
+        assert!(log.contains("action --match id:200 layout_action move_to_screen_edge right"));
+    }
+
+    #[test]
+    fn missing_socket_error_explains_kitty_conf_requirement() {
+        let _guard = env_guard();
+        let harness = KittyHarness::new();
+        harness.set_response(
+            "ls --output-format json",
+            1,
+            "",
+            "Error: open /dev/tty: no such device or address",
+        );
+
+        let provider = KittyMux;
+        let err = provider
+            .focused_pane_for_pid(0)
+            .expect_err("focused_pane_for_pid should fail without tty/socket");
+        let message = format!("{err:#}");
+        assert!(message.contains("allow_remote_control socket-only"));
+        assert!(message.contains("listen_on unix:@kitty-{kitty_pid}"));
     }
 
     #[test]

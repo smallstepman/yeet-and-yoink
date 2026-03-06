@@ -235,6 +235,25 @@ selects the window that is a right-neighbor of the active pane and resizes it, i
   - Walk to directional neighbors using `--match neighbor:...`
   - Combine that with tab/window ordering to reconstruct a relational topology graph.
 
+### 3. Actual control surface for movement / tear-out / merge
+
+Kitty’s RC surface is a mix of `action`-driven pane actions and dedicated structural commands:
+
+```sh
+kitty @ action move_window left
+kitty @ action layout_action move_to_screen_edge top
+kitty @ resize-window --match id:123 --axis horizontal --increment -3
+kitty @ detach-window --match id:123
+kitty @ detach-window --match id:123 --target-tab id:55
+```
+
+- Internal pane move uses `action move_window ...` with `left/right/up/down`.
+- Rearrangement-to-edge uses `action layout_action move_to_screen_edge ...` with `left/right/top/bottom`.
+- Tear-out is `detach-window --match id:<pane>`.
+- Merge-back into an existing target tab is `detach-window --match id:<source> --target-tab id:<target-tab>`.
+
+This means a Kitty-native backend can support focus, move, rearrange, resize, tear-out, and target-focused merge without synthesizing keyboard input, but exact split geometry still has to be inferred because `ls` does not expose the full split tree.
+
 ***
 
 ## iTerm2

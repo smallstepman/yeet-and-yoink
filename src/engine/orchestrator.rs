@@ -865,6 +865,8 @@ impl Orchestrator {
 mod tests {
     use std::any::TypeId;
     use std::collections::BTreeSet;
+    use std::ffi::OsString;
+    use std::path::PathBuf;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
 
@@ -881,6 +883,35 @@ mod tests {
     use crate::engine::runtime::ProcessId;
     use crate::engine::topology::Direction;
     use crate::engine::topology::{GlobalLeaf, Rect};
+
+    fn unique_temp_dir(prefix: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "yeet-and-yoink-orchestrator-{prefix}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock should be monotonic")
+                .as_nanos()
+        ))
+    }
+
+    fn set_env(key: &str, value: Option<&str>) -> Option<OsString> {
+        let old = std::env::var_os(key);
+        if let Some(value) = value {
+            std::env::set_var(key, value);
+        } else {
+            std::env::remove_var(key);
+        }
+        old
+    }
+
+    fn restore_env(key: &str, old: Option<OsString>) {
+        if let Some(old) = old {
+            std::env::set_var(key, old);
+        } else {
+            std::env::remove_var(key);
+        }
+    }
 
     #[test]
     fn route_distinguishes_same_and_cross_domain_targets() {
@@ -1181,6 +1212,14 @@ mod tests {
     #[test]
     fn move_prefers_cross_domain_transfer_when_payloads_are_compatible() {
         let _guard = crate::utils::env_guard();
+        let root = unique_temp_dir("cross-domain-transfer");
+        let config_dir = root.join("yeet-and-yoink");
+        std::fs::create_dir_all(&config_dir).expect("config dir should be created");
+        std::fs::write(config_dir.join("config.toml"), "").expect("config file should be writable");
+        let old_override = set_env(
+            "NIRI_DEEP_CONFIG",
+            Some(config_dir.join("config.toml").to_str().expect("utf-8 path")),
+        );
         crate::config::prepare().expect("config should load");
         let mut orchestrator = Orchestrator::default();
 
@@ -1255,11 +1294,23 @@ mod tests {
             target_counters.snapshot_calls.load(Ordering::Relaxed) > 0,
             "target domain should resync after mutation"
         );
+
+        restore_env("NIRI_DEEP_CONFIG", old_override);
+        crate::config::prepare().expect("config should reload");
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
     fn move_falls_back_to_wm_when_transfer_has_no_compatible_payload() {
         let _guard = crate::utils::env_guard();
+        let root = unique_temp_dir("wm-fallback");
+        let config_dir = root.join("yeet-and-yoink");
+        std::fs::create_dir_all(&config_dir).expect("config dir should be created");
+        std::fs::write(config_dir.join("config.toml"), "").expect("config file should be writable");
+        let old_override = set_env(
+            "NIRI_DEEP_CONFIG",
+            Some(config_dir.join("config.toml").to_str().expect("utf-8 path")),
+        );
         crate::config::prepare().expect("config should load");
         let mut orchestrator = Orchestrator::default();
 
@@ -1326,10 +1377,24 @@ mod tests {
         );
         assert_eq!(source_counters.tear_off_calls.load(Ordering::Relaxed), 1);
         assert_eq!(target_counters.merge_calls.load(Ordering::Relaxed), 0);
+
+        restore_env("NIRI_DEEP_CONFIG", old_override);
+        crate::config::prepare().expect("config should reload");
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
     fn move_merges_within_same_domain_when_supported() {
+        let _guard = crate::utils::env_guard();
+        let root = unique_temp_dir("same-domain-merge");
+        let config_dir = root.join("yeet-and-yoink");
+        std::fs::create_dir_all(&config_dir).expect("config dir should be created");
+        std::fs::write(config_dir.join("config.toml"), "").expect("config file should be writable");
+        let old_override = set_env(
+            "NIRI_DEEP_CONFIG",
+            Some(config_dir.join("config.toml").to_str().expect("utf-8 path")),
+        );
+        crate::config::prepare().expect("config should load");
         let mut orchestrator = Orchestrator::default();
 
         let counters = DomainCounters::default();
@@ -1388,6 +1453,10 @@ mod tests {
             counters.snapshot_calls.load(Ordering::Relaxed) > 0,
             "domain should resync after within-domain transfer"
         );
+
+        restore_env("NIRI_DEEP_CONFIG", old_override);
+        crate::config::prepare().expect("config should reload");
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

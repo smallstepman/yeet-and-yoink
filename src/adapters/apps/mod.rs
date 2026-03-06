@@ -329,7 +329,14 @@ mod resolve_chain_tests {
     #[test]
     fn direct_match_without_override_returns_adapter() {
         let _guard = env_guard();
-        let old_override = set_env("NIRI_DEEP_CONFIG", None);
+        let root = unique_temp_dir("direct-match");
+        let config_dir = root.join("yeet-and-yoink");
+        std::fs::create_dir_all(&config_dir).expect("config dir should be created");
+        std::fs::write(config_dir.join("config.toml"), "").expect("config file should be writable");
+        let old_override = set_env(
+            "NIRI_DEEP_CONFIG",
+            Some(config_dir.join("config.toml").to_str().expect("utf-8 path")),
+        );
         crate::config::prepare().expect("config should load");
 
         let chain = resolve_chain(emacs::APP_IDS[0], 0, "");
@@ -337,6 +344,8 @@ mod resolve_chain_tests {
         assert_eq!(chain[0].adapter_name(), emacs::ADAPTER_NAME);
 
         restore_env("NIRI_DEEP_CONFIG", old_override);
+        crate::config::prepare().expect("config should reload");
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

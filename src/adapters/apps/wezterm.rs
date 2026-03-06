@@ -555,6 +555,17 @@ exit "$status"
             std::env::set_var("WEZTERM_TEST_RESPONSES_DIR", &responses_dir);
             std::env::set_var("WEZTERM_TEST_LOG", &log_file);
 
+            let config_dir = base.join("config");
+            fs::create_dir_all(&config_dir).expect("config dir should be creatable");
+            let config_path = config_dir.join("config.toml");
+            fs::write(
+                &config_path,
+                "[app.terminal.wezterm]\nenabled = true\nmux_backend = \"wezterm\"\n",
+            )
+            .expect("config file should be writable");
+            std::env::set_var("NIRI_DEEP_CONFIG", &config_path);
+            crate::config::prepare().expect("config should load");
+
             Self {
                 base,
                 runtime_dir,
