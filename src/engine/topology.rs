@@ -10,6 +10,15 @@ pub enum SplitAxis {
     Vertical,
 }
 
+impl SplitAxis {
+    pub fn select<T>(self, horizontal: T, vertical: T) -> T {
+        match self {
+            Self::Horizontal => horizontal,
+            Self::Vertical => vertical,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, ValueEnum, Deserialize, Serialize)]
 pub enum Direction {
     #[serde(alias = "Left", alias = "left", alias = "west", alias = "W")]
@@ -344,7 +353,7 @@ impl MoveSurface {
 mod tests {
     use super::{
         select_closest_in_direction, DirectedRect, Direction, DirectionalNeighbors, MoveSurface,
-        Rect,
+        Rect, SplitAxis,
     };
     use crate::engine::contract::MoveDecision;
 
@@ -405,6 +414,8 @@ mod tests {
             Direction::North.perpendicular_directions(),
             [Direction::West, Direction::East]
         );
+        assert_eq!(SplitAxis::Horizontal.select("h", "v"), "h");
+        assert_eq!(SplitAxis::Vertical.select("h", "v"), "v");
 
         assert_eq!(Direction::North.relational(), "above");
         assert_eq!(Direction::South.relational(), "below");

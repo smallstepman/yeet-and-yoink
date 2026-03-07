@@ -100,24 +100,9 @@ impl ZellijMuxProvider {
         None
     }
 
-    fn all_pids() -> Vec<u32> {
-        let mut pids = Vec::new();
-        let Ok(entries) = std::fs::read_dir("/proc") else {
-            return pids;
-        };
-        for entry in entries.flatten() {
-            let name = entry.file_name();
-            let Ok(pid) = name.to_string_lossy().parse::<u32>() else {
-                continue;
-            };
-            pids.push(pid);
-        }
-        pids
-    }
-
     fn session_name_by_kitty_pid(kitty_pid: u32) -> Option<String> {
         let kitty_pid = kitty_pid.to_string();
-        for zellij_pid in Self::all_pids()
+        for zellij_pid in runtime::all_pids()
             .into_iter()
             .filter(|pid| runtime::process_comm(*pid).as_deref() == Some("zellij"))
         {

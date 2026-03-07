@@ -495,10 +495,7 @@ impl TerminalMultiplexerProvider for TmuxMuxProvider {
             let source_ref = format!("%{source_pane_id}");
             let target_ref = format!("%{target_pane_id}");
             let target_side = dir.opposite();
-            let split_axis = match target_side {
-                Direction::West | Direction::East => "-h",
-                Direction::North | Direction::South => "-v",
-            };
+            let split_axis = target_side.axis().select("-h", "-v");
             let mut args = vec![
                 "join-pane".to_string(),
                 "-s".to_string(),

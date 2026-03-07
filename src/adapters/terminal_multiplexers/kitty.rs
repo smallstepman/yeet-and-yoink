@@ -119,10 +119,8 @@ Original error: {stderr}"
     }
 
     fn target_merge_layout(&self, dir: Direction) -> &'static str {
-        match dir {
-            Direction::West | Direction::East => "splits:split_axis=horizontal",
-            Direction::North | Direction::South => "splits:split_axis=vertical",
-        }
+        dir.axis()
+            .select("splits:split_axis=horizontal", "splits:split_axis=vertical")
     }
 
     fn socket_for_pid(&self, pid: u32) -> Option<String> {

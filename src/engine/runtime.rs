@@ -150,6 +150,21 @@ pub fn socket_path_for_pid_from_ss(pid: u32, path_contains: &str) -> Option<Stri
     )
 }
 
+pub fn all_pids() -> Vec<u32> {
+    let mut pids = Vec::new();
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return pids;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Ok(pid) = name.to_string_lossy().parse::<u32>() else {
+            continue;
+        };
+        pids.push(pid);
+    }
+    pids
+}
+
 #[derive(Debug, Clone)]
 pub struct CommandContext {
     pub adapter: &'static str,
@@ -352,7 +367,7 @@ mod tests {
     use std::process::Output;
 
     use super::{
-        process_cmdline_args, process_comm, process_environ_var, process_tree_pids,
+        all_pids, process_cmdline_args, process_comm, process_environ_var, process_tree_pids,
         socket_inode_from_fd_target, socket_path_for_pid_from_proc_net_unix,
         socket_path_from_proc_net_unix, socket_path_from_ss_output, stderr_text, stdout_text,
         CommandContext, ProcessTree,
@@ -460,6 +475,11 @@ u_str ESTAB 0 0 /run/user/1000/zellij/0.43.1/implacable-oboe 458031 * 455551 use
         let _ = std::fs::remove_dir_all(&base);
 
         assert_eq!(discovered, Some(socket_path.to_string_lossy().to_string()));
+    }
+
+    #[test]
+    fn all_pids_includes_current_process() {
+        assert!(all_pids().into_iter().any(|pid| pid == std::process::id()));
     }
 
     #[cfg(unix)]
