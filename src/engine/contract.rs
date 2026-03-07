@@ -153,6 +153,11 @@ pub trait TerminalMultiplexerProvider: TopologyHandler + ChainResolver {
         Ok(MoveDecision::TearOut)
     }
 
+    fn focused_pane_arg_for_pid(&self, pid: u32) -> Result<(u64, String)> {
+        let pane_id = self.focused_pane_for_pid(pid)?;
+        Ok((pane_id, pane_id.to_string()))
+    }
+
     fn focused_pane_from_snapshots(
         &self,
         panes: &[TerminalPaneSnapshot],
@@ -526,6 +531,22 @@ pub trait TopologyHandler {
         Ok(MergePreparation::with_payload(capture(source_pid.get())?))
     }
 
+    fn prepare_source_pane_merge<Meta>(
+        &self,
+        source_pid: Option<ProcessId>,
+        missing_source_pid: &'static str,
+        capture: impl FnOnce(u32) -> Result<(u64, Meta)>,
+    ) -> Result<MergePreparation>
+    where
+        Self: Sized,
+        Meta: Send + 'static,
+    {
+        self.prepare_merge_payload(source_pid, missing_source_pid, |source_pid| {
+            let (pane_id, meta) = capture(source_pid)?;
+            Ok(SourcePaneMerge::new(pane_id, meta))
+        })
+    }
+
     fn augment_merge_preparation_for_target(
         &self,
         preparation: MergePreparation,
@@ -563,6 +584,29 @@ pub trait TopologyHandler {
             .into_payload::<T>()
             .context(missing_preparation)?;
         Ok((source_pid.get(), target_pid.get(), preparation))
+    }
+
+    fn resolve_source_pane_merge<Meta>(
+        &self,
+        source_pid: Option<ProcessId>,
+        target_pid: Option<ProcessId>,
+        preparation: MergePreparation,
+        missing_source_pid: &'static str,
+        missing_target_pid: &'static str,
+        missing_preparation: &'static str,
+    ) -> Result<(u32, u32, SourcePaneMerge<Meta>)>
+    where
+        Self: Sized,
+        Meta: Send + 'static,
+    {
+        self.resolve_target_focused_merge::<SourcePaneMerge<Meta>>(
+            source_pid,
+            target_pid,
+            preparation,
+            missing_source_pid,
+            missing_target_pid,
+            missing_preparation,
+        )
     }
 }
 
@@ -626,7 +670,7 @@ fn legacy_pid(pid: Option<ProcessId>) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::{
-        AdapterCapabilities, MoveDecision, TearResult, TerminalMultiplexerProvider,
+        AdapterCapabilities, MoveDecision, ProcessId, TearResult, TerminalMultiplexerProvider,
         TerminalPaneSnapshot, TopologyHandler,
     };
     use crate::engine::topology::{Direction, DirectionalNeighbors};
@@ -821,6 +865,41 @@ mod tests {
                 .expect("tear-out decision"),
             MoveDecision::TearOut
         ));
+    }
+
+    #[test]
+    fn mux_provider_merge_helpers_wrap_source_pane_payloads() {
+        let mux = SnapshotMux;
+        let source_pid = Some(ProcessId::new(10).expect("nonzero"));
+        let target_pid = Some(ProcessId::new(20).expect("nonzero"));
+        let preparation = mux
+            .prepare_source_pane_merge(source_pid, "missing source", |_pid| {
+                Ok((30, "detached-session".to_string()))
+            })
+            .expect("preparation");
+        let (resolved_source, resolved_target, preparation) = mux
+            .resolve_source_pane_merge::<String>(
+                source_pid,
+                target_pid,
+                preparation,
+                "missing source",
+                "missing target",
+                "missing preparation",
+            )
+            .expect("resolved merge");
+        assert_eq!(resolved_source, 10);
+        assert_eq!(resolved_target, 20);
+        assert_eq!(preparation.pane_id, 30);
+        assert_eq!(preparation.meta, "detached-session");
+    }
+
+    #[test]
+    fn mux_provider_focused_pane_arg_helper_formats_id() {
+        let mux = SnapshotMux;
+        assert_eq!(
+            mux.focused_pane_arg_for_pid(1).expect("focused pane arg"),
+            (20, "20".to_string())
+        );
     }
 
     #[test]

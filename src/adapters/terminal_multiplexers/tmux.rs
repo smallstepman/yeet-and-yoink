@@ -3,9 +3,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::{bail, Context, Result};
 
 use crate::engine::contract::{
-    AdapterCapabilities, AppAdapter, AppKind, MergeExecutionMode, MergePreparation,
-    SourcePaneMerge, TearResult, TerminalMultiplexerProvider, TerminalPaneSnapshot,
-    TopologyHandler,
+    AdapterCapabilities, AppAdapter, AppKind, MergeExecutionMode, MergePreparation, TearResult,
+    TerminalMultiplexerProvider, TerminalPaneSnapshot, TopologyHandler,
 };
 use crate::engine::runtime::{self, CommandContext, ProcessId};
 use crate::engine::topology::{
@@ -567,13 +566,13 @@ impl TopologyHandler for TmuxMuxProvider {
     }
 
     fn prepare_merge(&self, source_pid: Option<ProcessId>) -> Result<MergePreparation> {
-        self.prepare_merge_payload(source_pid, "source tmux merge missing pid", |source_pid| {
+        self.prepare_source_pane_merge(source_pid, "source tmux merge missing pid", |source_pid| {
             let (pane_id, session_name) = self.with_session(source_pid, |session| {
                 let pane_id = session.focused_pane_id_for_client()?;
                 let session_name = session.query_pane(pane_id, "#{session_name}")?;
                 Ok((pane_id, session_name))
             })?;
-            Ok(SourcePaneMerge::new(pane_id, session_name))
+            Ok((pane_id, session_name))
         })
     }
 
@@ -584,15 +583,14 @@ impl TopologyHandler for TmuxMuxProvider {
         target_pid: Option<ProcessId>,
         preparation: MergePreparation,
     ) -> Result<()> {
-        let (_, target_pid, preparation) = self
-            .resolve_target_focused_merge::<SourcePaneMerge<String>>(
-                source_pid,
-                target_pid,
-                preparation,
-                "source tmux merge missing pid",
-                "target tmux merge missing pid",
-                "source tmux merge missing pane/session metadata",
-            )?;
+        let (_, target_pid, preparation) = self.resolve_source_pane_merge::<String>(
+            source_pid,
+            target_pid,
+            preparation,
+            "source tmux merge missing pid",
+            "target tmux merge missing pid",
+            "source tmux merge missing pane/session metadata",
+        )?;
         let target_session_name =
             self.with_session(target_pid, |session| Ok(session.name.clone()))?;
         self.merge_source_pane_into_focused_target(

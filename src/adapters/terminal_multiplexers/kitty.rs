@@ -4,7 +4,7 @@ use anyhow::{bail, Context, Result};
 use serde::Deserialize;
 
 use crate::engine::contract::{
-    AdapterCapabilities, MergeExecutionMode, MergePreparation, SourcePaneMerge, TearResult,
+    AdapterCapabilities, MergeExecutionMode, MergePreparation, TearResult,
     TerminalMultiplexerProvider, TerminalPaneSnapshot, TopologyHandler,
 };
 use crate::engine::runtime::{self, ProcessId};
@@ -459,11 +459,8 @@ impl TopologyHandler for KittyMux {
     }
 
     fn prepare_merge(&self, source_pid: Option<ProcessId>) -> Result<MergePreparation> {
-        self.prepare_merge_payload(source_pid, "source kitty merge missing pid", |source_pid| {
-            Ok(SourcePaneMerge::new(
-                self.focused_pane_for_pid(source_pid)?,
-                (),
-            ))
+        self.prepare_source_pane_merge(source_pid, "source kitty merge missing pid", |source_pid| {
+            Ok((self.focused_pane_for_pid(source_pid)?, ()))
         })
     }
 
@@ -474,15 +471,14 @@ impl TopologyHandler for KittyMux {
         target_pid: Option<ProcessId>,
         preparation: MergePreparation,
     ) -> Result<()> {
-        let (source_pid, target_pid, preparation) = self
-            .resolve_target_focused_merge::<SourcePaneMerge<()>>(
-                source_pid,
-                target_pid,
-                preparation,
-                "source kitty merge missing pid",
-                "target kitty merge missing pid",
-                "source kitty merge missing pane id",
-            )?;
+        let (source_pid, target_pid, preparation) = self.resolve_source_pane_merge::<()>(
+            source_pid,
+            target_pid,
+            preparation,
+            "source kitty merge missing pid",
+            "target kitty merge missing pid",
+            "source kitty merge missing pane id",
+        )?;
         self.merge_source_pane_into_focused_target(
             source_pid,
             preparation.pane_id,

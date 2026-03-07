@@ -499,8 +499,7 @@ impl TopologyHandler for WeztermMux {
     }
 
     fn focus(&self, dir: Direction, pid: u32) -> Result<()> {
-        let pane_id = self.focused_pane_for_pid(pid)?;
-        let pane_id_str = pane_id.to_string();
+        let (_, pane_id_str) = self.focused_pane_arg_for_pid(pid)?;
         self.cli_stdout_for_pid(
             pid,
             &[
@@ -514,11 +513,10 @@ impl TopologyHandler for WeztermMux {
     }
 
     fn move_internal(&self, dir: Direction, pid: u32) -> Result<()> {
-        let pane_id = self.focused_pane_for_pid(pid)?;
+        let (pane_id, pane_id_str) = self.focused_pane_arg_for_pid(pid)?;
         let neighbor = self
             .pane_in_direction_for_pid(pid, pane_id, dir)?
             .context("no wezterm pane exists in the requested move direction")?;
-        let pane_id_str = pane_id.to_string();
         let neighbor_str = neighbor.to_string();
         self.cli_stdout_for_pid(
             pid,
@@ -535,8 +533,7 @@ impl TopologyHandler for WeztermMux {
     }
 
     fn resize_internal(&self, dir: Direction, grow: bool, step: i32, pid: u32) -> Result<()> {
-        let pane_id = self.focused_pane_for_pid(pid)?;
-        let pane_id_str = pane_id.to_string();
+        let (_, pane_id_str) = self.focused_pane_arg_for_pid(pid)?;
         let amount = step.max(1).to_string();
         let direction = if grow { dir } else { dir.opposite() };
         self.cli_stdout_for_pid(
@@ -554,7 +551,7 @@ impl TopologyHandler for WeztermMux {
     }
 
     fn rearrange(&self, dir: Direction, pid: u32) -> Result<()> {
-        let pane_id = self.focused_pane_for_pid(pid)?;
+        let (pane_id, pane_id_str) = self.focused_pane_arg_for_pid(pid)?;
         let target = self.perpendicular_pane_for_pid(pid, pane_id, dir)?;
         // Fallback: pick any other pane in the same tab.
         let target = match target {
@@ -574,7 +571,6 @@ impl TopologyHandler for WeztermMux {
             }
         };
 
-        let pane_id_str = pane_id.to_string();
         let target_str = target.to_string();
         self.cli_stdout_for_pid(
             pid,
@@ -591,8 +587,7 @@ impl TopologyHandler for WeztermMux {
     }
 
     fn move_out(&self, _dir: Direction, pid: u32) -> Result<TearResult> {
-        let pane_id = self.focused_pane_for_pid(pid)?;
-        let pane_id_str = pane_id.to_string();
+        let (_, pane_id_str) = self.focused_pane_arg_for_pid(pid)?;
         self.cli_stdout_for_pid(
             pid,
             &[
@@ -612,15 +607,10 @@ impl TopologyHandler for WeztermMux {
     }
 
     fn prepare_merge(&self, source_pid: Option<ProcessId>) -> Result<MergePreparation> {
-        self.prepare_merge_payload(
+        self.prepare_source_pane_merge(
             source_pid,
             "source wezterm merge missing pid",
-            |source_pid| {
-                Ok(SourcePaneMerge::new(
-                    self.focused_pane_for_pid(source_pid)?,
-                    None::<u64>,
-                ))
-            },
+            |source_pid| Ok((self.focused_pane_for_pid(source_pid)?, None::<u64>)),
         )
     }
 
@@ -642,15 +632,14 @@ impl TopologyHandler for WeztermMux {
         target_pid: Option<ProcessId>,
         preparation: MergePreparation,
     ) -> Result<()> {
-        let (source_pid, target_pid, preparation) = self
-            .resolve_target_focused_merge::<SourcePaneMerge<Option<u64>>>(
-                source_pid,
-                target_pid,
-                preparation,
-                "source wezterm merge missing pid",
-                "target wezterm merge missing pid",
-                "source wezterm merge missing pane id",
-            )?;
+        let (source_pid, target_pid, preparation) = self.resolve_source_pane_merge::<Option<u64>>(
+            source_pid,
+            target_pid,
+            preparation,
+            "source wezterm merge missing pid",
+            "target wezterm merge missing pid",
+            "source wezterm merge missing pane id",
+        )?;
         self.merge_source_pane_into_focused_target(
             source_pid,
             preparation.pane_id,

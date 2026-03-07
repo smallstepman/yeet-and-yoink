@@ -52,6 +52,104 @@ impl ProcessTree {
     }
 }
 
+pub fn socket_inode_from_fd_target(target: &str) -> Option<u64> {
+    let value = target.trim().strip_prefix("socket:[")?.strip_suffix(']')?;
+    value.parse::<u64>().ok().filter(|inode| *inode > 0)
+}
+
+pub fn socket_inodes_for_pid(pid: u32) -> HashSet<u64> {
+    let mut inodes = HashSet::new();
+    let Ok(entries) = std::fs::read_dir(format!("/proc/{pid}/fd")) else {
+        return inodes;
+    };
+    for entry in entries.flatten() {
+        let Ok(target) = std::fs::read_link(entry.path()) else {
+            continue;
+        };
+        let target = target.to_string_lossy();
+        let Some(inode) = socket_inode_from_fd_target(&target) else {
+            continue;
+        };
+        inodes.insert(inode);
+    }
+    inodes
+}
+
+pub fn socket_path_from_proc_net_unix(
+    raw: &str,
+    socket_inodes: &HashSet<u64>,
+    path_contains: &str,
+) -> Option<String> {
+    if socket_inodes.is_empty() {
+        return None;
+    }
+    for line in raw.lines() {
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        let Some(inode) = fields.get(6).and_then(|value| value.parse::<u64>().ok()) else {
+            continue;
+        };
+        if !socket_inodes.contains(&inode) {
+            continue;
+        }
+        let Some(path) = fields.get(7) else {
+            continue;
+        };
+        if !path.contains(path_contains) {
+            continue;
+        }
+        return Some((*path).to_string());
+    }
+    None
+}
+
+pub fn socket_path_for_pid_from_proc_net_unix(pid: u32, path_contains: &str) -> Option<String> {
+    let socket_inodes = socket_inodes_for_pid(pid);
+    let raw = std::fs::read_to_string("/proc/net/unix").ok()?;
+    socket_path_from_proc_net_unix(&raw, &socket_inodes, path_contains)
+}
+
+pub fn socket_path_from_ss_output(
+    raw: &str,
+    socket_inodes: &HashSet<u64>,
+    path_contains: &str,
+) -> Option<String> {
+    if socket_inodes.is_empty() {
+        return None;
+    }
+    for line in raw.lines() {
+        if !socket_inodes.iter().any(|inode| {
+            line.contains(&format!(" {inode} "))
+                || line.contains(&format!(" {inode} users:"))
+                || line.ends_with(&format!(" {inode}"))
+        }) {
+            continue;
+        }
+        for token in line.split_whitespace() {
+            if !token.starts_with('/') || !token.contains(path_contains) {
+                continue;
+            }
+            return Some(token.to_string());
+        }
+    }
+    None
+}
+
+pub fn socket_path_for_pid_from_ss(pid: u32, path_contains: &str) -> Option<String> {
+    let socket_inodes = socket_inodes_for_pid(pid);
+    if socket_inodes.is_empty() {
+        return None;
+    }
+    let output = Command::new("ss").args(["-xnp"]).output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    socket_path_from_ss_output(
+        &String::from_utf8_lossy(&output.stdout),
+        &socket_inodes,
+        path_contains,
+    )
+}
+
 #[derive(Debug, Clone)]
 pub struct CommandContext {
     pub adapter: &'static str,
@@ -250,15 +348,21 @@ pub fn parse_stat_tpgid(stat: &str) -> Option<u32> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
     use std::process::Output;
 
     use super::{
-        process_cmdline_args, process_comm, process_environ_var, process_tree_pids, stderr_text,
-        stdout_text, CommandContext, ProcessTree,
+        process_cmdline_args, process_comm, process_environ_var, process_tree_pids,
+        socket_inode_from_fd_target, socket_path_for_pid_from_proc_net_unix,
+        socket_path_from_proc_net_unix, socket_path_from_ss_output, stderr_text, stdout_text,
+        CommandContext, ProcessTree,
     };
 
     #[cfg(unix)]
-    use std::os::unix::process::ExitStatusExt;
+    use std::os::unix::{
+        net::{UnixListener, UnixStream},
+        process::ExitStatusExt,
+    };
 
     #[test]
     fn command_context_builder_sets_target() {
@@ -301,6 +405,61 @@ mod tests {
                 .find_map_by_comm(&comm, |pid| (pid == std::process::id()).then_some(pid))
                 .is_some());
         }
+    }
+
+    #[test]
+    fn extracts_socket_inode_from_fd_target() {
+        assert_eq!(socket_inode_from_fd_target("socket:[458030]"), Some(458030));
+        assert_eq!(socket_inode_from_fd_target("/dev/pts/1"), None);
+    }
+
+    #[test]
+    fn extracts_socket_path_from_proc_net_unix_socket_entries() {
+        let mut inodes = HashSet::new();
+        inodes.insert(458030);
+        let raw = r#"
+Num       RefCount Protocol Flags    Type St Inode Path
+0000000000000000: 00000002 00000000 00010000 0001 01 458030 /run/user/1000/zellij/0.43.1/implacable-oboe
+0000000000000000: 00000003 00000000 00000000 0001 03 458031 /tmp/other.sock
+"#;
+        assert_eq!(
+            socket_path_from_proc_net_unix(raw, &inodes, "zellij"),
+            Some("/run/user/1000/zellij/0.43.1/implacable-oboe".to_string())
+        );
+    }
+
+    #[test]
+    fn extracts_socket_path_from_ss_output_via_peer_inode() {
+        let mut inodes = HashSet::new();
+        inodes.insert(455551);
+        let raw = r#"
+u_str ESTAB 0 0 * 455551 * 458031 users:(("zellij",pid=134518,fd=6),("zellij",pid=134518,fd=5))
+u_str ESTAB 0 0 /run/user/1000/zellij/0.43.1/implacable-oboe 458031 * 455551 users:(("zellij",pid=134525,fd=7),("zellij",pid=134525,fd=6))
+"#;
+        assert_eq!(
+            socket_path_from_ss_output(raw, &inodes, "zellij"),
+            Some("/run/user/1000/zellij/0.43.1/implacable-oboe".to_string())
+        );
+    }
+
+    #[test]
+    fn socket_path_for_pid_from_proc_net_unix_reads_proc_entries() {
+        let base = std::env::temp_dir().join(format!(
+            "yeet-and-yoink-runtime-socket-test-{}",
+            std::process::id()
+        ));
+        let socket_dir = base.join("zellij");
+        std::fs::create_dir_all(&socket_dir).expect("socket dir should be created");
+        let socket_path = socket_dir.join("mock-session");
+        let listener = UnixListener::bind(&socket_path).expect("unix listener should bind");
+        let _stream = UnixStream::connect(&socket_path).expect("unix stream should connect");
+
+        let discovered = socket_path_for_pid_from_proc_net_unix(std::process::id(), "zellij");
+        drop(listener);
+        let _ = std::fs::remove_file(&socket_path);
+        let _ = std::fs::remove_dir_all(&base);
+
+        assert_eq!(discovered, Some(socket_path.to_string_lossy().to_string()));
     }
 
     #[cfg(unix)]
