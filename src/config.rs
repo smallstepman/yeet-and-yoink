@@ -693,15 +693,7 @@ pub fn wm_adapter_override() -> Option<String> {
     normalize_override(value)
 }
 
-pub fn app_adapter_override() -> Option<String> {
-    let cfg = read_config();
-    if cfg.app.editor.len() == 1 {
-        if let Some((key, app)) = cfg.app.editor.iter().next() {
-            if app.enabled {
-                return normalize_override(key);
-            }
-        }
-    }
+fn app_adapter_override_from(cfg: &Config) -> Option<String> {
     if cfg.app.terminal.len() == 1 {
         if let Some((key, app)) = cfg.app.terminal.iter().next() {
             if app.enabled {
@@ -710,6 +702,10 @@ pub fn app_adapter_override() -> Option<String> {
         }
     }
     None
+}
+
+pub fn app_adapter_override() -> Option<String> {
+    app_adapter_override_from(&read_config())
 }
 
 pub fn app_integration_enabled(section: AppSection, aliases: &[&str]) -> bool {
@@ -927,5 +923,28 @@ manage_terminal = true
         let parsed: Config = toml::from_str(sample).expect("sample config should parse");
         assert!(editor_manage_terminal_from(&parsed, &["vscode"]));
         assert!(!editor_manage_terminal_from(&parsed, &["emacs"]));
+    }
+
+    #[test]
+    fn singleton_editor_profile_does_not_become_terminal_override() {
+        let sample = r#"
+[app.editor.neovim]
+enabled = true
+"#;
+        let parsed: Config = toml::from_str(sample).expect("sample config should parse");
+        assert_eq!(app_adapter_override_from(&parsed), None);
+    }
+
+    #[test]
+    fn neovim_editor_profile_matches_nvim_aliases() {
+        let sample = r#"
+[app.editor.neovim]
+enabled = true
+move.internal_panes.enabled = true
+"#;
+        let parsed: Config = toml::from_str(sample).expect("sample config should parse");
+        let policy = pane_policy_from(&parsed, AppSection::Editor, &["nvim", "neovim"]);
+        assert!(policy.integration_enabled());
+        assert!(policy.move_capability());
     }
 }

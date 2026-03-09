@@ -122,7 +122,7 @@ const DIRECT_ADAPTERS: &[DirectAdapterSpec] = &[
     },
 ];
 
-fn preferred_adapter_name() -> Option<String> {
+fn preferred_terminal_adapter_name() -> Option<String> {
     crate::config::app_adapter_override().and_then(|raw| {
         let normalized = raw.trim().to_ascii_lowercase();
         if normalized.is_empty() {
@@ -137,20 +137,10 @@ fn matches_adapter_alias(preferred: &str, aliases: &[&str]) -> bool {
     aliases.iter().any(|candidate| *candidate == preferred)
 }
 
-fn resolve_direct_adapter(app_id: &str, preferred: Option<&str>) -> Option<Box<dyn AppAdapter>> {
+fn resolve_direct_adapter(app_id: &str) -> Option<Box<dyn AppAdapter>> {
     for spec in DIRECT_ADAPTERS {
         if !spec.app_ids.iter().any(|candidate| *candidate == app_id) {
             continue;
-        }
-
-        if let Some(preferred) = preferred {
-            if !matches_adapter_alias(preferred, spec.aliases) {
-                logging::debug(format!(
-                    "resolve_chain: adapter override '{}' does not match direct adapter '{}'",
-                    preferred, spec.name
-                ));
-                return None;
-            }
         }
 
         if !crate::config::app_integration_enabled(spec.section, spec.aliases) {
@@ -359,21 +349,11 @@ impl ChainResolver for RuntimeChainResolver {
             "resolve_chain: app_id={} pid={} title={}",
             app_id, pid, title
         ));
-        let preferred = preferred_adapter_name();
 
         if let Some(host) = TERMINAL_HOSTS
             .iter()
             .find(|host| host.app_ids.contains(&app_id))
         {
-            if let Some(preferred) = preferred.as_deref() {
-                if !matches_adapter_alias(preferred, host.aliases) {
-                    logging::debug(format!(
-                        "resolve_chain: adapter override '{}' disables terminal chain",
-                        preferred
-                    ));
-                    return vec![];
-                }
-            }
             if !crate::config::app_integration_enabled(AppSection::Terminal, host.aliases) {
                 logging::debug("resolve_chain: terminal integration disabled via config");
                 return vec![];
@@ -383,7 +363,7 @@ impl ChainResolver for RuntimeChainResolver {
             return chain;
         }
 
-        if let Some(app) = resolve_direct_adapter(app_id, preferred.as_deref()) {
+        if let Some(app) = resolve_direct_adapter(app_id) {
             logging::debug("resolve_chain: direct app match depth=1");
             return vec![app];
         }
@@ -393,7 +373,7 @@ impl ChainResolver for RuntimeChainResolver {
     }
 
     fn default_domain_adapters(&self) -> Vec<Box<dyn AppAdapter>> {
-        let terminal_adapter = match preferred_adapter_name().as_deref() {
+        let terminal_adapter = match preferred_terminal_adapter_name().as_deref() {
             Some(preferred) if matches_adapter_alias(preferred, alacritty::ADAPTER_ALIASES) => {
                 build_alacritty_terminal()
             }

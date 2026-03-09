@@ -529,7 +529,7 @@ enabled = true
     }
 
     #[test]
-    fn override_applies_to_terminal_chain_selection() {
+    fn editor_profile_does_not_disable_terminal_chain_selection() {
         let _guard = env_guard();
         let root = unique_temp_dir("override-terminal");
         let config_dir = root.join("yeet-and-yoink");
@@ -550,7 +550,13 @@ enabled = true
         crate::config::prepare().expect("config should load");
 
         let chain = resolve_chain(wezterm::APP_IDS[0], 0, "");
-        assert!(chain.is_empty());
+        assert!(!chain.is_empty());
+        assert_eq!(
+            chain.first()
+                .and_then(|adapter| adapter.config_aliases())
+                .map(|aliases| aliases[0]),
+            Some(wezterm::ADAPTER_ALIASES[0])
+        );
 
         restore_env("NIRI_DEEP_CONFIG", old_override);
         crate::config::prepare().expect("config should reload");

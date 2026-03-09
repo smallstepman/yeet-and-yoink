@@ -1,3 +1,9 @@
+The role of this file is to describe common mistakes and confusion points that agents might encounter as they work in this project. If you ever encounter something in the project that surprises you, please alert the developer working with you and indicate that this is the case in the `AGENTS.md` file to help prevent future agents from having the same issue. 
+
+Below goes quick introduction, followed by a section where agents are supposed to dump their notes.
+
+# Introduction
+
 **yeet-and-yoink** is a geometry-first window/pane orchestration system that provides seamless navigation across heterogeneous tiling environments. It unifies focus, move, and resize operations across:
 
 - **Window Managers** (niri, i3, yabai, aerospace)
@@ -45,16 +51,6 @@ Further Reading:
 - `docs/plans/`: Design documents for major features
 
 
-
-
-
-
-
-The role of this file is to describe common mistakes and confusion points that agents might encounter as they work in this project. If you ever encounter something in the project that surprises you, please alert the developer working with you and indicate that this is the case in the `plugins/yeet-and-yoink/AGENTS.md` file to help prevent future agents from having the same issue. 
-
-
-
-
 # Agent's notes
 
 - Surprise encountered: `src/config.rs` currently appears inconsistent with the runtime call sites (`config::prepare`, `wm_adapter_override`, `app_adapter_override`, etc.) and includes schema/test content that does not obviously match the compiled API surface. Before doing architecture work, verify whether config code is mid-migration or partially generated to avoid debugging the wrong interface. After probing the user, I understood that the src/config.rs has recently been rebuilt and it's shape is more-or-less correct and stable, while the rest of the code needs to adapt to current state of config.rs
@@ -72,6 +68,8 @@ The role of this file is to describe common mistakes and confusion points that a
 - Surprise encountered: Emacs `make-frame` + workspace switch can clone an existing multi-window layout into the torn-out frame; without an explicit `delete-other-windows` in the new frame, tear-out of one buffer can leave unexpected duplicated layouts across source/new frames.
 - Surprise encountered: once merge preparation carries source identity (e.g., editor frame IDs), `MergePreparation` can no longer be `Copy`; treat it as owned state and consume it exactly once at merge execution.
 - Surprise encountered: config loading is now driven by `etcetera` + optional explicit `NIRI_DEEP_CONFIG`; tests should set `NIRI_DEEP_CONFIG` directly to avoid picking up host-user config files from platform defaults.
+- Surprise encountered: "default wezterm backend" tests are especially easy to contaminate with host-user config because `active_mux_provider(WEZTERM_HOST_ALIASES)` follows the loaded config and will happily resolve to tmux/zellij/kitty instead of native wezterm. Tests that assert default mux capabilities or attach-command behavior must pin `NIRI_DEEP_CONFIG` to an explicit empty/minimal config before calling `config::prepare()`.
+- Surprise encountered: Neovim process discovery can return the outer UI pid while the RPC socket belongs to a descendant `nvim --embed` child (for example parent pid `643699` with socket file `nvim.643700.0`). If `resolve_terminal_chain` logs multiple nvim descendants but chain depth stays at 1, make `Nvim::for_pid` probe descendant nvim pids for `NVIM[_LISTEN_ADDRESS]` / `nvim.<pid>.*` sockets instead of assuming the first pid owns the socket.
 - Surprise encountered: introducing a dedicated `TerminalHost` trait duplicated most of `AppAdapter` metadata (`adapter_name/config_aliases/kind/capabilities`) with little extra value and increased cognitive load. Prefer keeping host identity/capabilities on `AppAdapter` and introducing new traits only for genuinely orthogonal concerns (e.g., mux topology provider behavior).
 - Surprise encountered: during the apps→terminal_multiplexers move, leaving mux backend selection on `apps::wezterm::WeztermBackend::mux_provider` while mux internals moved out creates split ownership and accidental reverse coupling (`terminal_multiplexers` importing app aliases). Keep backend selection/helper entry points centralized in `adapters::terminal_multiplexers` and avoid importing app modules from mux modules.
 - Surprise encountered: orchestrator move tests can fail in full parallel `cargo test` runs while passing individually due shared global config/env mutation across tests. If these assertions flap (`wm fallback` count mismatches), rerun with `-- --test-threads=1` and audit env/config-touching tests for isolation.

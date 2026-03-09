@@ -16,7 +16,7 @@ use crate::engine::topology::Direction;
 use crate::logging;
 
 pub const ADAPTER_NAME: &str = "nvim";
-pub const ADAPTER_ALIASES: &[&str] = &["nvim"];
+pub const ADAPTER_ALIASES: &[&str] = &["nvim", "neovim"];
 
 pub struct Nvim {
     /// Path to the nvim RPC socket.
@@ -67,7 +67,13 @@ impl NvimTerminalMux {
 impl Nvim {
     /// Create an Nvim handler for a specific nvim process by finding its socket.
     pub fn for_pid(nvim_pid: u32, terminal_mux_backend: TerminalMuxBackend) -> Option<Self> {
-        let addr = Self::find_socket_for_pid(nvim_pid).ok()?;
+        let (resolved_pid, addr) = Self::find_socket_for_pid(nvim_pid).ok()?;
+        if resolved_pid != nvim_pid {
+            logging::debug(format!(
+                "nvim: resolved socket for pid {} via descendant pid {}",
+                nvim_pid, resolved_pid
+            ));
+        }
         Some(Nvim {
             server_addr: addr,
             terminal_mux: NvimTerminalMux::from_backend(terminal_mux_backend),
@@ -89,9 +95,35 @@ impl Nvim {
     /// Find the nvim RPC socket for a specific PID.
     ///
     /// Strategy:
-    /// 1. Read /proc/<pid>/environ for NVIM= or NVIM_LISTEN_ADDRESS=
-    /// 2. Fallback: scan XDG_RUNTIME_DIR for nvim.<pid>.* sockets
-    fn find_socket_for_pid(pid: u32) -> Result<String> {
+    /// 1. Try the requested pid and any descendant nvim pids, because terminal discovery
+    ///    can report the outer UI process while the RPC socket belongs to an embedded child.
+    /// 2. For each candidate, read /proc/<pid>/environ for NVIM= or NVIM_LISTEN_ADDRESS=
+    /// 3. Fallback: scan XDG_RUNTIME_DIR for nvim.<pid>.* sockets
+    fn find_socket_for_pid(pid: u32) -> Result<(u32, String)> {
+        let mut candidates = vec![pid];
+        for descendant in runtime::find_descendants_by_comm(pid, "nvim") {
+            if !candidates.contains(&descendant) {
+                candidates.push(descendant);
+            }
+        }
+        Self::find_socket_for_candidates(candidates)
+    }
+
+    fn find_socket_for_candidates<I>(candidates: I) -> Result<(u32, String)>
+    where
+        I: IntoIterator<Item = u32>,
+    {
+        let mut attempted = Vec::new();
+        for pid in candidates {
+            attempted.push(pid);
+            if let Ok(addr) = Self::find_socket_for_exact_pid(pid) {
+                return Ok((pid, addr));
+            }
+        }
+        bail!("no nvim socket found for pid candidates {:?}", attempted)
+    }
+
+    fn find_socket_for_exact_pid(pid: u32) -> Result<String> {
         // Try reading the nvim process's environment
         if let Some(addr) = runtime::process_environ_var(pid, "NVIM") {
             return Ok(addr);
@@ -823,6 +855,20 @@ exit "$status"
             .move_decision(Direction::West, 4343)
             .expect("move_decision should succeed");
         assert!(matches!(decision, MoveDecision::Internal));
+    }
+
+    #[test]
+    fn find_socket_falls_back_to_later_nvim_pid_candidate() {
+        let _env_guard = env_guard();
+        let harness = NvimHarness::new();
+        let expected = harness.base.join("runtime").join("nvim.200.0");
+        fs::write(&expected, "").expect("socket placeholder should be writable");
+
+        let (resolved_pid, socket) =
+            Nvim::find_socket_for_candidates([100, 200]).expect("socket should resolve");
+
+        assert_eq!(resolved_pid, 200);
+        assert_eq!(PathBuf::from(socket), expected);
     }
 
     #[test]

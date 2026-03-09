@@ -212,6 +212,15 @@ mod tests {
 
     #[test]
     fn declares_explicit_capability_contract() {
+        let _guard = env_guard();
+        let root = unique_temp_dir("capabilities");
+        let config = root.join("config.toml");
+        fs::write(&config, "").expect("config file should be writable");
+        let old_override = set_env(
+            "NIRI_DEEP_CONFIG",
+            Some(config.to_str().expect("utf-8 path")),
+        );
+        crate::config::prepare().expect("config should load");
         let app = WeztermBackend;
         let caps = AppAdapter::capabilities(&app);
         assert!(caps.probe);
@@ -221,6 +230,9 @@ mod tests {
         assert!(caps.rearrange);
         assert!(caps.tear_out);
         assert!(caps.merge);
+        restore_env("NIRI_DEEP_CONFIG", old_override);
+        crate::config::prepare().expect("config should reload");
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
