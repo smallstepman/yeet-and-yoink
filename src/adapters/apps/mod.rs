@@ -483,7 +483,14 @@ mod resolve_chain_tests {
         let root = unique_temp_dir("direct-match");
         let config_dir = root.join("yeet-and-yoink");
         std::fs::create_dir_all(&config_dir).expect("config dir should be created");
-        std::fs::write(config_dir.join("config.toml"), "").expect("config file should be writable");
+        std::fs::write(
+            config_dir.join("config.toml"),
+            r#"
+[app.editor.emacs]
+enabled = true
+"#,
+        )
+        .expect("config file should be writable");
         let old_override = set_env(
             "NIRI_DEEP_CONFIG",
             Some(config_dir.join("config.toml").to_str().expect("utf-8 path")),
@@ -500,7 +507,7 @@ mod resolve_chain_tests {
     }
 
     #[test]
-    fn override_filters_non_matching_direct_adapter() {
+    fn other_editor_profiles_do_not_enable_unconfigured_direct_adapter_by_default() {
         let _guard = env_guard();
         let root = unique_temp_dir("override-filter");
         let config_dir = root.join("yeet-and-yoink");
@@ -529,6 +536,35 @@ enabled = true
     }
 
     #[test]
+    fn explicit_direct_adapter_disable_still_applies() {
+        let _guard = env_guard();
+        let root = unique_temp_dir("direct-disable");
+        let config_dir = root.join("yeet-and-yoink");
+        std::fs::create_dir_all(&config_dir).expect("config dir should be created");
+        std::fs::write(
+            config_dir.join("config.toml"),
+            r#"
+[app.editor.emacs]
+enabled = false
+"#,
+        )
+        .expect("config file should be writable");
+
+        let old_override = set_env(
+            "NIRI_DEEP_CONFIG",
+            Some(config_dir.join("config.toml").to_str().expect("utf-8 path")),
+        );
+        crate::config::prepare().expect("config should load");
+
+        let chain = resolve_chain(emacs::APP_IDS[0], 0, "");
+        assert!(chain.is_empty());
+
+        restore_env("NIRI_DEEP_CONFIG", old_override);
+        crate::config::prepare().expect("config should reload");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn editor_profile_does_not_disable_terminal_chain_selection() {
         let _guard = env_guard();
         let root = unique_temp_dir("override-terminal");
@@ -537,8 +573,10 @@ enabled = true
         std::fs::write(
             config_dir.join("config.toml"),
             r#"
-[app.editor.editor]
+[app.editor.neovim]
 enabled = true
+[app.editor.neovim.ui.terminal]
+app = "wezterm"
 "#,
         )
         .expect("config file should be writable");
@@ -552,7 +590,8 @@ enabled = true
         let chain = resolve_chain(wezterm::APP_IDS[0], 0, "");
         assert!(!chain.is_empty());
         assert_eq!(
-            chain.first()
+            chain
+                .first()
                 .and_then(|adapter| adapter.config_aliases())
                 .map(|aliases| aliases[0]),
             Some(wezterm::ADAPTER_ALIASES[0])

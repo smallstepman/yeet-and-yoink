@@ -102,12 +102,18 @@ move.docking.tear_off.enabled = true
 [app.editor.emacs]
 enabled = true
 tear_off_scope = "buffer"
+
+[app.editor.neovim]
+enabled = true
+[app.editor.neovim.ui.terminal]
+app = "wezterm"
+mux_backend = "inherit"
 ```
 
 Config discovery order:
 1. `NIRI_DEEP_CONFIG` environment variable (explicit path)
 2. Platform config dir (`$XDG_CONFIG_HOME/yeet-and-yoink/config.toml`)
-3. Defaults (all integrations disabled)
+3. Defaults (all integrations disabled until their matching profiles are explicitly enabled)
 
 ### 5. Chain Resolver (`src/engine/chain_resolver.rs`)
 

@@ -10,7 +10,8 @@ domain plugins (WM / terminal / editor), plus a transfer pipeline for cross-doma
 1. `NIRI_DEEP_CONFIG` (explicit file path)
 2. Platform config dir from `etcetera` (typically `$XDG_CONFIG_HOME/yeet-and-yoink/config.toml` on Linux)
 
-If no file is present, defaults from `src/config.rs` are used.
+If no file is present, defaults from `src/config.rs` are used; app integrations stay disabled
+until their matching profiles set `enabled = true`.
 
 ## Minimal config example
 
@@ -32,7 +33,17 @@ focus.internal_panes.enabled = true
 move.internal_panes.enabled = true
 resize.internal_panes.enabled = true
 move.docking.tear_off.enabled = true
+
+[app.editor.neovim]
+enabled = true
+[app.editor.neovim.ui.terminal]
+app = "wezterm"
+mux_backend = "inherit"
 ```
+
+Terminal-hosted editors use `app.editor.<editor>.ui.terminal` to describe which terminal UI they
+run inside and which mux backend to use there. Direct graphical editors can additionally describe
+their GUI surface under `app.editor.<editor>.ui.graphical`.
 
 Foot, Alacritty, and Ghostty are also supported as external terminal hosts;
 configure them under `[app.terminal.foot]`, `[app.terminal.alacritty]`, or

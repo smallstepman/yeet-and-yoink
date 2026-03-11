@@ -236,6 +236,7 @@ pub struct TerminalPaneSnapshot {
     pub window_id: Option<u64>,
     pub is_active: bool,
     pub foreground_process_name: Option<String>,
+    pub tty_name: Option<String>,
 }
 
 impl TerminalPaneSnapshot {
@@ -763,6 +764,7 @@ mod tests {
                     window_id: Some(100),
                     is_active: false,
                     foreground_process_name: Some("bash".into()),
+                    tty_name: None,
                 },
                 TerminalPaneSnapshot {
                     pane_id: 20,
@@ -770,6 +772,7 @@ mod tests {
                     window_id: Some(200),
                     is_active: true,
                     foreground_process_name: Some("nvim".into()),
+                    tty_name: None,
                 },
                 TerminalPaneSnapshot {
                     pane_id: 30,
@@ -777,6 +780,7 @@ mod tests {
                     window_id: Some(200),
                     is_active: false,
                     foreground_process_name: Some("python".into()),
+                    tty_name: None,
                 },
             ])
         }
@@ -911,6 +915,7 @@ mod tests {
                 window_id: None,
                 is_active: false,
                 foreground_process_name: None,
+                tty_name: None,
             },
             TerminalPaneSnapshot {
                 pane_id: 10,
@@ -918,6 +923,7 @@ mod tests {
                 window_id: None,
                 is_active: true,
                 foreground_process_name: None,
+                tty_name: None,
             },
             TerminalPaneSnapshot {
                 pane_id: 10,
@@ -925,6 +931,7 @@ mod tests {
                 window_id: None,
                 is_active: false,
                 foreground_process_name: None,
+                tty_name: None,
             },
         ];
         assert_eq!(

@@ -8,7 +8,7 @@ use crate::adapters::window_managers::{
     WindowManagerAdapter, WindowRecord,
 };
 use crate::engine::contract::{
-    AppAdapter, ChainResolver, MergeExecutionMode, MoveDecision, TopologyHandler,
+    AppAdapter, AppKind, ChainResolver, MergeExecutionMode, MoveDecision, TopologyHandler,
 };
 use crate::engine::domain::ErasedDomain;
 use crate::engine::domain::{domain_id_for_window, encode_native_window_ref};
@@ -202,9 +202,9 @@ impl Orchestrator {
             return Ok(false);
         };
 
-        for app in crate::engine::chain_resolver::runtime_chain_resolver()
-            .resolve_chain(&app_id, owner_pid, &title)
-        {
+        let chain = crate::engine::chain_resolver::runtime_chain_resolver()
+            .resolve_chain(&app_id, owner_pid, &title);
+        for (index, app) in chain.iter().enumerate() {
             let adapter_name = app.adapter_name();
             let decision = TopologyHandler::move_decision(app.as_ref(), dir, owner_pid)
                 .with_context(|| format!("{adapter_name} move_decision failed"))?;
@@ -213,10 +213,38 @@ impl Orchestrator {
                     if self.attempt_passthrough_merge(
                         wm,
                         app.as_ref(),
+                        &chain[index + 1..],
+                        &app_id,
+                        &title,
                         dir,
                         source_window_id,
                         source_pid,
                     )? {
+                        return Ok(true);
+                    }
+                    if matches!(app.kind(), AppKind::Terminal)
+                        && app.capabilities().tear_out
+                        && self
+                            .probe_directional_target_for_adapter(
+                                wm,
+                                dir,
+                                source_window_id,
+                                adapter_name,
+                                DirectionalProbeFocusMode::RestoreSource,
+                            )?
+                            .is_none()
+                    {
+                        self.execute_app_tear_out(
+                            wm,
+                            app.as_ref(),
+                            dir,
+                            owner_pid,
+                            source_window_id,
+                            source_tile_index,
+                            source_pid,
+                            &app_id,
+                            "PassthroughTearOut",
+                        )?;
                         return Ok(true);
                     }
                 }
@@ -237,60 +265,89 @@ impl Orchestrator {
                     return Ok(true);
                 }
                 MoveDecision::TearOut => {
-                    let pre_window_ids: BTreeSet<u64> = match wm.windows() {
-                        Ok(windows) => windows.into_iter().map(|window| window.id).collect(),
-                        Err(err) => {
-                            logging::debug(format!(
-                                "orchestrator: unable to snapshot pre-tearout windows err={:#}",
-                                err
-                            ));
-                            BTreeSet::new()
-                        }
-                    };
-                    let tear = TopologyHandler::move_out(app.as_ref(), dir, owner_pid)
-                        .with_context(|| format!("{adapter_name} move_out failed"))?;
-                    if let Some(command) = tear.spawn_command {
-                        wm.spawn(command).with_context(|| {
-                            format!("{adapter_name} tear-out spawn via wm failed")
-                        })?;
-                    }
-                    let tearout_window_id = match self.focus_tearout_window(
+                    self.execute_app_tear_out(
                         wm,
-                        &pre_window_ids,
-                        source_window_id,
-                        source_pid,
-                        &app_id,
-                    ) {
-                        Ok(window_id) => window_id,
-                        Err(err) => {
-                            logging::debug(format!(
-                                "orchestrator: unable to focus tear-out window adapter={} err={:#}",
-                                adapter_name, err
-                            ));
-                            None
-                        }
-                    };
-                    if let Err(err) = self.place_tearout_window(
-                        wm,
+                        app.as_ref(),
                         dir,
+                        owner_pid,
                         source_window_id,
                         source_tile_index,
-                        tearout_window_id,
-                    ) {
-                        logging::debug(format!(
-                            "orchestrator: tear-out placement fallback failed adapter={} err={:#}",
-                            adapter_name, err
-                        ));
-                    }
-                    logging::debug(format!(
-                        "orchestrator: app move handled by {adapter_name} decision=TearOut"
-                    ));
+                        source_pid,
+                        &app_id,
+                        "TearOut",
+                    )?;
                     return Ok(true);
                 }
             }
         }
 
         Ok(false)
+    }
+
+    fn execute_app_tear_out<W>(
+        &mut self,
+        wm: &mut W,
+        app: &dyn AppAdapter,
+        dir: Direction,
+        owner_pid: u32,
+        source_window_id: u64,
+        source_tile_index: usize,
+        source_pid: Option<ProcessId>,
+        app_id: &str,
+        decision_label: &str,
+    ) -> Result<()>
+    where
+        W: WindowManagerAdapter,
+    {
+        let adapter_name = app.adapter_name();
+        let pre_window_ids: BTreeSet<u64> = match wm.windows() {
+            Ok(windows) => windows.into_iter().map(|window| window.id).collect(),
+            Err(err) => {
+                logging::debug(format!(
+                    "orchestrator: unable to snapshot pre-tearout windows err={:#}",
+                    err
+                ));
+                BTreeSet::new()
+            }
+        };
+        let tear = TopologyHandler::move_out(app, dir, owner_pid)
+            .with_context(|| format!("{adapter_name} move_out failed"))?;
+        if let Some(command) = tear.spawn_command {
+            wm.spawn(command)
+                .with_context(|| format!("{adapter_name} tear-out spawn via wm failed"))?;
+        }
+        let tearout_window_id = match self.focus_tearout_window(
+            wm,
+            &pre_window_ids,
+            source_window_id,
+            source_pid,
+            app_id,
+        ) {
+            Ok(window_id) => window_id,
+            Err(err) => {
+                logging::debug(format!(
+                    "orchestrator: unable to focus tear-out window adapter={} err={:#}",
+                    adapter_name, err
+                ));
+                None
+            }
+        };
+        if let Err(err) = self.place_tearout_window(
+            wm,
+            dir,
+            source_window_id,
+            source_tile_index,
+            tearout_window_id,
+        ) {
+            logging::debug(format!(
+                "orchestrator: tear-out placement fallback failed adapter={} err={:#}",
+                adapter_name, err
+            ));
+        }
+        logging::debug(format!(
+            "orchestrator: app move handled by {adapter_name} decision={decision_label}"
+        ));
+        Ok(())
     }
 
     fn focus_tearout_window<W>(
@@ -523,7 +580,65 @@ impl Orchestrator {
         Ok(None)
     }
 
-    fn window_matches_adapter(adapter_name: &str, window: &WindowRecord) -> bool {
+    fn probe_in_place_target_for_adapter<W>(
+        &self,
+        wm: &mut W,
+        outer_chain: &[Box<dyn AppAdapter>],
+        dir: Direction,
+        source_window_id: u64,
+        owner_pid: u32,
+        app_id: &str,
+        title: &str,
+        adapter_name: &str,
+    ) -> Result<Option<Box<dyn AppAdapter>>>
+    where
+        W: WindowManagerAdapter,
+    {
+        for outer in outer_chain {
+            if !outer.capabilities().focus
+                || !TopologyHandler::can_focus(outer.as_ref(), dir, owner_pid)?
+            {
+                continue;
+            }
+            TopologyHandler::focus(outer.as_ref(), dir, owner_pid)?;
+            let focused_window_id = wm.with_focused_window(|window| Ok(window.id()))?;
+            if focused_window_id != source_window_id {
+                let _ = wm.focus_window_by_id(source_window_id);
+                continue;
+            }
+            let target_app = crate::engine::chain_resolver::runtime_chain_resolver()
+                .resolve_chain(app_id, owner_pid, title)
+                .into_iter()
+                .find(|candidate| candidate.adapter_name() == adapter_name);
+            if target_app.is_some() {
+                return Ok(target_app);
+            }
+            let _ = TopologyHandler::focus(outer.as_ref(), dir.opposite(), owner_pid);
+        }
+        Ok(None)
+    }
+
+    fn restore_in_place_target_focus(
+        &self,
+        outer_chain: &[Box<dyn AppAdapter>],
+        dir: Direction,
+        owner_pid: u32,
+    ) {
+        for outer in outer_chain {
+            if outer.capabilities().focus
+                && TopologyHandler::can_focus(outer.as_ref(), dir.opposite(), owner_pid)
+                    .unwrap_or(false)
+            {
+                let _ = TopologyHandler::focus(outer.as_ref(), dir.opposite(), owner_pid);
+                break;
+            }
+        }
+    }
+
+    fn resolve_adapter_for_window(
+        adapter_name: &str,
+        window: &WindowRecord,
+    ) -> Option<Box<dyn AppAdapter>> {
         let owner_pid = window.pid.map(ProcessId::get).unwrap_or(0);
         crate::engine::chain_resolver::runtime_chain_resolver()
             .resolve_chain(
@@ -532,7 +647,11 @@ impl Orchestrator {
                 window.title.as_deref().unwrap_or_default(),
             )
             .into_iter()
-            .any(|adapter| adapter.adapter_name() == adapter_name)
+            .find(|adapter| adapter.adapter_name() == adapter_name)
+    }
+
+    fn window_matches_adapter(adapter_name: &str, window: &WindowRecord) -> bool {
+        Self::resolve_adapter_for_window(adapter_name, window).is_some()
     }
 
     fn leaf_from_window(window: &WindowRecord, leaf_id: u64) -> GlobalLeaf {
@@ -558,6 +677,9 @@ impl Orchestrator {
         &mut self,
         wm: &mut W,
         app: &dyn AppAdapter,
+        outer_chain: &[Box<dyn AppAdapter>],
+        app_id: &str,
+        title: &str,
         dir: Direction,
         source_window_id: u64,
         source_pid: Option<ProcessId>,
@@ -592,6 +714,11 @@ impl Orchestrator {
                 else {
                     return Ok(false);
                 };
+                let preparation = TopologyHandler::augment_merge_preparation_for_target(
+                    app,
+                    preparation,
+                    Some(target_window.id),
+                );
 
                 match TopologyHandler::merge_into_target(
                     app,
@@ -622,6 +749,48 @@ impl Orchestrator {
                 }
             }
             MergeExecutionMode::TargetFocused => {
+                if let Some(owner_pid) = source_pid.map(ProcessId::get) {
+                    if let Some(target_app) = self.probe_in_place_target_for_adapter(
+                        wm,
+                        outer_chain,
+                        dir,
+                        source_window_id,
+                        owner_pid,
+                        app_id,
+                        title,
+                        adapter_name,
+                    )? {
+                        let preparation = TopologyHandler::augment_merge_preparation_for_target(
+                            target_app.as_ref(),
+                            preparation,
+                            Some(source_window_id),
+                        );
+
+                        match TopologyHandler::merge_into_target(
+                            target_app.as_ref(),
+                            dir,
+                            source_pid,
+                            source_pid,
+                            preparation,
+                        ) {
+                            Ok(()) => {
+                                logging::debug(format!(
+                                    "orchestrator: app move handled by {adapter_name} decision=MergeTargetFocusedInPlace"
+                                ));
+                                return Ok(true);
+                            }
+                            Err(err) => {
+                                self.restore_in_place_target_focus(outer_chain, dir, owner_pid);
+                                logging::debug(format!(
+                                    "orchestrator: app passthrough merge failed adapter={} err={:#}",
+                                    adapter_name, err
+                                ));
+                                return Ok(false);
+                            }
+                        }
+                    }
+                }
+
                 let Some(target_window) = self.probe_directional_target_for_adapter(
                     wm,
                     dir,
@@ -632,9 +801,20 @@ impl Orchestrator {
                 else {
                     return Ok(false);
                 };
+                let Some(target_app) =
+                    Self::resolve_adapter_for_window(adapter_name, &target_window)
+                else {
+                    let _ = wm.focus_window_by_id(source_window_id);
+                    return Ok(false);
+                };
+                let preparation = TopologyHandler::augment_merge_preparation_for_target(
+                    target_app.as_ref(),
+                    preparation,
+                    Some(target_window.id),
+                );
 
                 match TopologyHandler::merge_into_target(
-                    app,
+                    target_app.as_ref(),
                     dir,
                     source_pid,
                     target_window.pid,
@@ -1217,7 +1397,17 @@ mod tests {
         let root = unique_temp_dir("cross-domain-transfer");
         let config_dir = root.join("yeet-and-yoink");
         std::fs::create_dir_all(&config_dir).expect("config dir should be created");
-        std::fs::write(config_dir.join("config.toml"), "").expect("config file should be writable");
+        std::fs::write(
+            config_dir.join("config.toml"),
+            r#"
+[app.terminal.wezterm]
+enabled = true
+
+[app.editor.emacs]
+enabled = true
+"#,
+        )
+        .expect("config file should be writable");
         let old_override = set_env(
             "NIRI_DEEP_CONFIG",
             Some(config_dir.join("config.toml").to_str().expect("utf-8 path")),
@@ -1308,7 +1498,17 @@ mod tests {
         let root = unique_temp_dir("wm-fallback");
         let config_dir = root.join("yeet-and-yoink");
         std::fs::create_dir_all(&config_dir).expect("config dir should be created");
-        std::fs::write(config_dir.join("config.toml"), "").expect("config file should be writable");
+        std::fs::write(
+            config_dir.join("config.toml"),
+            r#"
+[app.terminal.wezterm]
+enabled = true
+
+[app.editor.emacs]
+enabled = true
+"#,
+        )
+        .expect("config file should be writable");
         let old_override = set_env(
             "NIRI_DEEP_CONFIG",
             Some(config_dir.join("config.toml").to_str().expect("utf-8 path")),
@@ -1391,7 +1591,14 @@ mod tests {
         let root = unique_temp_dir("same-domain-merge");
         let config_dir = root.join("yeet-and-yoink");
         std::fs::create_dir_all(&config_dir).expect("config dir should be created");
-        std::fs::write(config_dir.join("config.toml"), "").expect("config file should be writable");
+        std::fs::write(
+            config_dir.join("config.toml"),
+            r#"
+[app.terminal.wezterm]
+enabled = true
+"#,
+        )
+        .expect("config file should be writable");
         let old_override = set_env(
             "NIRI_DEEP_CONFIG",
             Some(config_dir.join("config.toml").to_str().expect("utf-8 path")),

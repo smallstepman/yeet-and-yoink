@@ -337,6 +337,19 @@ pub fn process_cmdline_args(pid: u32) -> Option<Vec<String>> {
     )
 }
 
+pub fn process_fd_target(pid: u32, fd: u32) -> Option<String> {
+    std::fs::read_link(format!("/proc/{pid}/fd/{fd}"))
+        .ok()
+        .map(|target| target.to_string_lossy().to_string())
+}
+
+pub fn process_uses_tty(pid: u32, tty_name: &str) -> bool {
+    [0_u32, 1, 2]
+        .into_iter()
+        .filter_map(|fd| process_fd_target(pid, fd))
+        .any(|target| target == tty_name)
+}
+
 pub fn is_shell_comm(comm: &str) -> bool {
     matches!(
         normalize_process_name(comm).as_str(),
@@ -361,13 +374,62 @@ pub fn parse_stat_tpgid(stat: &str) -> Option<u32> {
         .map(|value| value as u32)
 }
 
+pub fn parse_stat_pgrp(stat: &str) -> Option<u32> {
+    let after_comm = stat.rsplit_once(')')?.1;
+    let fields: Vec<&str> = after_comm.split_whitespace().collect();
+    fields
+        .get(2)?
+        .parse::<i32>()
+        .ok()
+        .filter(|value| *value > 0)
+        .map(|value| value as u32)
+}
+
+pub fn foreground_process_name_for_tty_in_tree(root_pid: u32, tty_name: &str) -> Option<String> {
+    if root_pid == 0 || tty_name.trim().is_empty() {
+        return None;
+    }
+
+    let candidates: Vec<(u32, String, Option<u32>, Option<u32>)> = process_tree_pids(root_pid)
+        .into_iter()
+        .filter(|pid| process_uses_tty(*pid, tty_name))
+        .filter_map(|pid| {
+            let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok();
+            let comm = process_comm(pid)?;
+            Some((
+                pid,
+                comm,
+                stat.as_deref().and_then(parse_stat_pgrp),
+                stat.as_deref().and_then(parse_stat_tpgid),
+            ))
+        })
+        .collect();
+
+    let pick = |entries: &[(u32, String, Option<u32>, Option<u32>)]| {
+        entries
+            .iter()
+            .rev()
+            .find(|(_, comm, _, _)| !is_shell_comm(comm))
+            .or_else(|| entries.iter().rev().next())
+            .map(|(_, comm, _, _)| comm.clone())
+    };
+
+    let foreground_group: Vec<_> = candidates
+        .iter()
+        .filter(|(_, _, pgrp, tpgid)| pgrp.is_some() && pgrp == tpgid)
+        .cloned()
+        .collect();
+    pick(&foreground_group).or_else(|| pick(&candidates))
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashSet;
     use std::process::Output;
 
     use super::{
-        all_pids, process_cmdline_args, process_comm, process_environ_var, process_tree_pids,
+        all_pids, foreground_process_name_for_tty_in_tree, parse_stat_pgrp, process_cmdline_args,
+        process_comm, process_environ_var, process_fd_target, process_tree_pids, process_uses_tty,
         socket_inode_from_fd_target, socket_path_for_pid_from_proc_net_unix,
         socket_path_from_proc_net_unix, socket_path_from_ss_output, stderr_text, stdout_text,
         CommandContext, ProcessTree,
@@ -420,6 +482,21 @@ mod tests {
                 .find_map_by_comm(&comm, |pid| (pid == std::process::id()).then_some(pid))
                 .is_some());
         }
+    }
+
+    #[test]
+    fn parse_stat_pgrp_reads_process_group() {
+        let stat = "1234 (zsh) S 1 4321 4321 34817 4321 4194560 28954 275 0 0 32 5 0 0 20 0 1 0 123456 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0";
+        assert_eq!(parse_stat_pgrp(stat), Some(4321));
+        assert_eq!(super::parse_stat_tpgid(stat), Some(4321));
+    }
+
+    #[test]
+    fn fd_target_helpers_handle_current_process() {
+        let pid = std::process::id();
+        let _ = process_fd_target(pid, 0);
+        let _ = process_uses_tty(pid, "/dev/does-not-exist");
+        let _ = foreground_process_name_for_tty_in_tree(pid, "/dev/does-not-exist");
     }
 
     #[test]

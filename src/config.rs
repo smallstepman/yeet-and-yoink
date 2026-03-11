@@ -13,12 +13,11 @@ use etcetera::base_strategy::{choose_base_strategy, BaseStrategy};
 /// move.docking.tear_off.enabled = true
 /// move.docking.tear_off.only_if_edgemost = true
 ///
-/// [app.browser.chrome]
+/// [app.editor.neovim]
 /// enabled = true
-/// focus.left = "previous_tab"
-/// focus.right = "next_tab"
-/// move.left = "backward"
-/// move.right = "forward"
+/// [app.editor.neovim.ui.terminal]
+/// app = "wezterm"
+/// mux_backend = "inherit"
 ///
 /// [wm]
 /// enabled_integraton = 'niri'
@@ -387,7 +386,34 @@ pub struct EditorAppConfig {
     pub manage_terminal: bool,
 
     #[serde(default)]
+    pub ui: EditorUiConfig,
+
+    #[serde(default)]
     pub tear_off_scope: EditorTearOffScope,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct EditorUiConfig {
+    #[serde(default)]
+    pub terminal: Option<EditorTerminalUiConfig>,
+
+    #[serde(default)]
+    pub graphical: Option<EditorGraphicalUiConfig>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct EditorTerminalUiConfig {
+    #[serde(default)]
+    pub mux_backend: Option<EditorTerminalMuxBackend>,
+
+    #[serde(default)]
+    pub app: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct EditorGraphicalUiConfig {
+    #[serde(default)]
+    pub app: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -421,6 +447,31 @@ pub enum TerminalMuxBackend {
     Zellij,
     Wezterm,
     Kitty,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EditorTerminalMuxBackend {
+    #[serde(alias = "inherited")]
+    Inherit,
+    Tmux,
+    Zellij,
+    Wezterm,
+    Kitty,
+}
+
+impl EditorTerminalMuxBackend {
+    fn resolve(self, cfg: &Config, terminal_app: Option<&str>) -> Option<TerminalMuxBackend> {
+        match self {
+            Self::Inherit => terminal_app
+                .and_then(|app| terminal_backend_for_aliases_from(cfg, &[app]))
+                .or_else(|| single_enabled_terminal_backend(cfg)),
+            Self::Tmux => Some(TerminalMuxBackend::Tmux),
+            Self::Zellij => Some(TerminalMuxBackend::Zellij),
+            Self::Wezterm => Some(TerminalMuxBackend::Wezterm),
+            Self::Kitty => Some(TerminalMuxBackend::Kitty),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
@@ -634,20 +685,27 @@ fn default_mux_backend_for_aliases(aliases: &[&str]) -> TerminalMuxBackend {
 }
 
 fn profile_by_aliases<'a, T>(profiles: &'a HashMap<String, T>, aliases: &[&str]) -> Option<&'a T> {
+    profile_entry_by_aliases(profiles, aliases).map(|(_, profile)| profile)
+}
+
+fn profile_entry_by_aliases<'a, T>(
+    profiles: &'a HashMap<String, T>,
+    aliases: &[&str],
+) -> Option<(&'a str, &'a T)> {
     let aliases = alias_keys(aliases);
     if aliases.is_empty() {
         return None;
     }
 
     for alias in &aliases {
-        if let Some(profile) = profiles.get(alias) {
-            return Some(profile);
+        if let Some((key, profile)) = profiles.get_key_value(alias) {
+            return Some((key.as_str(), profile));
         }
     }
 
     for (key, profile) in profiles {
         if aliases.iter().any(|alias| key.eq_ignore_ascii_case(alias)) {
-            return Some(profile);
+            return Some((key.as_str(), profile));
         }
     }
 
@@ -661,7 +719,7 @@ fn section_enabled_from<T>(
 ) -> bool {
     profile_by_aliases(profiles, aliases)
         .map(enabled)
-        .unwrap_or(profiles.is_empty())
+        .unwrap_or(false)
 }
 
 fn app_enabled_from(cfg: &Config, section: AppSection, aliases: &[&str]) -> bool {
@@ -716,9 +774,7 @@ fn pane_policy_from(cfg: &Config, section: AppSection, aliases: &[&str]) -> Pane
     match section {
         AppSection::Terminal => {
             let profile = profile_by_aliases(&cfg.app.terminal, aliases);
-            let integration_enabled = profile
-                .map(|profile| profile.enabled)
-                .unwrap_or(cfg.app.terminal.is_empty());
+            let integration_enabled = profile.map(|profile| profile.enabled).unwrap_or(false);
             match profile {
                 Some(profile) => PanePolicy {
                     integration_enabled,
@@ -732,9 +788,7 @@ fn pane_policy_from(cfg: &Config, section: AppSection, aliases: &[&str]) -> Pane
         }
         AppSection::Editor => {
             let profile = profile_by_aliases(&cfg.app.editor, aliases);
-            let integration_enabled = profile
-                .map(|profile| profile.enabled)
-                .unwrap_or(cfg.app.editor.is_empty());
+            let integration_enabled = profile.map(|profile| profile.enabled).unwrap_or(false);
             match profile {
                 Some(profile) => PanePolicy {
                     integration_enabled,
@@ -756,9 +810,7 @@ pub fn pane_policy_for(section: AppSection, aliases: &[&str]) -> PanePolicy {
 
 fn mux_policy_from(cfg: &Config, aliases: &[&str]) -> MuxPolicy {
     let profile = profile_by_aliases(&cfg.app.terminal, aliases);
-    let integration_enabled = profile
-        .map(|profile| profile.enabled)
-        .unwrap_or(cfg.app.terminal.is_empty());
+    let integration_enabled = profile.map(|profile| profile.enabled).unwrap_or(false);
     MuxPolicy {
         integration_enabled,
         backend: profile
@@ -770,6 +822,120 @@ fn mux_policy_from(cfg: &Config, aliases: &[&str]) -> MuxPolicy {
 
 pub fn mux_policy_for(aliases: &[&str]) -> MuxPolicy {
     mux_policy_from(&read_config(), aliases)
+}
+
+fn terminal_profile_backend(key: &str, profile: &TerminalAppConfig) -> TerminalMuxBackend {
+    profile
+        .variant
+        .mux_backend
+        .unwrap_or_else(|| default_mux_backend_for_aliases(&[key]))
+}
+
+fn known_terminal_backend_for_aliases(aliases: &[&str]) -> Option<TerminalMuxBackend> {
+    let aliases = alias_keys(aliases);
+    if aliases.iter().any(|alias| alias == "kitty") {
+        return Some(TerminalMuxBackend::Kitty);
+    }
+    if aliases.iter().any(|alias| alias == "wezterm") {
+        return Some(TerminalMuxBackend::Wezterm);
+    }
+    if aliases.iter().any(|alias| {
+        matches!(
+            alias.as_str(),
+            "foot" | "alacritty" | "ghostty" | "iterm2" | "iterm"
+        )
+    }) {
+        return Some(TerminalMuxBackend::Tmux);
+    }
+    None
+}
+
+fn terminal_backend_for_aliases_from(cfg: &Config, aliases: &[&str]) -> Option<TerminalMuxBackend> {
+    profile_entry_by_aliases(&cfg.app.terminal, aliases)
+        .map(|(key, profile)| terminal_profile_backend(key, profile))
+        .or_else(|| known_terminal_backend_for_aliases(aliases))
+}
+
+fn single_enabled_terminal_backend(cfg: &Config) -> Option<TerminalMuxBackend> {
+    let mut enabled = cfg
+        .app
+        .terminal
+        .iter()
+        .filter(|(_, profile)| profile.enabled);
+    let (key, profile) = enabled.next()?;
+    if enabled.next().is_some() {
+        return None;
+    }
+    Some(terminal_profile_backend(key, profile))
+}
+
+fn terminal_app_matches_aliases(app: &str, aliases: &[&str]) -> bool {
+    let Some(normalized) = normalize_override(app) else {
+        return false;
+    };
+    alias_keys(aliases).iter().any(|alias| alias == &normalized)
+}
+
+fn editor_terminal_ui_from<'a>(
+    cfg: &'a Config,
+    aliases: &[&str],
+) -> Option<&'a EditorTerminalUiConfig> {
+    profile_by_aliases(&cfg.app.editor, aliases).and_then(|profile| profile.ui.terminal.as_ref())
+}
+
+fn any_enabled_editor_targets_terminal_app_from(cfg: &Config, terminal_aliases: &[&str]) -> bool {
+    cfg.app.editor.values().any(|profile| {
+        profile.enabled
+            && profile
+                .ui
+                .terminal
+                .as_ref()
+                .and_then(|ui| ui.app.as_deref())
+                .is_some_and(|app| terminal_app_matches_aliases(app, terminal_aliases))
+    })
+}
+
+pub fn terminal_chain_enabled_from(cfg: &Config, aliases: &[&str]) -> bool {
+    app_enabled_from(cfg, AppSection::Terminal, aliases)
+        || any_enabled_editor_targets_terminal_app_from(cfg, aliases)
+}
+
+pub fn terminal_chain_enabled_for(aliases: &[&str]) -> bool {
+    terminal_chain_enabled_from(&read_config(), aliases)
+}
+
+fn editor_terminal_mux_backend_from(cfg: &Config, aliases: &[&str]) -> Option<TerminalMuxBackend> {
+    let terminal_ui = editor_terminal_ui_from(cfg, aliases)?;
+    let terminal_app = terminal_ui.app.as_deref();
+    terminal_ui
+        .mux_backend
+        .and_then(|backend| backend.resolve(cfg, terminal_app))
+        .or_else(|| terminal_app.and_then(|app| terminal_backend_for_aliases_from(cfg, &[app])))
+}
+
+pub fn editor_terminal_mux_backend_for(aliases: &[&str]) -> Option<TerminalMuxBackend> {
+    editor_terminal_mux_backend_from(&read_config(), aliases)
+}
+
+fn editor_terminal_ui_app_from(cfg: &Config, aliases: &[&str]) -> Option<String> {
+    editor_terminal_ui_from(cfg, aliases)
+        .and_then(|ui| ui.app.as_deref())
+        .and_then(normalize_override)
+}
+
+pub fn editor_terminal_ui_app_for(aliases: &[&str]) -> Option<String> {
+    editor_terminal_ui_app_from(&read_config(), aliases)
+}
+
+fn editor_graphical_ui_app_from(cfg: &Config, aliases: &[&str]) -> Option<String> {
+    profile_by_aliases(&cfg.app.editor, aliases)
+        .and_then(|profile| profile.ui.graphical.as_ref())
+        .and_then(|ui| ui.app.as_deref())
+        .and_then(normalize_override)
+}
+
+pub fn editor_graphical_ui_app_for(aliases: &[&str]) -> Option<String> {
+    editor_graphical_ui_app_from(&read_config(), aliases)
 }
 
 fn editor_tear_off_scope_from(cfg: &Config, aliases: &[&str]) -> EditorTearOffScope {
@@ -829,10 +995,16 @@ focus.internal_panes.enabled = true
 move.internal_panes.enabled = true
 resize.internal_panes.enabled = true
 move.docking.tear_off.enabled = true
+[app.editor.emacs.ui.graphical]
+app = "emacs"
 "#;
         let parsed: Config = toml::from_str(sample).expect("sample config should parse");
         assert!(parsed.app.terminal.contains_key("wezterm"));
         assert!(parsed.app.editor.contains_key("emacs"));
+        assert_eq!(
+            editor_graphical_ui_app_from(&parsed, &["emacs", "editor"]),
+            Some("emacs".to_string())
+        );
     }
 
     #[test]
@@ -857,7 +1029,7 @@ enabled = false
     }
 
     #[test]
-    fn unmatched_alias_defaults_to_disabled_when_section_is_explicitly_configured() {
+    fn unmatched_alias_is_disabled_by_default() {
         let sample = r#"
 [app.editor.vscode]
 enabled = true
@@ -870,6 +1042,22 @@ enabled = true
             AppSection::Editor,
             &["editor", "emacs"]
         ));
+    }
+
+    #[test]
+    fn matching_alias_can_still_be_explicitly_disabled() {
+        let sample = r#"
+[app.editor.emacs]
+enabled = false
+"#;
+        let parsed: Config = toml::from_str(sample).expect("sample config should parse");
+
+        assert!(!app_enabled_from(
+            &parsed,
+            AppSection::Editor,
+            &["editor", "emacs"]
+        ));
+        assert!(!app_enabled_from(&parsed, AppSection::Editor, &["vscode"]));
     }
 
     #[test]
@@ -946,5 +1134,104 @@ move.internal_panes.enabled = true
         let policy = pane_policy_from(&parsed, AppSection::Editor, &["nvim", "neovim"]);
         assert!(policy.integration_enabled());
         assert!(policy.move_capability());
+    }
+
+    #[test]
+    fn neovim_editor_terminal_ui_inherits_single_enabled_terminal_profile() {
+        let sample = r#"
+[app.terminal.wezterm]
+enabled = true
+mux_backend = "tmux"
+
+[app.editor.neovim]
+enabled = true
+[app.editor.neovim.ui.terminal]
+mux_backend = "inherit"
+"#;
+        let parsed: Config = toml::from_str(sample).expect("sample config should parse");
+        assert_eq!(
+            editor_terminal_mux_backend_from(&parsed, &["nvim", "neovim"]),
+            Some(TerminalMuxBackend::Tmux)
+        );
+    }
+
+    #[test]
+    fn neovim_editor_terminal_ui_inherit_is_none_when_ambiguous() {
+        let sample = r#"
+[app.terminal.wezterm]
+enabled = true
+mux_backend = "tmux"
+
+[app.terminal.kitty]
+enabled = true
+mux_backend = "kitty"
+
+[app.editor.neovim]
+enabled = true
+[app.editor.neovim.ui.terminal]
+mux_backend = "inherit"
+"#;
+        let parsed: Config = toml::from_str(sample).expect("sample config should parse");
+        assert_eq!(
+            editor_terminal_mux_backend_from(&parsed, &["nvim", "neovim"]),
+            None
+        );
+    }
+
+    #[test]
+    fn explicit_neovim_editor_terminal_mux_backend_overrides_terminal_config() {
+        let sample = r#"
+[app.terminal.wezterm]
+enabled = true
+mux_backend = "tmux"
+
+[app.editor.neovim]
+enabled = true
+[app.editor.neovim.ui.terminal]
+mux_backend = "zellij"
+"#;
+        let parsed: Config = toml::from_str(sample).expect("sample config should parse");
+        assert_eq!(
+            editor_terminal_mux_backend_from(&parsed, &["nvim", "neovim"]),
+            Some(TerminalMuxBackend::Zellij)
+        );
+    }
+
+    #[test]
+    fn neovim_editor_terminal_ui_app_defaults_mux_backend_from_target_terminal() {
+        let sample = r#"
+[app.editor.neovim]
+enabled = true
+[app.editor.neovim.ui.terminal]
+app = "alacritty"
+"#;
+        let parsed: Config = toml::from_str(sample).expect("sample config should parse");
+        assert_eq!(
+            editor_terminal_ui_app_from(&parsed, &["nvim", "neovim"]),
+            Some("alacritty".to_string())
+        );
+        assert_eq!(
+            editor_terminal_mux_backend_from(&parsed, &["nvim", "neovim"]),
+            Some(TerminalMuxBackend::Tmux)
+        );
+    }
+
+    #[test]
+    fn enabled_editor_ui_terminal_target_enables_terminal_chain() {
+        let sample = r#"
+[app.editor.neovim]
+enabled = true
+[app.editor.neovim.ui.terminal]
+app = "wezterm"
+"#;
+        let parsed: Config = toml::from_str(sample).expect("sample config should parse");
+        assert!(terminal_chain_enabled_from(
+            &parsed,
+            &["wezterm", "terminal"]
+        ));
+        assert!(!terminal_chain_enabled_from(
+            &parsed,
+            &["kitty", "terminal"]
+        ));
     }
 }

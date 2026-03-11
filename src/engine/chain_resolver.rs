@@ -1,9 +1,12 @@
 use crate::adapters::apps::{
-    self, alacritty, emacs, foot, ghostty, kitty, librefox::Librefox, nvim::Nvim, vscode::Vscode,
+    self, alacritty, emacs, foot, ghostty, kitty,
+    librefox::Librefox,
+    nvim::{self, Nvim},
+    vscode::Vscode,
     wezterm, AppAdapter, AppKind,
 };
 use crate::adapters::terminal_multiplexers::tmux::Tmux;
-use crate::config::AppSection;
+use crate::config::{AppSection, TerminalMuxBackend};
 use crate::engine::contract::ChainResolver;
 use crate::engine::domain::{EDITOR_DOMAIN_ID, TERMINAL_DOMAIN_ID, WM_DOMAIN_ID};
 use crate::engine::runtime::{self, ProcessId};
@@ -108,7 +111,7 @@ const DIRECT_ADAPTERS: &[DirectAdapterSpec] = &[
     },
     DirectAdapterSpec {
         name: "librefox",
-        aliases: &["librefox"],
+        aliases: &["librefox", "firefox", "librewolf"],
         app_ids: &["librewolf", "LibreWolf", "firefox", "Firefox"],
         section: AppSection::Browser,
         build: build_librefox,
@@ -186,9 +189,113 @@ fn resolve_tmux_for_root(
     (candidates, tmux)
 }
 
+fn shell_matches_foreground_tpgid(shell_pid: u32, fg_base: &str) -> bool {
+    let Ok(stat) = std::fs::read_to_string(format!("/proc/{shell_pid}/stat")) else {
+        return false;
+    };
+    let Some(tpgid) = runtime::parse_stat_tpgid(&stat) else {
+        return false;
+    };
+    runtime::process_comm(tpgid)
+        .map(|comm| comm == fg_base)
+        .unwrap_or(false)
+}
+
+fn shell_pid_for_tty<F>(shells: &[u32], tty_name: Option<&str>, mut uses_tty: F) -> Option<u32>
+where
+    F: FnMut(u32, &str) -> bool,
+{
+    let tty_name = tty_name?.trim();
+    if tty_name.is_empty() {
+        return None;
+    }
+    shells
+        .iter()
+        .copied()
+        .find(|&shell_pid| uses_tty(shell_pid, tty_name))
+}
+
+fn shell_pid_for_host_focused_tty(
+    terminal_pid: u32,
+    host: &TerminalHostSpec,
+    shells: &[u32],
+) -> Option<u32> {
+    let panes = crate::adapters::terminal_multiplexers::active_mux_provider(host.aliases)
+        .list_panes_for_pid(terminal_pid)
+        .ok()?;
+    let focused_tty = crate::engine::contract::TerminalPaneSnapshot::active_or_first(panes.iter())
+        .and_then(|pane| pane.tty_name.as_deref());
+    let selected = shell_pid_for_tty(shells, focused_tty, runtime::process_uses_tty);
+    if let (Some(shell_pid), Some(tty_name)) = (selected, focused_tty) {
+        logging::debug(format!(
+            "resolve_terminal_chain: selected shell pid={} from focused tty {}",
+            shell_pid, tty_name
+        ));
+    }
+    selected
+}
+
+fn push_nvim_for_pid(
+    chain: &mut Vec<Box<dyn AppAdapter>>,
+    nvim_pid: u32,
+    mux_backend: TerminalMuxBackend,
+) -> bool {
+    if !crate::config::app_integration_enabled(AppSection::Editor, nvim::ADAPTER_ALIASES) {
+        logging::debug("resolve_terminal_chain: nvim integration disabled via config");
+        return false;
+    }
+    if let Some(nvim) = Nvim::for_pid(nvim_pid, mux_backend) {
+        chain.push(apps::bind_policy(Box::new(nvim)));
+        true
+    } else {
+        false
+    }
+}
+
+fn push_first_resolved_nvim_pid(
+    chain: &mut Vec<Box<dyn AppAdapter>>,
+    nvim_pids: impl IntoIterator<Item = u32>,
+    mux_backend: TerminalMuxBackend,
+) -> bool {
+    for nvim_pid in nvim_pids {
+        if push_nvim_for_pid(chain, nvim_pid, mux_backend) {
+            return true;
+        }
+    }
+    false
+}
+
+fn tmux_nvim_pid_for_roots(roots: &[u32], host: &TerminalHostSpec) -> Option<u32> {
+    for root_pid in roots {
+        let (tmux_pids, found_tmux) = resolve_tmux_for_root(*root_pid, host.terminal_launch_prefix);
+        logging::debug(format!(
+            "resolve_terminal_chain: tmux nvim probe root={root_pid} candidates={tmux_pids:?}"
+        ));
+        let Some(tmux) = found_tmux else {
+            continue;
+        };
+        if let Some(nvim_pid) = tmux.nvim_in_current_pane() {
+            logging::debug(format!(
+                "resolve_terminal_chain: tmux focused-pane nvim pid={nvim_pid} root={root_pid}"
+            ));
+            return Some(nvim_pid);
+        }
+    }
+    None
+}
+
 fn resolve_terminal_chain(terminal_pid: u32, host: &TerminalHostSpec) -> Vec<Box<dyn AppAdapter>> {
     let mut chain: Vec<Box<dyn AppAdapter>> = Vec::new();
-    let mux_backend = crate::config::mux_policy_for(host.aliases).backend;
+    let host_mux_backend = crate::config::mux_policy_for(host.aliases).backend;
+    let nvim_terminal_app = crate::config::editor_terminal_ui_app_for(nvim::ADAPTER_ALIASES);
+    let nvim_host_allowed = nvim_terminal_app
+        .as_deref()
+        .map(|app| matches_adapter_alias(app, host.aliases))
+        .unwrap_or(true);
+    let nvim_mux_backend = crate::config::editor_terminal_mux_backend_for(nvim::ADAPTER_ALIASES)
+        .unwrap_or(host_mux_backend);
+    let allow_tmux_resolution = matches!(host_mux_backend, TerminalMuxBackend::Tmux)
+        || matches!(nvim_mux_backend, TerminalMuxBackend::Tmux);
 
     let fg_hint = crate::adapters::terminal_multiplexers::active_foreground_process(
         host.aliases,
@@ -212,57 +319,57 @@ fn resolve_terminal_chain(terminal_pid: u32, host: &TerminalHostSpec) -> Vec<Box
         shells
     ));
 
-    let search_pid = if shells.len() <= 1 {
-        shells.first().copied()
-    } else if !fg_base.is_empty() {
-        shells
-            .iter()
-            .copied()
-            .find(|&shell_pid| !runtime::find_descendants_by_comm(shell_pid, &fg_base).is_empty())
-            .or_else(|| {
-                shells.iter().copied().find(|&shell_pid| {
-                    let Ok(stat) = std::fs::read_to_string(format!("/proc/{shell_pid}/stat"))
-                    else {
-                        return false;
-                    };
-                    let Some(tpgid) = runtime::parse_stat_tpgid(&stat) else {
-                        return false;
-                    };
-                    runtime::process_comm(tpgid)
-                        .map(|comm| comm == fg_base)
-                        .unwrap_or(false)
+    let search_pid =
+        if let Some(shell_pid) = shell_pid_for_host_focused_tty(terminal_pid, host, &shells) {
+            Some(shell_pid)
+        } else if shells.len() <= 1 {
+            shells.first().copied()
+        } else if !fg_base.is_empty() {
+            shells
+                .iter()
+                .copied()
+                .find(|&shell_pid| shell_matches_foreground_tpgid(shell_pid, &fg_base))
+                .or_else(|| {
+                    shells.iter().copied().find(|&shell_pid| {
+                        !runtime::find_descendants_by_comm(shell_pid, &fg_base).is_empty()
+                    })
                 })
-            })
-    } else {
-        None
-    };
+        } else {
+            None
+        };
 
     let Some(search_pid) = search_pid else {
-        logging::debug(
-            "resolve_terminal_chain: no focused shell match; trying tmux fallback on all shells",
-        );
-        // Shell disambiguation by tpgid fails when the fg process is running *inside* tmux,
-        // because the shell's tpgid points to the tmux client, not the inner fg process.
-        // Fall back: try every shell candidate (and terminal root for direct tmux children).
-        let mut fallback_roots = shells.clone();
-        if !fallback_roots.contains(&terminal_pid) {
-            fallback_roots.push(terminal_pid);
-        }
-        'tmux_fallback: for root_pid in fallback_roots {
-            let (tmux_pids, found_tmux) =
-                resolve_tmux_for_root(root_pid, host.terminal_launch_prefix);
-            logging::debug(format!(
-                "resolve_terminal_chain: tmux fallback root={root_pid} candidates={tmux_pids:?}"
-            ));
-            if let Some(tmux) = found_tmux {
-                if let Some(nvim_pid) = tmux.nvim_in_current_pane() {
-                    if let Some(nvim) = Nvim::for_pid(nvim_pid, mux_backend) {
-                        chain.push(apps::bind_policy(Box::new(nvim)));
-                    }
-                }
-                chain.push(apps::bind_policy(Box::new(tmux)));
-                break 'tmux_fallback;
+        if allow_tmux_resolution {
+            logging::debug(
+                "resolve_terminal_chain: no focused shell match; trying tmux fallback on all shells",
+            );
+            // Shell disambiguation by tpgid fails when the fg process is running *inside* tmux,
+            // because the shell's tpgid points to the tmux client, not the inner fg process.
+            // Fall back: try every shell candidate (and terminal root for direct tmux children).
+            let mut fallback_roots = shells.clone();
+            if !fallback_roots.contains(&terminal_pid) {
+                fallback_roots.push(terminal_pid);
             }
+            'tmux_fallback: for root_pid in fallback_roots {
+                let (tmux_pids, found_tmux) =
+                    resolve_tmux_for_root(root_pid, host.terminal_launch_prefix);
+                logging::debug(format!(
+                    "resolve_terminal_chain: tmux fallback root={root_pid} candidates={tmux_pids:?}"
+                ));
+                if let Some(tmux) = found_tmux {
+                    if nvim_host_allowed {
+                        if let Some(nvim_pid) = tmux.nvim_in_current_pane() {
+                            let _ = push_nvim_for_pid(&mut chain, nvim_pid, nvim_mux_backend);
+                        }
+                    }
+                    chain.push(apps::bind_policy(Box::new(tmux)));
+                    break 'tmux_fallback;
+                }
+            }
+        } else {
+            logging::debug(
+                "resolve_terminal_chain: no focused shell match and tmux resolution is disabled",
+            );
         }
         chain.push((host.build)());
         return chain;
@@ -272,7 +379,7 @@ fn resolve_terminal_chain(terminal_pid: u32, host: &TerminalHostSpec) -> Vec<Box
     ));
 
     match fg_base.as_str() {
-        "tmux" => {
+        "tmux" if allow_tmux_resolution => {
             let (tmux_pids, found_tmux) =
                 resolve_tmux_for_root(search_pid, host.terminal_launch_prefix);
             logging::debug(format!(
@@ -280,41 +387,54 @@ fn resolve_terminal_chain(terminal_pid: u32, host: &TerminalHostSpec) -> Vec<Box
                 search_pid, tmux_pids
             ));
             if let Some(tmux) = found_tmux {
-                if let Some(nvim_pid) = tmux.nvim_in_current_pane() {
-                    if let Some(nvim) = Nvim::for_pid(nvim_pid, mux_backend) {
-                        chain.push(apps::bind_policy(Box::new(nvim)));
+                if nvim_host_allowed {
+                    if let Some(nvim_pid) = tmux.nvim_in_current_pane() {
+                        let _ = push_nvim_for_pid(&mut chain, nvim_pid, nvim_mux_backend);
                     }
                 }
                 chain.push(apps::bind_policy(Box::new(tmux)));
             }
         }
+        "tmux" => {}
         "nvim" => {
-            let nvim_pids = runtime::find_descendants_by_comm(search_pid, "nvim");
-            logging::debug(format!(
-                "resolve_terminal_chain: nvim descendants under shell {} => {:?}",
-                search_pid, nvim_pids
-            ));
-            if let Some(&nvim_pid) = nvim_pids.first() {
-                if let Some(nvim) = Nvim::for_pid(nvim_pid, mux_backend) {
-                    chain.push(apps::bind_policy(Box::new(nvim)));
+            let mut resolved_nvim = false;
+            if nvim_host_allowed && nvim_mux_backend == TerminalMuxBackend::Tmux {
+                let mut tmux_roots = vec![search_pid, terminal_pid];
+                for shell_pid in shells.iter().copied() {
+                    if !tmux_roots.contains(&shell_pid) {
+                        tmux_roots.push(shell_pid);
+                    }
                 }
+                if let Some(nvim_pid) = tmux_nvim_pid_for_roots(&tmux_roots, host) {
+                    resolved_nvim = push_nvim_for_pid(&mut chain, nvim_pid, nvim_mux_backend);
+                }
+            }
+            if nvim_host_allowed && !resolved_nvim {
+                let nvim_pids = runtime::find_descendants_by_comm(search_pid, "nvim");
+                logging::debug(format!(
+                    "resolve_terminal_chain: nvim descendants under shell {} => {:?}",
+                    search_pid, nvim_pids
+                ));
+                let _ = push_first_resolved_nvim_pid(&mut chain, nvim_pids, nvim_mux_backend);
             }
         }
         _ => {
-            // fg_base is an arbitrary process running inside a mux (e.g. "node", "python").
-            // Try tmux detection under the shell regardless.
-            let (tmux_pids, found_tmux) =
-                resolve_tmux_for_root(search_pid, host.terminal_launch_prefix);
-            logging::debug(format!(
-                "resolve_terminal_chain: fg={fg_base} tmux descendants under shell {search_pid} => {tmux_pids:?}"
-            ));
-            if let Some(tmux) = found_tmux {
-                if let Some(nvim_pid) = tmux.nvim_in_current_pane() {
-                    if let Some(nvim) = Nvim::for_pid(nvim_pid, mux_backend) {
-                        chain.push(apps::bind_policy(Box::new(nvim)));
+            if allow_tmux_resolution {
+                // fg_base is an arbitrary process running inside a mux (e.g. "node", "python").
+                // Try tmux detection under the shell when tmux is the configured backend.
+                let (tmux_pids, found_tmux) =
+                    resolve_tmux_for_root(search_pid, host.terminal_launch_prefix);
+                logging::debug(format!(
+                    "resolve_terminal_chain: fg={fg_base} tmux descendants under shell {search_pid} => {tmux_pids:?}"
+                ));
+                if let Some(tmux) = found_tmux {
+                    if nvim_host_allowed {
+                        if let Some(nvim_pid) = tmux.nvim_in_current_pane() {
+                            let _ = push_nvim_for_pid(&mut chain, nvim_pid, nvim_mux_backend);
+                        }
                     }
+                    chain.push(apps::bind_policy(Box::new(tmux)));
                 }
-                chain.push(apps::bind_policy(Box::new(tmux)));
             }
         }
     }
@@ -354,7 +474,7 @@ impl ChainResolver for RuntimeChainResolver {
             .iter()
             .find(|host| host.app_ids.contains(&app_id))
         {
-            if !crate::config::app_integration_enabled(AppSection::Terminal, host.aliases) {
+            if !crate::config::terminal_chain_enabled_for(host.aliases) {
                 logging::debug("resolve_chain: terminal integration disabled via config");
                 return vec![];
             }
@@ -559,5 +679,55 @@ enabled = true
         restore_env("NIRI_DEEP_CONFIG", old_override);
         crate::config::prepare().expect("config should reload");
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn librewolf_browser_profile_enables_librefox_direct_adapter() {
+        let _guard = env_guard();
+        let root = unique_temp_dir("librewolf-direct-adapter");
+        let config_dir = root.join("yeet-and-yoink");
+        fs::create_dir_all(&config_dir).expect("config dir should be created");
+        fs::write(
+            config_dir.join("config.toml"),
+            r#"
+[app.browser.librewolf]
+enabled = true
+"#,
+        )
+        .expect("config file should be writable");
+        let old_override = set_env(
+            "NIRI_DEEP_CONFIG",
+            Some(config_dir.join("config.toml").to_str().expect("utf-8 path")),
+        );
+        crate::config::prepare().expect("config should load");
+
+        let chain = runtime_chain_resolver().resolve_chain("librewolf", 0, "LibreWolf");
+        assert_eq!(chain.len(), 1);
+        assert_eq!(chain[0].adapter_name(), "librefox");
+
+        restore_env("NIRI_DEEP_CONFIG", old_override);
+        crate::config::prepare().expect("config should reload");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn shell_pid_for_tty_prefers_matching_shell() {
+        let selected =
+            super::shell_pid_for_tty(&[111, 222, 333], Some("/dev/pts/4"), |pid, tty| {
+                tty == "/dev/pts/4" && pid == 222
+            });
+        assert_eq!(selected, Some(222));
+    }
+
+    #[test]
+    fn shell_pid_for_tty_ignores_missing_or_blank_tty() {
+        assert_eq!(
+            super::shell_pid_for_tty(&[111, 222], None, |_pid, _tty| true),
+            None
+        );
+        assert_eq!(
+            super::shell_pid_for_tty(&[111, 222], Some("  "), |_pid, _tty| true),
+            None
+        );
     }
 }

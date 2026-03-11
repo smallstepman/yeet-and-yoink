@@ -26,6 +26,8 @@ struct WeztermMuxPane {
     is_active: bool,
     #[serde(default)]
     foreground_process_name: String,
+    #[serde(default)]
+    tty_name: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -54,6 +56,35 @@ pub(crate) struct WeztermMux;
 pub(crate) static WEZTERM_MUX_PROVIDER: WeztermMux = WeztermMux;
 
 impl WeztermMux {
+    fn raw_panes_for_pid(&self, pid: u32) -> Result<Vec<WeztermMuxPane>> {
+        self.cli_json_for_pid(
+            pid,
+            &["list", "--format", "json"],
+            "failed to parse wezterm pane list json",
+        )
+    }
+
+    fn normalized_process_name(name: &str) -> Option<String> {
+        let normalized = runtime::normalize_process_name(name);
+        (!normalized.is_empty()).then_some(normalized)
+    }
+
+    fn pane_foreground_process_name_with_tty_fallback<F>(
+        pane: &WeztermMuxPane,
+        tty_fallback: F,
+    ) -> Option<String>
+    where
+        F: FnOnce(&str) -> Option<String>,
+    {
+        Self::normalized_process_name(&pane.foreground_process_name).or_else(|| {
+            let tty_name = pane.tty_name.trim();
+            (!tty_name.is_empty())
+                .then(|| tty_fallback(tty_name))
+                .flatten()
+                .and_then(|name| Self::normalized_process_name(&name))
+        })
+    }
+
     fn list_clients(&self, pid: u32) -> Result<Vec<WeztermMuxClient>> {
         let output = match self.cli_output_for_pid(pid, &["list-clients", "--format", "json"]) {
             Ok(output) => output,
@@ -237,11 +268,7 @@ impl TerminalMultiplexerProvider for WeztermMux {
     }
 
     fn list_panes_for_pid(&self, pid: u32) -> Result<Vec<TerminalPaneSnapshot>> {
-        let panes: Vec<WeztermMuxPane> = self.cli_json_for_pid(
-            pid,
-            &["list", "--format", "json"],
-            "failed to parse wezterm pane list json",
-        )?;
+        let panes = self.raw_panes_for_pid(pid)?;
         Ok(panes
             .into_iter()
             .map(|pane| TerminalPaneSnapshot {
@@ -250,6 +277,7 @@ impl TerminalMultiplexerProvider for WeztermMux {
                 window_id: Some(pane.window_id),
                 is_active: pane.is_active,
                 foreground_process_name: Some(pane.foreground_process_name),
+                tty_name: (!pane.tty_name.trim().is_empty()).then_some(pane.tty_name),
             })
             .collect())
     }
@@ -299,6 +327,19 @@ impl TerminalMultiplexerProvider for WeztermMux {
             pid
         ));
         bail!("unable to determine focused wezterm pane")
+    }
+
+    fn active_foreground_process(&self, pid: u32) -> Option<String> {
+        let pane_id = self.focused_pane_for_pid(pid).ok()?;
+        let panes = self.raw_panes_for_pid(pid).ok()?;
+        panes
+            .into_iter()
+            .find(|pane| pane.pane_id == pane_id)
+            .and_then(|pane| {
+                Self::pane_foreground_process_name_with_tty_fallback(&pane, |tty_name| {
+                    runtime::foreground_process_name_for_tty_in_tree(pid, tty_name)
+                })
+            })
     }
 
     fn pane_in_direction_for_pid(
@@ -648,5 +689,47 @@ impl TopologyHandler for WeztermMux {
             dir,
         )
         .context("wezterm merge failed")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{WeztermMux, WeztermMuxPane};
+
+    #[test]
+    fn pane_foreground_process_uses_tty_fallback_when_snapshot_field_is_empty() {
+        let pane = WeztermMuxPane {
+            window_id: 1,
+            pane_id: 42,
+            tab_id: 7,
+            is_active: true,
+            foreground_process_name: String::new(),
+            tty_name: "/dev/pts/104".to_string(),
+        };
+
+        let fg = WeztermMux::pane_foreground_process_name_with_tty_fallback(&pane, |tty_name| {
+            assert_eq!(tty_name, "/dev/pts/104");
+            Some("nvim".to_string())
+        });
+
+        assert_eq!(fg.as_deref(), Some("nvim"));
+    }
+
+    #[test]
+    fn pane_foreground_process_prefers_snapshot_name_over_tty_fallback() {
+        let pane = WeztermMuxPane {
+            window_id: 1,
+            pane_id: 42,
+            tab_id: 7,
+            is_active: true,
+            foreground_process_name: "/usr/bin/tmux: client".to_string(),
+            tty_name: "/dev/pts/104".to_string(),
+        };
+
+        let fg = WeztermMux::pane_foreground_process_name_with_tty_fallback(&pane, |_| {
+            Some("nvim".to_string())
+        });
+
+        assert_eq!(fg.as_deref(), Some("tmux"));
     }
 }

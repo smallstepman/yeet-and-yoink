@@ -171,6 +171,7 @@ Original error: {stderr}"
                 window_id: Some(window.id),
                 is_active: pane.is_focused || pane.is_active,
                 foreground_process_name: pane.foreground_process_name(),
+                tty_name: None,
             })
             .collect())
     }

@@ -675,7 +675,14 @@ mod tests {
         ));
         let config_dir = root.join("yeet-and-yoink");
         std::fs::create_dir_all(&config_dir).expect("config dir should be created");
-        std::fs::write(config_dir.join("config.toml"), "").expect("config file should be writable");
+        std::fs::write(
+            config_dir.join("config.toml"),
+            r#"
+[app.terminal.wezterm]
+enabled = true
+"#,
+        )
+        .expect("config file should be writable");
         let old_override = std::env::var_os("NIRI_DEEP_CONFIG");
         std::env::set_var("NIRI_DEEP_CONFIG", config_dir.join("config.toml"));
         crate::config::prepare().expect("config should load");

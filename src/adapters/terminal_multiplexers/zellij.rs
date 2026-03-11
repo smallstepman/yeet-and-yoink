@@ -929,6 +929,7 @@ impl TerminalMultiplexerProvider for ZellijMuxProvider {
                 window_id: None,
                 is_active: pane_id as u64 == snapshot.focused_pane_id,
                 foreground_process_name: None,
+                tty_name: None,
             })
             .collect())
     }

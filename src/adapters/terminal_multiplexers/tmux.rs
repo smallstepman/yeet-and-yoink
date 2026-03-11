@@ -428,6 +428,7 @@ impl TerminalMultiplexerProvider for TmuxMuxProvider {
                     window_id: None,
                     is_active: pane.pane_id == focused_pane_id,
                     foreground_process_name: None,
+                    tty_name: None,
                 })
                 .collect())
         })

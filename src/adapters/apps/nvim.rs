@@ -1,5 +1,5 @@
 use anyhow::{bail, Context, Result};
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
 use std::path::Path;
 use std::thread::sleep;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -8,8 +8,8 @@ use crate::adapters::apps::AppAdapter;
 use crate::adapters::terminal_multiplexers;
 use crate::config::TerminalMuxBackend;
 use crate::engine::contract::{
-    AdapterCapabilities, AppKind, MoveDecision, TearResult, TerminalMultiplexerProvider,
-    TopologyHandler,
+    AdapterCapabilities, AppKind, MergeExecutionMode, MergePreparation, MoveDecision, TearResult,
+    TerminalMultiplexerProvider, TopologyHandler,
 };
 use crate::engine::runtime::{self, CommandContext};
 use crate::engine::topology::Direction;
@@ -24,12 +24,59 @@ pub struct Nvim {
     terminal_mux: NvimTerminalMux,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 struct BufferSnapshot {
     path: String,
     line: u32,
     col: u32,
+    #[serde(default)]
+    buftype: String,
+    #[serde(deserialize_with = "deserialize_nvim_modified_flag")]
     modified: bool,
+}
+
+#[derive(Debug, Clone)]
+struct NvimMergePayload {
+    snapshot: BufferSnapshot,
+    source_server_addr: String,
+    source_pane_id: Option<u64>,
+    source_swap_path: Option<String>,
+    source_is_torn_out: bool,
+}
+
+impl BufferSnapshot {
+    fn is_file_backed(&self) -> bool {
+        self.buftype.trim().is_empty() && !self.path.trim().is_empty()
+    }
+}
+
+fn deserialize_nvim_modified_flag<'de, D>(deserializer: D) -> std::result::Result<bool, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum ModifiedFlag {
+        Bool(bool),
+        Integer(i64),
+        String(String),
+    }
+
+    match ModifiedFlag::deserialize(deserializer)? {
+        ModifiedFlag::Bool(value) => Ok(value),
+        ModifiedFlag::Integer(0) => Ok(false),
+        ModifiedFlag::Integer(1) => Ok(true),
+        ModifiedFlag::Integer(value) => Err(serde::de::Error::custom(format!(
+            "expected modified flag to be 0 or 1, got {value}"
+        ))),
+        ModifiedFlag::String(value) => match value.trim().to_ascii_lowercase().as_str() {
+            "0" | "false" | "v:false" => Ok(false),
+            "1" | "true" | "v:true" => Ok(true),
+            other => Err(serde::de::Error::custom(format!(
+                "expected modified flag to be bool-like, got {other}"
+            ))),
+        },
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -198,13 +245,13 @@ impl Nvim {
     }
 
     fn smart_mux_current_pane_id_expr() -> &'static str {
-        r#"luaeval("local ok,m=pcall(require,'smart-splits.mux'); if not ok then return -1 end; local mux=m.get(); if not mux then return -1 end; local id=mux.current_pane_id(); if id == nil then return -1 end; return id")"#
+        r#"luaeval("(function() local ok,m=pcall(require,'smart-splits.mux'); if not ok then return -1 end; local mux=m.get(); if not mux then return -1 end; local id=mux.current_pane_id(); if id == nil then return -1 end; return id end)()")"#
     }
 
     fn smart_mux_split_pane_expr(dir: Direction) -> String {
         let dir = Self::smart_splits_direction(dir);
         format!(
-            r#"luaeval("local ok,m=pcall(require,'smart-splits.mux'); if not ok then return false end; local mux=m.get(); if not mux then return false end; return mux.split_pane('{dir}')")"#
+            r#"luaeval("(function() local ok,m=pcall(require,'smart-splits.mux'); if not ok then return false end; local mux=m.get(); if not mux then return false end; return mux.split_pane('{dir}') end)()")"#
         )
     }
 
@@ -249,7 +296,7 @@ impl Nvim {
     }
 
     fn snapshot_expr() -> &'static str {
-        "json_encode({'path':expand('%:p'),'line':line('.'),'col':col('.'),'modified':&modified})"
+        "json_encode({'path':expand('%:p'),'line':line('.'),'col':col('.'),'buftype':&buftype,'modified':&modified})"
     }
 
     fn current_buffer_snapshot(&self) -> Result<BufferSnapshot> {
@@ -261,6 +308,45 @@ impl Nvim {
             snapshot.line = 1;
         }
         Ok(snapshot)
+    }
+
+    fn ensure_mergeable_snapshot(snapshot: BufferSnapshot, action: &str) -> Result<BufferSnapshot> {
+        if !snapshot.is_file_backed() {
+            let kind = if snapshot.buftype.trim().is_empty() {
+                "unnamed"
+            } else {
+                snapshot.buftype.trim()
+            };
+            bail!("{action} requires a file-backed buffer; current buffer type is {kind}");
+        }
+        if snapshot.modified {
+            bail!("{action} requires a saved buffer; please save first");
+        }
+        Ok(snapshot)
+    }
+
+    fn current_mergeable_snapshot(&self, action: &str) -> Result<BufferSnapshot> {
+        Self::ensure_mergeable_snapshot(self.current_buffer_snapshot()?, action)
+    }
+
+    fn swap_path_expr() -> &'static str {
+        r#"luaeval("(function() local path = vim.fn.swapname(vim.fn.bufnr('%')); if path == nil then return '' end; return path end)()")"#
+    }
+
+    fn current_swap_path(&self) -> Result<Option<String>> {
+        let path = self.remote_expr(Self::swap_path_expr())?.trim().to_string();
+        if path.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(path))
+        }
+    }
+
+    fn is_torn_out_instance(&self) -> bool {
+        Path::new(&self.server_addr)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with("tearout-"))
     }
 
     fn target_socket_path() -> Result<std::path::PathBuf> {
@@ -280,6 +366,27 @@ impl Nvim {
         format!("'{}'", value.replace('\'', "'\"'\"'"))
     }
 
+    fn vimscript_single_quote(value: &str) -> String {
+        value.replace('\'', "''")
+    }
+
+    fn lua_double_quote(value: &str) -> String {
+        let mut escaped = String::with_capacity(value.len() + 2);
+        escaped.push('"');
+        for ch in value.chars() {
+            match ch {
+                '\\' => escaped.push_str("\\\\"),
+                '"' => escaped.push_str("\\\""),
+                '\n' => escaped.push_str("\\n"),
+                '\r' => escaped.push_str("\\r"),
+                '\t' => escaped.push_str("\\t"),
+                _ => escaped.push(ch),
+            }
+        }
+        escaped.push('"');
+        escaped
+    }
+
     fn launch_target_nvim_command(target_socket: &str, snapshot: &BufferSnapshot) -> String {
         let line_arg = format!("+{}", snapshot.line.max(1));
         format!(
@@ -288,6 +395,85 @@ impl Nvim {
             line_arg,
             Self::shell_single_quote(&snapshot.path)
         )
+    }
+
+    fn merge_target_split_command(side: Direction) -> &'static str {
+        match side {
+            Direction::West => "topleft vsplit",
+            Direction::East => "botright vsplit",
+            Direction::North => "topleft split",
+            Direction::South => "botright split",
+        }
+    }
+
+    fn merge_target_expr(dir: Direction, snapshot: &BufferSnapshot) -> String {
+        let split_cmd = Self::lua_double_quote(Self::merge_target_split_command(dir.opposite()));
+        let path = Self::lua_double_quote(&snapshot.path);
+        let lua = format!(
+            "(function() vim.cmd({split_cmd}); vim.cmd(\"edit \" .. vim.fn.fnameescape({path})); vim.fn.cursor({}, {}); return 1 end)()",
+            snapshot.line.max(1),
+            snapshot.col.max(1)
+        );
+        format!("luaeval('{}')", Self::vimscript_single_quote(&lua))
+    }
+
+    fn tear_out_source_cleanup_expr() -> &'static str {
+        r#"luaeval("(function() local bufnr = vim.fn.bufnr('%'); if vim.fn.winnr('$') > 1 then vim.cmd('silent! close') end; if vim.fn.bufexists(bufnr) == 1 then vim.cmd('silent! bdelete! ' .. bufnr) end; return 1 end)()")"#
+    }
+
+    fn quit_expr() -> &'static str {
+        r#"luaeval("(function() vim.cmd('silent! qa!'); return 1 end)()")"#
+    }
+
+    fn wait_for_server_exit(server_addr: &str) {
+        for _ in 0..20 {
+            if Self::remote_expr_on(server_addr, "1").is_err() {
+                return;
+            }
+            sleep(Duration::from_millis(25));
+        }
+    }
+
+    fn wait_for_swap_clear(swap_path: Option<&str>) {
+        let Some(swap_path) = swap_path.filter(|value| !value.trim().is_empty()) else {
+            return;
+        };
+        for _ in 0..40 {
+            if !Path::new(swap_path).exists() {
+                return;
+            }
+            sleep(Duration::from_millis(25));
+        }
+    }
+
+    fn close_torn_out_source_before_merge(&self, payload: &NvimMergePayload) -> Result<()> {
+        if !payload.source_is_torn_out || payload.source_server_addr == self.server_addr {
+            return Ok(());
+        }
+        Self::remote_expr_on(&payload.source_server_addr, Self::quit_expr())
+            .context("failed to quit torn-out nvim source before merge")?;
+        Self::wait_for_server_exit(&payload.source_server_addr);
+        Self::wait_for_swap_clear(payload.source_swap_path.as_deref());
+        Ok(())
+    }
+
+    fn cleanup_torn_out_source_pane_after_merge(
+        &self,
+        terminal_pid: Option<crate::engine::runtime::ProcessId>,
+        payload: &NvimMergePayload,
+    ) {
+        let Some(terminal_pid) = terminal_pid.map(crate::engine::runtime::ProcessId::get) else {
+            return;
+        };
+        let Some(source_pane_id) = payload.source_pane_id else {
+            return;
+        };
+        if !payload.source_is_torn_out || payload.source_server_addr == self.server_addr {
+            return;
+        }
+        let _ =
+            self.terminal_mux_provider()
+                .send_text_to_pane(terminal_pid, source_pane_id, "exit\n");
     }
 
     fn wait_for_target_nvim(target_socket: &str) -> Result<()> {
@@ -338,13 +524,7 @@ impl Nvim {
             bail!("missing terminal multiplexer pid for nvim tear-out");
         }
 
-        let snapshot = self.current_buffer_snapshot()?;
-        if snapshot.path.is_empty() {
-            bail!("nvim tear-out requires a file-backed buffer");
-        }
-        if snapshot.modified {
-            bail!("nvim tear-out requires a saved buffer; please save first");
-        }
+        let snapshot = self.current_mergeable_snapshot("nvim tear-out")?;
 
         let source_pane_id = self.smart_mux_current_pane_id()?;
         if !self.smart_mux_split_pane(dir)? {
@@ -378,8 +558,8 @@ impl Nvim {
             Self::remote_send_on(&target_socket, &format!("<Esc>{}|", snapshot.col))?;
         }
 
-        // Tear out by closing the source split after target is ready.
-        self.remote_send("<Esc><C-w>c")?;
+        self.remote_expr(Self::tear_out_source_cleanup_expr())
+            .context("failed to remove torn-out buffer from source nvim")?;
         Ok(())
     }
 }
@@ -405,7 +585,7 @@ impl AppAdapter for Nvim {
             resize_internal: false,
             rearrange: false,
             tear_out: false,
-            merge: false,
+            merge: true,
         }
     }
 
@@ -451,6 +631,46 @@ impl TopologyHandler for Nvim {
         // v1: should not be reached — move_decision returns Passthrough at edge.
         bail!("nvim move_out is unreachable; tear-out is handled in move_internal")
     }
+
+    fn merge_execution_mode(&self) -> MergeExecutionMode {
+        MergeExecutionMode::TargetFocused
+    }
+
+    fn prepare_merge(
+        &self,
+        source_pid: Option<crate::engine::runtime::ProcessId>,
+    ) -> Result<MergePreparation> {
+        Ok(MergePreparation::with_payload(NvimMergePayload {
+            snapshot: self.current_mergeable_snapshot("nvim merge-back")?,
+            source_server_addr: self.server_addr.clone(),
+            source_pane_id: source_pid.and_then(|pid| {
+                self.terminal_mux_provider()
+                    .focused_pane_for_pid(pid.get())
+                    .ok()
+            }),
+            source_swap_path: self.current_swap_path()?,
+            source_is_torn_out: self.is_torn_out_instance(),
+        }))
+    }
+
+    fn merge_into_target(
+        &self,
+        dir: Direction,
+        source_pid: Option<crate::engine::runtime::ProcessId>,
+        target_pid: Option<crate::engine::runtime::ProcessId>,
+        preparation: MergePreparation,
+    ) -> Result<()> {
+        let payload = preparation
+            .into_payload::<NvimMergePayload>()
+            .context("nvim merge preparation missing")?;
+        self.close_torn_out_source_before_merge(&payload)?;
+        self.remote_expr(&Self::merge_target_expr(dir, &payload.snapshot))
+            .context("failed to merge nvim buffer into target split")?;
+        if source_pid == target_pid {
+            self.cleanup_torn_out_source_pane_after_merge(target_pid, &payload);
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -460,14 +680,16 @@ mod tests {
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
     use std::path::PathBuf;
+    use std::process::Command;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::{Mutex, OnceLock};
 
-    use super::{Nvim, NvimTerminalMux, ADAPTER_ALIASES};
+    use super::{BufferSnapshot, Nvim, NvimMergePayload, NvimTerminalMux, ADAPTER_ALIASES};
     use crate::engine::contract::{
         AdapterCapabilities, AppAdapter, MoveDecision, TearResult, TerminalMultiplexerProvider,
         TopologyHandler,
     };
+    use crate::engine::runtime::ProcessId;
     use crate::engine::topology::Direction;
 
     static NEXT_ID: AtomicU64 = AtomicU64::new(1);
@@ -621,7 +843,7 @@ mod tests {
         assert!(!caps.resize_internal);
         assert!(!caps.rearrange);
         assert!(!caps.tear_out);
-        assert!(!caps.merge);
+        assert!(caps.merge);
     }
 
     fn sanitize_key(key: &str) -> String {
@@ -635,10 +857,27 @@ mod tests {
                 }
             })
             .collect();
-        if sanitized.len() > 120 {
-            sanitized.truncate(120);
+        let suffix = Command::new("cksum")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .and_then(|mut child| {
+                use std::io::Write;
+                if let Some(stdin) = child.stdin.as_mut() {
+                    let _ = stdin.write_all(key.as_bytes());
+                }
+                child.wait_with_output()
+            })
+            .ok()
+            .and_then(|output| String::from_utf8(output.stdout).ok())
+            .and_then(|stdout| stdout.split_whitespace().next().map(|s| s.to_string()))
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| "0".to_string());
+        let max_prefix_len = 120usize.saturating_sub(suffix.len() + 1);
+        if sanitized.len() > max_prefix_len {
+            sanitized.truncate(max_prefix_len);
         }
-        sanitized
+        format!("{sanitized}_{suffix}")
     }
 
     struct NvimHarness {
@@ -675,6 +914,9 @@ set -eu
 key="$*"
 printf '%s\n' "$key" >> "${NVIM_TEST_LOG}"
 safe_key="$(printf '%s' "$key" | tr -c 'A-Za-z0-9._-' '_' | cut -c1-120)"
+hash_suffix="$(printf '%s' "$key" | cksum | cut -d ' ' -f1)"
+max_prefix_len=$((120 - ${#hash_suffix} - 1))
+safe_key="$(printf '%s' "$safe_key" | cut -c1-"$max_prefix_len")_${hash_suffix}"
 status_file="${NVIM_TEST_RESPONSES_DIR}/${safe_key}.status"
 stdout_file="${NVIM_TEST_RESPONSES_DIR}/${safe_key}.stdout"
 stderr_file="${NVIM_TEST_RESPONSES_DIR}/${safe_key}.stderr"
@@ -794,9 +1036,9 @@ exit "$status"
             "",
         );
         harness.set_nvim_response(
-            "--server /tmp/source.sock --remote-expr json_encode({'path':expand('%:p'),'line':line('.'),'col':col('.'),'modified':&modified})",
+            "--server /tmp/source.sock --remote-expr json_encode({'path':expand('%:p'),'line':line('.'),'col':col('.'),'buftype':&buftype,'modified':&modified})",
             0,
-            r#"{"path":"/tmp/main.rs","line":10,"col":4,"modified":false}"#,
+            r#"{"path":"/tmp/main.rs","line":10,"col":4,"buftype":"","modified":0}"#,
             "",
         );
         harness.set_nvim_response(
@@ -812,6 +1054,15 @@ exit "$status"
             &format!(
                 "--server /tmp/source.sock --remote-expr {}",
                 Nvim::smart_mux_split_pane_expr(dir)
+            ),
+            0,
+            "1\n",
+            "",
+        );
+        harness.set_nvim_response(
+            &format!(
+                "--server /tmp/source.sock --remote-expr {}",
+                Nvim::tear_out_source_cleanup_expr()
             ),
             0,
             "1\n",
@@ -892,6 +1143,107 @@ exit "$status"
     }
 
     #[test]
+    fn current_buffer_snapshot_accepts_numeric_modified_flag() {
+        let _env_guard = env_guard();
+        let harness = NvimHarness::new();
+        let app = test_app();
+
+        harness.set_nvim_response(
+            "--server /tmp/source.sock --remote-expr json_encode({'path':expand('%:p'),'line':line('.'),'col':col('.'),'buftype':&buftype,'modified':&modified})",
+            0,
+            r#"{"path":" /tmp/main.rs ","line":10,"col":4,"buftype":"","modified":0}"#,
+            "",
+        );
+
+        let snapshot = app
+            .current_buffer_snapshot()
+            .expect("numeric modified snapshot should parse");
+
+        assert_eq!(snapshot.path, "/tmp/main.rs");
+        assert_eq!(snapshot.line, 10);
+        assert_eq!(snapshot.col, 4);
+        assert!(!snapshot.modified);
+    }
+
+    #[test]
+    fn smart_mux_luaeval_wraps_statements_in_function_expression() {
+        assert!(Nvim::smart_mux_current_pane_id_expr().contains("(function()"));
+        assert!(Nvim::smart_mux_current_pane_id_expr().contains("end)()"));
+        assert!(Nvim::smart_mux_split_pane_expr(Direction::East).contains("(function()"));
+        assert!(Nvim::smart_mux_split_pane_expr(Direction::East).contains("end)()"));
+    }
+
+    #[test]
+    fn merge_target_expr_uses_valid_lua_function_expression() {
+        let expr = Nvim::merge_target_expr(
+            Direction::East,
+            &BufferSnapshot {
+                path: "/tmp/it's.rs".to_string(),
+                line: 12,
+                col: 7,
+                buftype: String::new(),
+                modified: false,
+            },
+        );
+
+        assert!(expr.starts_with("luaeval('"));
+        assert!(expr.contains("(function()"));
+        assert!(expr.contains("vim.cmd(\"edit \" .. vim.fn.fnameescape("));
+        assert!(expr.contains("vim.fn.cursor(12, 7)"));
+        assert!(expr.contains("/tmp/it''s.rs"));
+        assert!(expr.contains("end)()"));
+        assert!(!expr.contains("execute("));
+    }
+
+    #[test]
+    fn swap_path_expr_uses_buffer_aware_lua_function_expression() {
+        let expr = Nvim::swap_path_expr();
+        assert!(expr.starts_with("luaeval(\""));
+        assert!(expr.contains("(function()"));
+        assert!(expr.contains("vim.fn.swapname(vim.fn.bufnr('%'))"));
+        assert!(expr.contains("end)()"));
+    }
+
+    #[test]
+    fn tear_out_source_cleanup_expr_closes_and_deletes_buffer() {
+        let expr = Nvim::tear_out_source_cleanup_expr();
+        assert!(expr.starts_with("luaeval(\""));
+        assert!(expr.contains("vim.fn.bufnr('%')"));
+        assert!(expr.contains("vim.cmd('silent! close')"));
+        assert!(expr.contains("vim.cmd('silent! bdelete! ' .. bufnr)"));
+    }
+
+    #[test]
+    fn move_internal_tear_out_rejects_terminal_buffers() {
+        let _env_guard = env_guard();
+        let harness = NvimHarness::new();
+        let app = test_app();
+
+        harness.set_nvim_response(
+            "--server /tmp/source.sock --remote-expr winnr()==winnr('l')",
+            0,
+            "1\n",
+            "",
+        );
+        harness.set_nvim_response(
+            "--server /tmp/source.sock --remote-expr json_encode({'path':expand('%:p'),'line':line('.'),'col':col('.'),'buftype':&buftype,'modified':&modified})",
+            0,
+            r#"{"path":"term://~/project//123:/bin/zsh","line":5,"col":3,"buftype":"terminal","modified":0}"#,
+            "",
+        );
+
+        let err = app
+            .move_internal(Direction::East, 7777)
+            .expect_err("terminal buffers should not tear out as file buffers");
+
+        assert!(err.to_string().contains(
+            "nvim tear-out requires a file-backed buffer; current buffer type is terminal"
+        ));
+        let log = harness.nvim_log();
+        assert!(!log.contains("smart-splits.mux"));
+    }
+
+    #[test]
     fn move_internal_tears_out_into_focused_mux_target_after_split() {
         let _env_guard = env_guard();
         let harness = NvimHarness::new();
@@ -912,7 +1264,10 @@ exit "$status"
         assert!(nvim_log.contains("smart-splits.mux"));
         assert!(nvim_log.contains("return mux.split_pane('right')"));
         assert!(nvim_log.contains("--remote-send <Esc>4|"));
-        assert!(nvim_log.contains("--server /tmp/source.sock --remote-send <Esc><C-w>c"));
+        assert!(nvim_log.contains(&format!(
+            "--server /tmp/source.sock --remote-expr {}",
+            Nvim::tear_out_source_cleanup_expr()
+        )));
     }
 
     #[test]
@@ -930,5 +1285,188 @@ exit "$status"
         assert_eq!(send_calls.len(), 1);
         assert_eq!(send_calls[0].0, 6666);
         assert_eq!(send_calls[0].1, 88);
+    }
+
+    #[test]
+    fn prepare_merge_captures_file_backed_snapshot() {
+        let _env_guard = env_guard();
+        let harness = NvimHarness::new();
+        let app = test_app();
+        StubMuxProvider::reset(Some(77), None);
+
+        harness.set_nvim_response(
+            "--server /tmp/source.sock --remote-expr json_encode({'path':expand('%:p'),'line':line('.'),'col':col('.'),'buftype':&buftype,'modified':&modified})",
+            0,
+            r#"{"path":"/tmp/lib.rs","line":12,"col":7,"buftype":"","modified":0}"#,
+            "",
+        );
+        harness.set_nvim_response(
+            &format!(
+                "--server /tmp/source.sock --remote-expr {}",
+                Nvim::swap_path_expr()
+            ),
+            0,
+            "",
+            "",
+        );
+
+        let preparation = TopologyHandler::prepare_merge(&app, ProcessId::new(5555))
+            .expect("prepare_merge should succeed");
+        let payload = preparation
+            .into_payload::<NvimMergePayload>()
+            .expect("merge payload should exist");
+
+        assert_eq!(payload.snapshot.path, "/tmp/lib.rs");
+        assert_eq!(payload.snapshot.line, 12);
+        assert_eq!(payload.snapshot.col, 7);
+        assert_eq!(payload.source_pane_id, Some(77));
+        assert_eq!(payload.source_swap_path, None);
+        assert!(!payload.source_is_torn_out);
+    }
+
+    #[test]
+    fn merge_into_target_opens_buffer_in_target_nvim_split() {
+        let _env_guard = env_guard();
+        let harness = NvimHarness::new();
+        let source = test_app();
+        let target = Nvim::for_test("/tmp/target.sock", NvimTerminalMux::Stub);
+
+        harness.set_nvim_response(
+            "--server /tmp/source.sock --remote-expr json_encode({'path':expand('%:p'),'line':line('.'),'col':col('.'),'buftype':&buftype,'modified':&modified})",
+            0,
+            r#"{"path":"/tmp/lib.rs","line":12,"col":7,"buftype":"","modified":0}"#,
+            "",
+        );
+        harness.set_nvim_response(
+            &format!(
+                "--server /tmp/source.sock --remote-expr {}",
+                Nvim::swap_path_expr()
+            ),
+            0,
+            "",
+            "",
+        );
+        harness.set_nvim_response(
+            &format!(
+                "--server /tmp/target.sock --remote-expr {}",
+                Nvim::merge_target_expr(
+                    Direction::East,
+                    &BufferSnapshot {
+                        path: "/tmp/lib.rs".to_string(),
+                        line: 12,
+                        col: 7,
+                        buftype: String::new(),
+                        modified: false,
+                    }
+                )
+            ),
+            0,
+            "1\n",
+            "",
+        );
+
+        let preparation =
+            TopologyHandler::prepare_merge(&source, None).expect("prepare_merge should succeed");
+        TopologyHandler::merge_into_target(&target, Direction::East, None, None, preparation)
+            .expect("merge_into_target should succeed");
+
+        let log = harness.nvim_log();
+        assert!(log.contains("--server /tmp/target.sock --remote-expr"));
+        assert!(log.contains("topleft vsplit"));
+        assert!(log.contains("edit "));
+        assert!(log.contains("vim.fn.cursor(12, 7)"));
+    }
+
+    #[test]
+    fn merge_into_target_closes_torn_out_source_pane_after_same_terminal_merge() {
+        let _env_guard = env_guard();
+        let harness = NvimHarness::new();
+        let source = Nvim::for_test("/tmp/tearout-123.sock", NvimTerminalMux::Stub);
+        let target = Nvim::for_test("/tmp/target.sock", NvimTerminalMux::Stub);
+        StubMuxProvider::reset(Some(99), None);
+        let swap_path = harness.base.join(".lib.rs.swp");
+
+        harness.set_nvim_response(
+            "--server /tmp/tearout-123.sock --remote-expr json_encode({'path':expand('%:p'),'line':line('.'),'col':col('.'),'buftype':&buftype,'modified':&modified})",
+            0,
+            r#"{"path":"/tmp/lib.rs","line":12,"col":7,"buftype":"","modified":0}"#,
+            "",
+        );
+        harness.set_nvim_response(
+            &format!(
+                "--server /tmp/tearout-123.sock --remote-expr {}",
+                Nvim::swap_path_expr()
+            ),
+            0,
+            &format!("{}\n", swap_path.display()),
+            "",
+        );
+        harness.set_nvim_response(
+            &format!(
+                "--server /tmp/target.sock --remote-expr {}",
+                Nvim::merge_target_expr(
+                    Direction::East,
+                    &BufferSnapshot {
+                        path: "/tmp/lib.rs".to_string(),
+                        line: 12,
+                        col: 7,
+                        buftype: String::new(),
+                        modified: false,
+                    }
+                )
+            ),
+            0,
+            "1\n",
+            "",
+        );
+        harness.set_nvim_response(
+            &format!(
+                "--server /tmp/tearout-123.sock --remote-expr {}",
+                Nvim::quit_expr()
+            ),
+            0,
+            "1\n",
+            "",
+        );
+        harness.set_nvim_response(
+            "--server /tmp/tearout-123.sock --remote-expr 1",
+            1,
+            "",
+            "closed",
+        );
+        fs::write(&swap_path, "").expect("swapfile placeholder should exist");
+
+        let preparation = TopologyHandler::prepare_merge(&source, ProcessId::new(7777))
+            .expect("prepare_merge should succeed");
+        fs::remove_file(&swap_path).expect("swapfile placeholder should be removable");
+        TopologyHandler::merge_into_target(
+            &target,
+            Direction::East,
+            ProcessId::new(7777),
+            ProcessId::new(7777),
+            preparation,
+        )
+        .expect("merge_into_target should succeed");
+
+        let log = harness.nvim_log();
+        assert!(log.contains("--server /tmp/tearout-123.sock --remote-expr"));
+        let quit_pos = log
+            .find(&format!(
+                "--server /tmp/tearout-123.sock --remote-expr {}",
+                Nvim::quit_expr()
+            ))
+            .expect("quit command should be logged");
+        let target_pos = log
+            .find("--server /tmp/target.sock --remote-expr")
+            .expect("target merge command should be logged");
+        assert!(
+            quit_pos < target_pos,
+            "source should quit before target opens file"
+        );
+        let send_calls = StubMuxProvider::send_calls();
+        assert_eq!(send_calls.len(), 1);
+        assert_eq!(send_calls[0].0, 7777);
+        assert_eq!(send_calls[0].1, 99);
+        assert_eq!(send_calls[0].2, "exit\n");
     }
 }

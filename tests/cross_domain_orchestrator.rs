@@ -1,6 +1,10 @@
 use std::any::TypeId;
+use std::ffi::OsString;
+use std::fs;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::{Mutex, OnceLock};
 
 use anyhow::{anyhow, Result};
 
@@ -139,6 +143,43 @@ struct FakeWindowManager {
     move_calls: usize,
 }
 
+fn env_guard() -> std::sync::MutexGuard<'static, ()> {
+    static ENV_GUARD: OnceLock<Mutex<()>> = OnceLock::new();
+    ENV_GUARD
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .expect("env guard should lock")
+}
+
+fn set_env(key: &str, value: Option<&std::path::Path>) -> Option<OsString> {
+    let old = std::env::var_os(key);
+    if let Some(value) = value {
+        std::env::set_var(key, value);
+    } else {
+        std::env::remove_var(key);
+    }
+    old
+}
+
+fn restore_env(key: &str, old: Option<OsString>) {
+    if let Some(value) = old {
+        std::env::set_var(key, value);
+    } else {
+        std::env::remove_var(key);
+    }
+}
+
+fn unique_temp_dir(prefix: &str) -> PathBuf {
+    std::env::temp_dir().join(format!(
+        "yeet-and-yoink-cross-domain-{prefix}-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock should be monotonic")
+            .as_nanos()
+    ))
+}
+
 impl WindowManagerMetadata for FakeWindowManager {
     fn adapter_name(&self) -> &'static str {
         "fake"
@@ -246,6 +287,25 @@ impl WindowManagerExecution for FakeWindowManager {
 
 #[test]
 fn nvim_to_wezterm_cross_domain_move_uses_transfer_pipeline() {
+    let _guard = env_guard();
+    let root = unique_temp_dir("nvim-wezterm");
+    let config_dir = root.join("yeet-and-yoink");
+    fs::create_dir_all(&config_dir).expect("config dir should be created");
+    let config_path = config_dir.join("config.toml");
+    fs::write(
+        &config_path,
+        r#"
+[app.editor.emacs]
+enabled = true
+
+[app.terminal.wezterm]
+enabled = true
+"#,
+    )
+    .expect("config file should be writable");
+    let old_override = set_env("NIRI_DEEP_CONFIG", Some(&config_path));
+    yeet_and_yoink::config::prepare().expect("config should load");
+
     let mut orchestrator = Orchestrator::default();
     let nvim_counters = DomainCounters::default();
     let wezterm_counters = DomainCounters::default();
@@ -299,10 +359,30 @@ fn nvim_to_wezterm_cross_domain_move_uses_transfer_pipeline() {
     assert_eq!(wm.move_calls, 0);
     assert_eq!(nvim_counters.tear_off_calls.load(Ordering::Relaxed), 1);
     assert_eq!(wezterm_counters.merge_calls.load(Ordering::Relaxed), 1);
+
+    restore_env("NIRI_DEEP_CONFIG", old_override);
+    yeet_and_yoink::config::prepare().expect("config should reload");
+    let _ = fs::remove_dir_all(root);
 }
 
 #[test]
 fn wezterm_to_wm_cross_domain_move_falls_back_when_transfer_is_unsupported() {
+    let _guard = env_guard();
+    let root = unique_temp_dir("wezterm-wm");
+    let config_dir = root.join("yeet-and-yoink");
+    fs::create_dir_all(&config_dir).expect("config dir should be created");
+    let config_path = config_dir.join("config.toml");
+    fs::write(
+        &config_path,
+        r#"
+[app.terminal.wezterm]
+enabled = true
+"#,
+    )
+    .expect("config file should be writable");
+    let old_override = set_env("NIRI_DEEP_CONFIG", Some(&config_path));
+    yeet_and_yoink::config::prepare().expect("config should load");
+
     let mut orchestrator = Orchestrator::default();
     let wezterm_counters = DomainCounters::default();
     let wm_counters = DomainCounters::default();
@@ -356,4 +436,8 @@ fn wezterm_to_wm_cross_domain_move_falls_back_when_transfer_is_unsupported() {
     assert_eq!(wm.move_calls, 1);
     assert_eq!(wezterm_counters.tear_off_calls.load(Ordering::Relaxed), 1);
     assert_eq!(wm_counters.merge_calls.load(Ordering::Relaxed), 0);
+
+    restore_env("NIRI_DEEP_CONFIG", old_override);
+    yeet_and_yoink::config::prepare().expect("config should reload");
+    let _ = fs::remove_dir_all(root);
 }
