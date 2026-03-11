@@ -13,7 +13,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tungstenite::{client::client, Message, WebSocket};
 
 use crate::adapters::apps::AppAdapter;
-use crate::config::EditorTearOffScope;
+use crate::config::{self, EditorTearOffScope};
 use crate::engine::contract::{
     AdapterCapabilities, AppKind, MergeExecutionMode, MergePreparation, MoveDecision, TearResult,
     TopologyHandler,
@@ -23,17 +23,9 @@ use crate::engine::topology::Direction;
 use crate::logging;
 
 const ADAPTER_NAME: &str = "vscode";
-const DEFAULT_REMOTE_CONTROL_HOST: &str = "127.0.0.1";
-const DEFAULT_REMOTE_CONTROL_PORT: u16 = 3710;
 const ADAPTER_ALIASES: &[&str] = &["vscode"];
-const REMOTE_CONTROL_HOST_ENV: &str = "NIRI_DEEP_VSCODE_REMOTE_CONTROL_HOST";
-const REMOTE_CONTROL_PORT_ENV: &str = "NIRI_DEEP_VSCODE_REMOTE_CONTROL_PORT";
-const STATE_FILE_ENV: &str = "NIRI_DEEP_VSCODE_STATE_FILE";
-const FOCUS_SETTLE_ENV: &str = "NIRI_DEEP_VSCODE_FOCUS_SETTLE_MS";
 const PROCESS_REMOTE_CONTROL_PORT_ENV: &str = "REMOTE_CONTROL_PORT";
-const TEST_CLIPBOARD_FILE_ENV: &str = "NIRI_DEEP_VSCODE_TEST_CLIPBOARD_FILE";
 const REMOTE_CONTROL_TIMEOUT: Duration = Duration::from_secs(1);
-const DEFAULT_FOCUS_SETTLE_DELAY: Duration = Duration::from_millis(50);
 const RESTORE_SETTLE_DELAY: Duration = Duration::from_millis(50);
 const CLIPBOARD_SETTLE_DELAY: Duration = Duration::from_millis(20);
 const MAX_CAPTURED_GROUP_TABS: usize = 64;
@@ -415,19 +407,11 @@ impl Vscode {
     }
 
     fn remote_control_host() -> String {
-        std::env::var(REMOTE_CONTROL_HOST_ENV)
-            .ok()
-            .map(|value| value.trim().to_string())
-            .filter(|value| !value.is_empty())
-            .unwrap_or_else(|| DEFAULT_REMOTE_CONTROL_HOST.to_string())
+        config::vscode_remote_control_host()
     }
 
     fn focus_settle_delay() -> Duration {
-        std::env::var(FOCUS_SETTLE_ENV)
-            .ok()
-            .and_then(|value| value.trim().parse::<u64>().ok())
-            .map(Duration::from_millis)
-            .unwrap_or(DEFAULT_FOCUS_SETTLE_DELAY)
+        config::vscode_focus_settle_delay()
     }
 
     fn parse_port(value: &str, source: &str) -> Result<u16> {
@@ -467,11 +451,8 @@ impl Vscode {
 
     fn candidate_ports(pid: u32) -> Result<Vec<u16>> {
         let _span = tracing::debug_span!("vscode.candidate_ports", pid = pid).entered();
-        if let Ok(value) = std::env::var(REMOTE_CONTROL_PORT_ENV) {
-            let value = value.trim();
-            if !value.is_empty() {
-                return Ok(vec![Self::parse_port(value, REMOTE_CONTROL_PORT_ENV)?]);
-            }
+        if let Some(port) = config::vscode_remote_control_port() {
+            return Ok(vec![port]);
         }
 
         let mut ports = Vec::new();
@@ -497,7 +478,7 @@ impl Vscode {
             Self::push_unique_port(&mut ports, port);
         }
 
-        Self::push_unique_port(&mut ports, DEFAULT_REMOTE_CONTROL_PORT);
+        Self::push_unique_port(&mut ports, config::DEFAULT_VSCODE_REMOTE_CONTROL_PORT);
         Ok(ports)
     }
 
@@ -931,11 +912,8 @@ impl Vscode {
     }
 
     fn state_file_path() -> PathBuf {
-        if let Ok(path) = std::env::var(STATE_FILE_ENV) {
-            let path = path.trim();
-            if !path.is_empty() {
-                return PathBuf::from(path);
-            }
+        if let Some(path) = config::vscode_state_file_path() {
+            return path;
         }
 
         let base = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".to_string());
@@ -1029,11 +1007,7 @@ impl Vscode {
     }
 
     fn clipboard_file_override() -> Option<PathBuf> {
-        std::env::var(TEST_CLIPBOARD_FILE_ENV)
-            .ok()
-            .map(|value| value.trim().to_string())
-            .filter(|value| !value.is_empty())
-            .map(PathBuf::from)
+        config::vscode_test_clipboard_file()
     }
 
     fn read_clipboard_text() -> Result<String> {
@@ -1668,7 +1642,6 @@ mod tests {
     use crate::engine::runtime::ProcessId;
     use crate::engine::topology::Direction;
     use crate::utils::env_guard;
-    use std::ffi::OsString;
     use std::fs;
     use std::net::TcpListener;
     use std::path::PathBuf;
@@ -1685,29 +1658,41 @@ mod tests {
         std::env::temp_dir().join(format!("yeet-and-yoink-{label}-{stamp}"))
     }
 
-    fn set_env(key: &str, value: Option<&str>) -> Option<OsString> {
-        let old = std::env::var_os(key);
-        if let Some(value) = value {
-            std::env::set_var(key, value);
-        } else {
-            std::env::remove_var(key);
-        }
+    fn update_vscode_runtime(mutator: impl FnOnce(&mut config::VscodeRuntimeConfig)) {
+        config::update(|cfg| mutator(&mut cfg.runtime.vscode));
+    }
+
+    fn set_focus_settle_immediate() -> Option<u64> {
+        let old = config::snapshot().runtime.vscode.focus_settle_ms;
+        update_vscode_runtime(|runtime| runtime.focus_settle_ms = Some(0));
         old
     }
 
-    fn restore_env(key: &str, old: Option<OsString>) {
-        if let Some(old) = old {
-            std::env::set_var(key, old);
-        } else {
-            std::env::remove_var(key);
-        }
+    fn restore_focus_settle(old: Option<u64>) {
+        update_vscode_runtime(|runtime| runtime.focus_settle_ms = old);
     }
 
-    fn set_focus_settle_immediate() -> Option<OsString> {
-        set_env(super::FOCUS_SETTLE_ENV, Some("0"))
+    fn set_remote_control_port(port: u16) -> Option<u16> {
+        let old = config::snapshot().runtime.vscode.remote_control_port;
+        update_vscode_runtime(|runtime| runtime.remote_control_port = Some(port));
+        old
     }
 
-    fn load_vscode_config(root: &PathBuf, scope: Option<EditorTearOffScope>) -> Option<OsString> {
+    fn restore_remote_control_port(old: Option<u16>) {
+        update_vscode_runtime(|runtime| runtime.remote_control_port = old);
+    }
+
+    fn set_state_file(path: &PathBuf) -> Option<PathBuf> {
+        let old = config::snapshot().runtime.vscode.state_file.clone();
+        update_vscode_runtime(|runtime| runtime.state_file = Some(path.clone()));
+        old
+    }
+
+    fn restore_state_file(old: Option<PathBuf>) {
+        update_vscode_runtime(|runtime| runtime.state_file = old);
+    }
+
+    fn load_vscode_config(root: &PathBuf, scope: Option<EditorTearOffScope>) -> config::Config {
         load_vscode_config_with_terminal(root, scope, false)
     }
 
@@ -1715,7 +1700,7 @@ mod tests {
         root: &PathBuf,
         scope: Option<EditorTearOffScope>,
         manage_terminal: bool,
-    ) -> Option<OsString> {
+    ) -> config::Config {
         let config_path = root.join("config.toml");
         let mut config = String::from("[app.editor.vscode]\nenabled = true\n");
         if manage_terminal {
@@ -1732,24 +1717,25 @@ mod tests {
             ));
         }
         fs::write(&config_path, config).expect("config file should be written");
-        let old = set_env(
-            "NIRI_DEEP_CONFIG",
-            Some(config_path.to_str().expect("utf-8 path")),
-        );
-        config::prepare().expect("config should load");
+        let old = config::snapshot();
+        let runtime = old.runtime.clone();
+        config::prepare_with_path(Some(&config_path)).expect("config should load");
+        config::update(|cfg| cfg.runtime = runtime);
         old
     }
 
-    fn restore_config(old: Option<OsString>) {
-        restore_env("NIRI_DEEP_CONFIG", old);
-        config::prepare().expect("config should reload");
+    fn restore_config(old: config::Config) {
+        config::install(old);
     }
 
-    fn set_clipboard_file(path: &PathBuf) -> Option<OsString> {
-        set_env(
-            super::TEST_CLIPBOARD_FILE_ENV,
-            Some(path.to_str().expect("utf-8 path")),
-        )
+    fn set_clipboard_file(path: &PathBuf) -> Option<PathBuf> {
+        let old = config::snapshot().runtime.vscode.test_clipboard_file.clone();
+        update_vscode_runtime(|runtime| runtime.test_clipboard_file = Some(path.clone()));
+        old
+    }
+
+    fn restore_clipboard_file(old: Option<PathBuf>) {
+        update_vscode_runtime(|runtime| runtime.test_clipboard_file = old);
     }
 
     fn two_column_layout_json() -> &'static str {
@@ -1968,14 +1954,8 @@ mod tests {
         fs::create_dir_all(&root).expect("temp dir should be created");
         let state_file = root.join("state.json");
         let server = TestWsServer::spawn(vec![Some(two_column_layout_json())]);
-        let old_port = set_env(
-            super::REMOTE_CONTROL_PORT_ENV,
-            Some(&server.port.to_string()),
-        );
-        let old_state = set_env(
-            super::STATE_FILE_ENV,
-            Some(state_file.to_str().expect("utf-8 path")),
-        );
+        let old_port = set_remote_control_port(server.port);
+        let old_state = set_state_file(&state_file);
 
         let app = Vscode;
         let count = TopologyHandler::window_count(&app, 42).expect("layout query should succeed");
@@ -1985,8 +1965,8 @@ mod tests {
         assert_eq!(payloads.len(), 1);
         assert!(payloads[0].contains("\"command\":\"vscode.getEditorLayout\""));
 
-        restore_env(super::REMOTE_CONTROL_PORT_ENV, old_port);
-        restore_env(super::STATE_FILE_ENV, old_state);
+        restore_remote_control_port(old_port);
+        restore_state_file(old_state);
         let _ = fs::remove_dir_all(root);
     }
 
@@ -2016,7 +1996,7 @@ mod tests {
                 .expect("test should release server");
             let _ = socket.close(None);
         });
-        let old_port = set_env(super::REMOTE_CONTROL_PORT_ENV, Some(&port.to_string()));
+        let old_port = set_remote_control_port(port);
 
         let (done_tx, done_rx) = mpsc::channel();
         let command_handle = thread::spawn(move || {
@@ -2042,7 +2022,7 @@ mod tests {
             .join()
             .expect("server thread should join cleanly");
 
-        restore_env(super::REMOTE_CONTROL_PORT_ENV, old_port);
+        restore_remote_control_port(old_port);
     }
 
     #[test]
@@ -2052,14 +2032,8 @@ mod tests {
         fs::create_dir_all(&root).expect("temp dir should be created");
         let state_file = root.join("state.json");
         let server = TestWsServer::spawn(vec![Some(two_column_layout_json()), None]);
-        let old_port = set_env(
-            super::REMOTE_CONTROL_PORT_ENV,
-            Some(&server.port.to_string()),
-        );
-        let old_state = set_env(
-            super::STATE_FILE_ENV,
-            Some(state_file.to_str().expect("utf-8 path")),
-        );
+        let old_port = set_remote_control_port(server.port);
+        let old_state = set_state_file(&state_file);
         let old_settle = set_focus_settle_immediate();
 
         let app = Vscode;
@@ -2075,9 +2049,9 @@ mod tests {
                 || state.contains("\"possible_leaves\":[0]")
         );
 
-        restore_env(super::REMOTE_CONTROL_PORT_ENV, old_port);
-        restore_env(super::STATE_FILE_ENV, old_state);
-        restore_env(super::FOCUS_SETTLE_ENV, old_settle);
+        restore_remote_control_port(old_port);
+        restore_state_file(old_state);
+        restore_focus_settle(old_settle);
         let _ = fs::remove_dir_all(root);
     }
 
@@ -2088,14 +2062,8 @@ mod tests {
         fs::create_dir_all(&root).expect("temp dir should be created");
         let state_file = root.join("state.json");
         let server = TestWsServer::spawn(vec![Some(two_column_layout_json())]);
-        let old_port = set_env(
-            super::REMOTE_CONTROL_PORT_ENV,
-            Some(&server.port.to_string()),
-        );
-        let old_state = set_env(
-            super::STATE_FILE_ENV,
-            Some(state_file.to_str().expect("utf-8 path")),
-        );
+        let old_port = set_remote_control_port(server.port);
+        let old_state = set_state_file(&state_file);
 
         let pid = 188;
         Vscode::store_window_state(
@@ -2123,8 +2091,8 @@ mod tests {
         assert_eq!(payloads.len(), 1);
         assert!(payloads[0].contains("\"command\":\"vscode.getEditorLayout\""));
 
-        restore_env(super::REMOTE_CONTROL_PORT_ENV, old_port);
-        restore_env(super::STATE_FILE_ENV, old_state);
+        restore_remote_control_port(old_port);
+        restore_state_file(old_state);
         let _ = fs::remove_dir_all(root);
     }
 
@@ -2135,14 +2103,8 @@ mod tests {
         fs::create_dir_all(&root).expect("temp dir should be created");
         let state_file = root.join("state.json");
         let server = TestWsServer::spawn(vec![Some(two_column_layout_json()), None]);
-        let old_port = set_env(
-            super::REMOTE_CONTROL_PORT_ENV,
-            Some(&server.port.to_string()),
-        );
-        let old_state = set_env(
-            super::STATE_FILE_ENV,
-            Some(state_file.to_str().expect("utf-8 path")),
-        );
+        let old_port = set_remote_control_port(server.port);
+        let old_state = set_state_file(&state_file);
         let old_settle = set_focus_settle_immediate();
 
         let pid = 189;
@@ -2171,9 +2133,9 @@ mod tests {
         assert_eq!(payloads.len(), 2);
         assert!(payloads[1].contains("\"command\":\"workbench.action.focusLeftGroupWithoutWrap\""));
 
-        restore_env(super::REMOTE_CONTROL_PORT_ENV, old_port);
-        restore_env(super::STATE_FILE_ENV, old_state);
-        restore_env(super::FOCUS_SETTLE_ENV, old_settle);
+        restore_remote_control_port(old_port);
+        restore_state_file(old_state);
+        restore_focus_settle(old_settle);
         let _ = fs::remove_dir_all(root);
     }
 
@@ -2189,14 +2151,8 @@ mod tests {
             Some(single_group_layout_json()),
             None,
         ]);
-        let old_port = set_env(
-            super::REMOTE_CONTROL_PORT_ENV,
-            Some(&server.port.to_string()),
-        );
-        let old_state = set_env(
-            super::STATE_FILE_ENV,
-            Some(state_file.to_str().expect("utf-8 path")),
-        );
+        let old_port = set_remote_control_port(server.port);
+        let old_state = set_state_file(&state_file);
         let old_settle = set_focus_settle_immediate();
 
         let app = Vscode;
@@ -2208,9 +2164,9 @@ mod tests {
         assert!(payloads[1].contains("\"command\":\"workbench.action.focusSideBar\""));
         assert!(payloads[3].contains("\"command\":\"workbench.action.focusActiveEditorGroup\""));
 
-        restore_env(super::REMOTE_CONTROL_PORT_ENV, old_port);
-        restore_env(super::STATE_FILE_ENV, old_state);
-        restore_env(super::FOCUS_SETTLE_ENV, old_settle);
+        restore_remote_control_port(old_port);
+        restore_state_file(old_state);
+        restore_focus_settle(old_settle);
         let _ = fs::remove_dir_all(root);
     }
 
@@ -2225,14 +2181,8 @@ mod tests {
             Some(single_group_layout_json()),
             None,
         ]);
-        let old_port = set_env(
-            super::REMOTE_CONTROL_PORT_ENV,
-            Some(&server.port.to_string()),
-        );
-        let old_state = set_env(
-            super::STATE_FILE_ENV,
-            Some(state_file.to_str().expect("utf-8 path")),
-        );
+        let old_port = set_remote_control_port(server.port);
+        let old_state = set_state_file(&state_file);
         let old_settle = set_focus_settle_immediate();
         let old_config = load_vscode_config_with_terminal(&root, None, true);
 
@@ -2265,9 +2215,9 @@ mod tests {
                 || state.contains("\"surface\":\"terminal\"")
         );
 
-        restore_env(super::REMOTE_CONTROL_PORT_ENV, old_port);
-        restore_env(super::STATE_FILE_ENV, old_state);
-        restore_env(super::FOCUS_SETTLE_ENV, old_settle);
+        restore_remote_control_port(old_port);
+        restore_state_file(old_state);
+        restore_focus_settle(old_settle);
         restore_config(old_config);
         let _ = fs::remove_dir_all(root);
     }
@@ -2279,14 +2229,8 @@ mod tests {
         fs::create_dir_all(&root).expect("temp dir should be created");
         let state_file = root.join("state.json");
         let server = TestWsServer::spawn(vec![Some(single_group_layout_json())]);
-        let old_port = set_env(
-            super::REMOTE_CONTROL_PORT_ENV,
-            Some(&server.port.to_string()),
-        );
-        let old_state = set_env(
-            super::STATE_FILE_ENV,
-            Some(state_file.to_str().expect("utf-8 path")),
-        );
+        let old_port = set_remote_control_port(server.port);
+        let old_state = set_state_file(&state_file);
         let old_config = load_vscode_config_with_terminal(&root, None, true);
 
         let pid = 409;
@@ -2312,8 +2256,8 @@ mod tests {
         assert_eq!(payloads.len(), 1);
         assert!(payloads[0].contains("\"command\":\"vscode.getEditorLayout\""));
 
-        restore_env(super::REMOTE_CONTROL_PORT_ENV, old_port);
-        restore_env(super::STATE_FILE_ENV, old_state);
+        restore_remote_control_port(old_port);
+        restore_state_file(old_state);
         restore_config(old_config);
         let _ = fs::remove_dir_all(root);
     }
@@ -2329,14 +2273,8 @@ mod tests {
             None,
             Some(two_column_layout_json()),
         ]);
-        let old_port = set_env(
-            super::REMOTE_CONTROL_PORT_ENV,
-            Some(&server.port.to_string()),
-        );
-        let old_state = set_env(
-            super::STATE_FILE_ENV,
-            Some(state_file.to_str().expect("utf-8 path")),
-        );
+        let old_port = set_remote_control_port(server.port);
+        let old_state = set_state_file(&state_file);
         let old_settle = set_focus_settle_immediate();
 
         let app = Vscode;
@@ -2349,9 +2287,9 @@ mod tests {
         assert_eq!(payloads.len(), 3);
         assert!(payloads[2].contains("\"command\":\"vscode.getEditorLayout\""));
 
-        restore_env(super::REMOTE_CONTROL_PORT_ENV, old_port);
-        restore_env(super::STATE_FILE_ENV, old_state);
-        restore_env(super::FOCUS_SETTLE_ENV, old_settle);
+        restore_remote_control_port(old_port);
+        restore_state_file(old_state);
+        restore_focus_settle(old_settle);
         let _ = fs::remove_dir_all(root);
     }
 
@@ -2362,14 +2300,8 @@ mod tests {
         fs::create_dir_all(&root).expect("temp dir should be created");
         let state_file = root.join("state.json");
         let server = TestWsServer::spawn(vec![Some(two_column_layout_json())]);
-        let old_port = set_env(
-            super::REMOTE_CONTROL_PORT_ENV,
-            Some(&server.port.to_string()),
-        );
-        let old_state = set_env(
-            super::STATE_FILE_ENV,
-            Some(state_file.to_str().expect("utf-8 path")),
-        );
+        let old_port = set_remote_control_port(server.port);
+        let old_state = set_state_file(&state_file);
 
         let pid = 190;
         Vscode::store_window_state(
@@ -2398,8 +2330,8 @@ mod tests {
         assert_eq!(payloads.len(), 1);
         assert!(payloads[0].contains("\"command\":\"vscode.getEditorLayout\""));
 
-        restore_env(super::REMOTE_CONTROL_PORT_ENV, old_port);
-        restore_env(super::STATE_FILE_ENV, old_state);
+        restore_remote_control_port(old_port);
+        restore_state_file(old_state);
         let _ = fs::remove_dir_all(root);
     }
 
@@ -2414,14 +2346,8 @@ mod tests {
             None,
             Some(two_row_layout_json()),
         ]);
-        let old_port = set_env(
-            super::REMOTE_CONTROL_PORT_ENV,
-            Some(&server.port.to_string()),
-        );
-        let old_state = set_env(
-            super::STATE_FILE_ENV,
-            Some(state_file.to_str().expect("utf-8 path")),
-        );
+        let old_port = set_remote_control_port(server.port);
+        let old_state = set_state_file(&state_file);
         let old_settle = set_focus_settle_immediate();
         let old_config = load_vscode_config(&root, None);
 
@@ -2446,9 +2372,9 @@ mod tests {
         assert_eq!(payloads.len(), 3);
         assert!(payloads[1].contains("\"command\":\"workbench.action.moveEditorToBelowGroup\""));
 
-        restore_env(super::REMOTE_CONTROL_PORT_ENV, old_port);
-        restore_env(super::STATE_FILE_ENV, old_state);
-        restore_env(super::FOCUS_SETTLE_ENV, old_settle);
+        restore_remote_control_port(old_port);
+        restore_state_file(old_state);
+        restore_focus_settle(old_settle);
         restore_config(old_config);
         let _ = fs::remove_dir_all(root);
     }
@@ -2464,14 +2390,8 @@ mod tests {
             None,
             Some(single_group_layout_json()),
         ]);
-        let old_port = set_env(
-            super::REMOTE_CONTROL_PORT_ENV,
-            Some(&server.port.to_string()),
-        );
-        let old_state = set_env(
-            super::STATE_FILE_ENV,
-            Some(state_file.to_str().expect("utf-8 path")),
-        );
+        let old_port = set_remote_control_port(server.port);
+        let old_state = set_state_file(&state_file);
         let old_settle = set_focus_settle_immediate();
         let old_config = load_vscode_config(&root, Some(EditorTearOffScope::Window));
 
@@ -2484,9 +2404,9 @@ mod tests {
         assert!(payloads[1].contains("\"command\":\"workbench.action.moveEditorGroupToNewWindow\""));
         assert!(payloads[2].contains("\"command\":\"vscode.getEditorLayout\""));
 
-        restore_env(super::REMOTE_CONTROL_PORT_ENV, old_port);
-        restore_env(super::STATE_FILE_ENV, old_state);
-        restore_env(super::FOCUS_SETTLE_ENV, old_settle);
+        restore_remote_control_port(old_port);
+        restore_state_file(old_state);
+        restore_focus_settle(old_settle);
         restore_config(old_config);
         let _ = fs::remove_dir_all(root);
     }
@@ -2502,14 +2422,8 @@ mod tests {
             None,
             Some(single_group_layout_json()),
         ]);
-        let old_port = set_env(
-            super::REMOTE_CONTROL_PORT_ENV,
-            Some(&server.port.to_string()),
-        );
-        let old_state = set_env(
-            super::STATE_FILE_ENV,
-            Some(state_file.to_str().expect("utf-8 path")),
-        );
+        let old_port = set_remote_control_port(server.port);
+        let old_state = set_state_file(&state_file);
         let old_settle = set_focus_settle_immediate();
         let old_config = load_vscode_config_with_terminal(&root, None, true);
 
@@ -2537,9 +2451,9 @@ mod tests {
         assert!(payloads[1].contains("\"command\":\"workbench.action.terminal.moveIntoNewWindow\""));
         assert!(payloads[2].contains("\"command\":\"vscode.getEditorLayout\""));
 
-        restore_env(super::REMOTE_CONTROL_PORT_ENV, old_port);
-        restore_env(super::STATE_FILE_ENV, old_state);
-        restore_env(super::FOCUS_SETTLE_ENV, old_settle);
+        restore_remote_control_port(old_port);
+        restore_state_file(old_state);
+        restore_focus_settle(old_settle);
         restore_config(old_config);
         let _ = fs::remove_dir_all(root);
     }
@@ -2573,7 +2487,7 @@ mod tests {
             let _ = socket.close(None);
             payload
         });
-        let old_port = set_env(super::REMOTE_CONTROL_PORT_ENV, Some(&port.to_string()));
+        let old_port = set_remote_control_port(port);
         let old_clipboard = set_clipboard_file(&clipboard_file);
         let old_config = load_vscode_config(&root, Some(EditorTearOffScope::Buffer));
 
@@ -2596,8 +2510,8 @@ mod tests {
             "previous clipboard"
         );
 
-        restore_env(super::REMOTE_CONTROL_PORT_ENV, old_port);
-        restore_env(super::TEST_CLIPBOARD_FILE_ENV, old_clipboard);
+        restore_remote_control_port(old_port);
+        restore_clipboard_file(old_clipboard);
         restore_config(old_config);
         let _ = fs::remove_dir_all(root);
     }
@@ -2610,10 +2524,7 @@ mod tests {
         let clipboard_file = root.join("clipboard.txt");
         fs::write(&clipboard_file, "previous clipboard").expect("clipboard seed should be written");
         let server = TestWsServer::spawn(vec![Some(single_group_layout_json()), None]);
-        let old_port = set_env(
-            super::REMOTE_CONTROL_PORT_ENV,
-            Some(&server.port.to_string()),
-        );
+        let old_port = set_remote_control_port(server.port);
         let old_clipboard = set_clipboard_file(&clipboard_file);
         let old_config =
             load_vscode_config_with_terminal(&root, Some(EditorTearOffScope::Buffer), true);
@@ -2637,8 +2548,8 @@ mod tests {
             "previous clipboard"
         );
 
-        restore_env(super::REMOTE_CONTROL_PORT_ENV, old_port);
-        restore_env(super::TEST_CLIPBOARD_FILE_ENV, old_clipboard);
+        restore_remote_control_port(old_port);
+        restore_clipboard_file(old_clipboard);
         restore_config(old_config);
         let _ = fs::remove_dir_all(root);
     }
@@ -2651,14 +2562,8 @@ mod tests {
         let state_file = root.join("state.json");
         let server =
             TestWsServer::spawn(vec![None, None, None, None, Some(two_column_layout_json())]);
-        let old_port = set_env(
-            super::REMOTE_CONTROL_PORT_ENV,
-            Some(&server.port.to_string()),
-        );
-        let old_state = set_env(
-            super::STATE_FILE_ENV,
-            Some(state_file.to_str().expect("utf-8 path")),
-        );
+        let old_port = set_remote_control_port(server.port);
+        let old_state = set_state_file(&state_file);
         let old_settle = set_focus_settle_immediate();
         let old_config = load_vscode_config(&root, Some(EditorTearOffScope::Buffer));
 
@@ -2683,9 +2588,9 @@ mod tests {
         assert!(payloads[3].contains("\"command\":\"workbench.action.closeOtherEditors\""));
         assert!(payloads[4].contains("\"command\":\"vscode.getEditorLayout\""));
 
-        restore_env(super::REMOTE_CONTROL_PORT_ENV, old_port);
-        restore_env(super::STATE_FILE_ENV, old_state);
-        restore_env(super::FOCUS_SETTLE_ENV, old_settle);
+        restore_remote_control_port(old_port);
+        restore_state_file(old_state);
+        restore_focus_settle(old_settle);
         restore_config(old_config);
         let _ = fs::remove_dir_all(root);
     }
@@ -2743,7 +2648,7 @@ mod tests {
             }
             payloads
         });
-        let old_port = set_env(super::REMOTE_CONTROL_PORT_ENV, Some(&port.to_string()));
+        let old_port = set_remote_control_port(port);
         let old_clipboard = set_clipboard_file(&clipboard_file);
         let old_config = load_vscode_config(&root, Some(EditorTearOffScope::Window));
 
@@ -2770,8 +2675,8 @@ mod tests {
             "previous clipboard"
         );
 
-        restore_env(super::REMOTE_CONTROL_PORT_ENV, old_port);
-        restore_env(super::TEST_CLIPBOARD_FILE_ENV, old_clipboard);
+        restore_remote_control_port(old_port);
+        restore_clipboard_file(old_clipboard);
         restore_config(old_config);
         let _ = fs::remove_dir_all(root);
     }
@@ -2792,14 +2697,8 @@ mod tests {
             None,
             Some(two_column_layout_json()),
         ]);
-        let old_port = set_env(
-            super::REMOTE_CONTROL_PORT_ENV,
-            Some(&server.port.to_string()),
-        );
-        let old_state = set_env(
-            super::STATE_FILE_ENV,
-            Some(state_file.to_str().expect("utf-8 path")),
-        );
+        let old_port = set_remote_control_port(server.port);
+        let old_state = set_state_file(&state_file);
         let old_settle = set_focus_settle_immediate();
         let old_config = load_vscode_config(&root, Some(EditorTearOffScope::Window));
 
@@ -2830,9 +2729,9 @@ mod tests {
         assert!(payloads[6].contains("\"args\":[1]"));
         assert!(payloads[7].contains("\"command\":\"vscode.getEditorLayout\""));
 
-        restore_env(super::REMOTE_CONTROL_PORT_ENV, old_port);
-        restore_env(super::STATE_FILE_ENV, old_state);
-        restore_env(super::FOCUS_SETTLE_ENV, old_settle);
+        restore_remote_control_port(old_port);
+        restore_state_file(old_state);
+        restore_focus_settle(old_settle);
         restore_config(old_config);
         let _ = fs::remove_dir_all(root);
     }
@@ -2844,14 +2743,8 @@ mod tests {
         fs::create_dir_all(&root).expect("temp dir should be created");
         let state_file = root.join("state.json");
         let server = TestWsServer::spawn(vec![None]);
-        let old_port = set_env(
-            super::REMOTE_CONTROL_PORT_ENV,
-            Some(&server.port.to_string()),
-        );
-        let old_state = set_env(
-            super::STATE_FILE_ENV,
-            Some(state_file.to_str().expect("utf-8 path")),
-        );
+        let old_port = set_remote_control_port(server.port);
+        let old_state = set_state_file(&state_file);
         let old_config = load_vscode_config_with_terminal(&root, None, true);
 
         let app = Vscode;
@@ -2870,8 +2763,8 @@ mod tests {
             payloads[0].contains("\"command\":\"workbench.action.terminal.moveToTerminalPanel\"")
         );
 
-        restore_env(super::REMOTE_CONTROL_PORT_ENV, old_port);
-        restore_env(super::STATE_FILE_ENV, old_state);
+        restore_remote_control_port(old_port);
+        restore_state_file(old_state);
         restore_config(old_config);
         let _ = fs::remove_dir_all(root);
     }
@@ -2890,19 +2783,16 @@ mod tests {
             .port();
         drop(listener);
 
-        let old_port = set_env(super::REMOTE_CONTROL_PORT_ENV, Some(&port.to_string()));
-        let old_state = set_env(
-            super::STATE_FILE_ENV,
-            Some(state_file.to_str().expect("utf-8 path")),
-        );
+        let old_port = set_remote_control_port(port);
+        let old_state = set_state_file(&state_file);
 
         let app = Vscode;
         let err = TopologyHandler::move_decision(&app, Direction::West, 100)
             .expect_err("move_decision should fail without a bridge");
         assert!(err.to_string().contains("unable to run VS Code command"));
 
-        restore_env(super::REMOTE_CONTROL_PORT_ENV, old_port);
-        restore_env(super::STATE_FILE_ENV, old_state);
+        restore_remote_control_port(old_port);
+        restore_state_file(old_state);
         let _ = fs::remove_dir_all(root);
     }
 
@@ -2915,7 +2805,7 @@ mod tests {
             .expect("listener addr should exist")
             .port();
         drop(listener);
-        let old_port = set_env(super::REMOTE_CONTROL_PORT_ENV, Some(&port.to_string()));
+        let old_port = set_remote_control_port(port);
 
         let app = Vscode;
         let err = TopologyHandler::merge_into_target(
@@ -2933,7 +2823,7 @@ mod tests {
                 || err.to_string().contains("failed to connect")
         );
 
-        restore_env(super::REMOTE_CONTROL_PORT_ENV, old_port);
+        restore_remote_control_port(old_port);
     }
 
     #[test]
@@ -2965,11 +2855,8 @@ mod tests {
                 .expect("test should release server");
             let _ = socket.close(None);
         });
-        let old_port = set_env(super::REMOTE_CONTROL_PORT_ENV, Some(&port.to_string()));
-        let old_state = set_env(
-            super::STATE_FILE_ENV,
-            Some(state_file.to_str().expect("utf-8 path")),
-        );
+        let old_port = set_remote_control_port(port);
+        let old_state = set_state_file(&state_file);
         let old_config = load_vscode_config(&root, Some(EditorTearOffScope::Workspace));
         let pid = 424243;
         Vscode::store_window_state(
@@ -3019,8 +2906,8 @@ mod tests {
             .join()
             .expect("server thread should join cleanly");
 
-        restore_env(super::REMOTE_CONTROL_PORT_ENV, old_port);
-        restore_env(super::STATE_FILE_ENV, old_state);
+        restore_remote_control_port(old_port);
+        restore_state_file(old_state);
         restore_config(old_config);
         let _ = fs::remove_dir_all(root);
     }

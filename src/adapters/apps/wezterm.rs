@@ -192,22 +192,14 @@ mod tests {
         path
     }
 
-    fn set_env(key: &str, value: Option<&str>) -> Option<OsString> {
-        let old = std::env::var_os(key);
-        if let Some(value) = value {
-            std::env::set_var(key, value);
-        } else {
-            std::env::remove_var(key);
-        }
+    fn load_config(path: &std::path::Path) -> crate::config::Config {
+        let old = crate::config::snapshot();
+        crate::config::prepare_with_path(Some(path)).expect("config should load");
         old
     }
 
-    fn restore_env(key: &str, old: Option<OsString>) {
-        if let Some(value) = old {
-            std::env::set_var(key, value);
-        } else {
-            std::env::remove_var(key);
-        }
+    fn restore_config(old: crate::config::Config) {
+        crate::config::install(old);
     }
 
     #[test]
@@ -216,11 +208,7 @@ mod tests {
         let root = unique_temp_dir("capabilities");
         let config = root.join("config.toml");
         fs::write(&config, "").expect("config file should be writable");
-        let old_override = set_env(
-            "NIRI_DEEP_CONFIG",
-            Some(config.to_str().expect("utf-8 path")),
-        );
-        crate::config::prepare().expect("config should load");
+        let old_config = load_config(&config);
         let app = WeztermBackend;
         let caps = AppAdapter::capabilities(&app);
         assert!(caps.probe);
@@ -230,8 +218,7 @@ mod tests {
         assert!(caps.rearrange);
         assert!(caps.tear_out);
         assert!(caps.merge);
-        restore_env("NIRI_DEEP_CONFIG", old_override);
-        crate::config::prepare().expect("config should reload");
+        restore_config(old_config);
         let _ = fs::remove_dir_all(root);
     }
 
@@ -264,11 +251,7 @@ mux_backend = "tmux"
 "#,
         )
         .expect("config file should be writable");
-        let old_override = set_env(
-            "NIRI_DEEP_CONFIG",
-            Some(config_dir.join("config.toml").to_str().expect("utf-8 path")),
-        );
-        crate::config::prepare().expect("config should load");
+        let old_config = load_config(&config_dir.join("config.toml"));
 
         let app = WeztermBackend;
         let caps = AppAdapter::capabilities(&app);
@@ -279,8 +262,7 @@ mux_backend = "tmux"
         assert!(!caps.rearrange);
         assert!(caps.tear_out);
 
-        restore_env("NIRI_DEEP_CONFIG", old_override);
-        crate::config::prepare().expect("config should reload");
+        restore_config(old_config);
         let _ = fs::remove_dir_all(root);
     }
 
@@ -299,11 +281,7 @@ mux_backend = "zellij"
 "#,
         )
         .expect("config file should be writable");
-        let old_override = set_env(
-            "NIRI_DEEP_CONFIG",
-            Some(config_dir.join("config.toml").to_str().expect("utf-8 path")),
-        );
-        crate::config::prepare().expect("config should load");
+        let old_config = load_config(&config_dir.join("config.toml"));
 
         let command = WeztermBackend::spawn_attach_command("dev".to_string());
         assert_eq!(
@@ -317,8 +295,7 @@ mux_backend = "zellij"
             ])
         );
 
-        restore_env("NIRI_DEEP_CONFIG", old_override);
-        crate::config::prepare().expect("config should reload");
+        restore_config(old_config);
         let _ = fs::remove_dir_all(root);
     }
 
@@ -337,17 +314,12 @@ mux_backend = "wezterm"
 "#,
         )
         .expect("config file should be writable");
-        let old_override = set_env(
-            "NIRI_DEEP_CONFIG",
-            Some(config_dir.join("config.toml").to_str().expect("utf-8 path")),
-        );
-        crate::config::prepare().expect("config should load");
+        let old_config = load_config(&config_dir.join("config.toml"));
 
         let command = WeztermBackend::spawn_attach_command("dev".to_string());
         assert_eq!(command, None);
 
-        restore_env("NIRI_DEEP_CONFIG", old_override);
-        crate::config::prepare().expect("config should reload");
+        restore_config(old_config);
         let _ = fs::remove_dir_all(root);
     }
 
@@ -360,7 +332,7 @@ mux_backend = "wezterm"
         old_runtime_dir: Option<OsString>,
         old_responses_dir: Option<OsString>,
         old_log_file: Option<OsString>,
-        old_config_override: Option<OsString>,
+        old_config: crate::config::Config,
     }
 
     impl WeztermHarness {
@@ -443,7 +415,7 @@ exit "$status"
             let old_runtime_dir = std::env::var_os("XDG_RUNTIME_DIR");
             let old_responses_dir = std::env::var_os("WEZTERM_TEST_RESPONSES_DIR");
             let old_log_file = std::env::var_os("WEZTERM_TEST_LOG");
-            let old_config_override = std::env::var_os("NIRI_DEEP_CONFIG");
+            let old_config = crate::config::snapshot();
 
             let mut path_entries = vec![bin_dir];
             if let Some(ref old) = old_path {
@@ -464,8 +436,7 @@ exit "$status"
                 "[app.terminal.wezterm]\nenabled = true\nmux_backend = \"wezterm\"\n",
             )
             .expect("config file should be writable");
-            std::env::set_var("NIRI_DEEP_CONFIG", &config_path);
-            crate::config::prepare().expect("config should load");
+            crate::config::prepare_with_path(Some(&config_path)).expect("config should load");
 
             Self {
                 base,
@@ -476,7 +447,7 @@ exit "$status"
                 old_runtime_dir,
                 old_responses_dir,
                 old_log_file,
-                old_config_override,
+                old_config,
             }
         }
 
@@ -490,8 +461,7 @@ exit "$status"
                 "[app.terminal.wezterm]\nenabled = true\n\n[app.terminal.wezterm.mux]\nenable = false\n",
             )
             .expect("config file should be writable");
-            std::env::set_var("NIRI_DEEP_CONFIG", &config_path);
-            crate::config::prepare().expect("config should load");
+            crate::config::prepare_with_path(Some(&config_path)).expect("config should load");
         }
 
         fn set_response(&self, key: &str, status: i32, stdout: &str, stderr: &str) {
@@ -554,12 +524,7 @@ exit "$status"
                 std::env::remove_var("WEZTERM_TEST_LOG");
             }
 
-            if let Some(value) = &self.old_config_override {
-                std::env::set_var("NIRI_DEEP_CONFIG", value);
-            } else {
-                std::env::remove_var("NIRI_DEEP_CONFIG");
-            }
-            let _ = crate::config::prepare();
+            crate::config::install(self.old_config.clone());
 
             let _ = fs::remove_dir_all(&self.base);
         }

@@ -12,11 +12,10 @@ pub const ADAPTER_ALIASES: &[&str] = &["librewolf", "firefox", "librefox"];
 pub const APP_IDS: &[&str] = &["librewolf", "LibreWolf", "firefox", "Firefox"];
 pub const FIREFOX_EXTENSION_ID: &str = "browser-bridge@yeet-and-yoink.dev";
 pub const FIREFOX_NATIVE_HOST_NAME: &str = "com.yeet_and_yoink.firefox_bridge";
-pub const FIREFOX_NATIVE_SOCKET_ENV: &str = "NIRI_DEEP_FIREFOX_NATIVE_SOCKET";
 
 const NATIVE_BRIDGE: native_bridge::NativeBrowserDescriptor =
     native_bridge::NativeBrowserDescriptor {
-        socket_env: FIREFOX_NATIVE_SOCKET_ENV,
+        socket_path_override: crate::config::firefox_native_socket_path,
         socket_basename: "firefox-bridge.sock",
         unavailable_browser_hint:
             "Install/enable the yeet-and-yoink browser extension and keep LibreWolf/Firefox running.",
@@ -211,7 +210,7 @@ pub(crate) mod native_bridge {
 
     #[derive(Debug, Clone, Copy)]
     pub(crate) struct NativeBrowserDescriptor {
-        pub socket_env: &'static str,
+        pub socket_path_override: fn() -> Option<PathBuf>,
         pub socket_basename: &'static str,
         pub unavailable_browser_hint: &'static str,
     }
@@ -398,10 +397,7 @@ pub(crate) mod native_bridge {
     }
 
     pub(crate) fn browser_bridge_socket_path(config: &NativeBrowserDescriptor) -> PathBuf {
-        if let Some(value) = std::env::var_os(config.socket_env)
-            .filter(|value| !value.is_empty())
-            .map(PathBuf::from)
-        {
+        if let Some(value) = (config.socket_path_override)() {
             return value;
         }
 
@@ -729,13 +725,12 @@ pub(crate) mod native_bridge {
 mod tests {
     use super::{
         native_bridge, Librewolf, MergeExecutionMode, MoveDecision, TopologyHandler,
-        ADAPTER_ALIASES, ADAPTER_NAME, FIREFOX_NATIVE_SOCKET_ENV, NATIVE_BRIDGE,
+        ADAPTER_ALIASES, ADAPTER_NAME, NATIVE_BRIDGE,
     };
     use crate::engine::contract::AppAdapter;
     use crate::engine::topology::Direction;
     use serde_json::{json, Value};
     use std::collections::VecDeque;
-    use std::ffi::OsString;
     use std::io::{BufRead, BufReader, Write};
     use std::os::unix::net::{UnixListener, UnixStream};
     use std::path::PathBuf;
@@ -752,7 +747,7 @@ mod tests {
         queue: Arc<Mutex<VecDeque<Value>>>,
         running: Arc<AtomicBool>,
         handle: Option<thread::JoinHandle<()>>,
-        old_socket: Option<OsString>,
+        old_socket: Option<PathBuf>,
     }
 
     impl NativeHarness {
@@ -790,8 +785,10 @@ mod tests {
                 }
             });
 
-            let old_socket = std::env::var_os(FIREFOX_NATIVE_SOCKET_ENV);
-            std::env::set_var(FIREFOX_NATIVE_SOCKET_ENV, &socket_path);
+            let old_socket = crate::config::firefox_native_socket_path();
+            crate::config::update(|cfg| {
+                cfg.runtime.browser_native.firefox_socket_path = Some(socket_path.clone());
+            });
 
             Self {
                 socket_path,
@@ -816,11 +813,9 @@ mod tests {
                 handle.join().expect("fake bridge listener should join");
             }
             let _ = std::fs::remove_file(&self.socket_path);
-            if let Some(value) = &self.old_socket {
-                std::env::set_var(FIREFOX_NATIVE_SOCKET_ENV, value);
-            } else {
-                std::env::remove_var(FIREFOX_NATIVE_SOCKET_ENV);
-            }
+            crate::config::update(|cfg| {
+                cfg.runtime.browser_native.firefox_socket_path = self.old_socket.clone();
+            });
             assert!(
                 self.queue.lock().expect("queue mutex poisoned").is_empty(),
                 "all fake browser bridge responses should be consumed"
@@ -861,21 +856,20 @@ mod tests {
     }
 
     #[test]
-    fn socket_path_uses_env_override() {
+    fn socket_path_uses_config_override() {
         let _guard = env_guard();
-        let old = std::env::var_os(FIREFOX_NATIVE_SOCKET_ENV);
-        std::env::set_var(FIREFOX_NATIVE_SOCKET_ENV, "/tmp/yny-firefox-test.sock");
+        let old = crate::config::snapshot();
+        crate::config::update(|cfg| {
+            cfg.runtime.browser_native.firefox_socket_path =
+                Some(std::path::PathBuf::from("/tmp/yny-firefox-test.sock"));
+        });
 
         assert_eq!(
             native_bridge::browser_bridge_socket_path(&NATIVE_BRIDGE),
             std::path::PathBuf::from("/tmp/yny-firefox-test.sock")
         );
 
-        if let Some(old) = old {
-            std::env::set_var(FIREFOX_NATIVE_SOCKET_ENV, old);
-        } else {
-            std::env::remove_var(FIREFOX_NATIVE_SOCKET_ENV);
-        }
+        crate::config::install(old);
     }
 
     #[test]

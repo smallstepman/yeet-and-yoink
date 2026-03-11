@@ -9,14 +9,16 @@ use yeet_and_yoink::engine::topology::Direction;
 use yeet_and_yoink::logging;
 use yeet_and_yoink::profiling::ProfileConfig;
 
-const BROWSER_HOST_MODE_ENV: &str = "NIRI_DEEP_BROWSER_HOST";
-
 #[derive(Parser)]
 #[command(
     name = "yeet-and-yoink",
     about = "Deep focus/move integration for niri"
 )]
 struct Cli {
+    /// Load config from an explicit path instead of platform discovery.
+    #[arg(long, global = true, value_name = "PATH")]
+    config: Option<PathBuf>,
+
     /// Write debug logs to a file.
     #[arg(long, global = true, value_name = "PATH")]
     log_file: Option<PathBuf>,
@@ -57,6 +59,11 @@ enum Cmd {
         #[command(flatten)]
         args: FocusOrCycleArgs,
     },
+    #[command(hide = true)]
+    BrowserHost {
+        #[arg(value_parser = parse_browser_host_mode)]
+        mode: BrowserHostMode,
+    },
 }
 
 impl Cmd {
@@ -66,6 +73,7 @@ impl Cmd {
             Self::Move { .. } => "move",
             Self::Resize { .. } => "resize",
             Self::FocusOrCycle { .. } => "focus-or-cycle",
+            Self::BrowserHost { .. } => "browser-host",
         }
     }
 }
@@ -77,23 +85,11 @@ enum BrowserHostMode {
 }
 
 impl BrowserHostMode {
-    fn from_env() -> Result<Option<Self>> {
-        match std::env::var(BROWSER_HOST_MODE_ENV) {
-            Ok(value) => Ok(Some(Self::parse(&value)?)),
-            Err(std::env::VarError::NotPresent) => Ok(None),
-            Err(std::env::VarError::NotUnicode(_)) => {
-                bail!("{BROWSER_HOST_MODE_ENV} must be valid UTF-8")
-            }
-        }
-    }
-
     fn parse(value: &str) -> Result<Self> {
         match value.trim().to_ascii_lowercase().as_str() {
             "firefox" | "librewolf" => Ok(Self::Firefox),
             "chromium" | "chrome" | "brave" => Ok(Self::Chromium),
-            other => bail!(
-                "unsupported {BROWSER_HOST_MODE_ENV} value {other:?}; expected firefox or chromium"
-            ),
+            other => bail!("unsupported browser host mode {other:?}; expected firefox or chromium"),
         }
     }
 
@@ -112,26 +108,32 @@ impl BrowserHostMode {
     }
 }
 
-fn maybe_run_browser_host() -> Result<bool> {
-    let Some(mode) = BrowserHostMode::from_env()? else {
-        return Ok(false);
-    };
-    mode.run()
-        .with_context(|| format!("{} browser native host failed", mode.label()))?;
-    Ok(true)
+fn parse_browser_host_mode(value: &str) -> std::result::Result<BrowserHostMode, String> {
+    BrowserHostMode::parse(value).map_err(|err| err.to_string())
 }
 
 fn main() {
-    match maybe_run_browser_host() {
-        Ok(true) => return,
-        Ok(false) => {}
-        Err(err) => {
-            eprintln!("yeet-and-yoink: {err:#}");
-            std::process::exit(1);
+    let cli = Cli::parse();
+
+    match &cli.command {
+        Cmd::BrowserHost { mode } => {
+            if let Err(err) = config::prepare_with_path(cli.config.as_deref()).and_then(|()| {
+                mode.run()
+                    .with_context(|| format!("{} browser native host failed", mode.label()))
+            }) {
+                eprintln!("yeet-and-yoink: {err:#}");
+                std::process::exit(1);
+            }
+            return;
         }
+        _ => {}
     }
 
-    let cli = Cli::parse();
+    if let Err(err) = config::prepare_with_path(cli.config.as_deref()) {
+        eprintln!("yeet-and-yoink: {err:#}");
+        std::process::exit(1);
+    }
+
     let argv = std::env::args().collect::<Vec<_>>();
     let mut logging_session = match logging::init(
         cli.log_file.as_deref(),
@@ -153,17 +155,12 @@ fn main() {
     let command_name = cli.command.name();
     let result = {
         let _span = tracing::info_span!("cli.command", command = command_name).entered();
-        match {
-            let _span = tracing::debug_span!("config.prepare").entered();
-            config::prepare()
-        } {
-            Ok(()) => match cli.command {
-                Cmd::Focus { direction } => commands::focus::run(direction),
-                Cmd::Move { direction } => commands::move_win::run(direction),
-                Cmd::Resize { direction, mode } => commands::resize::run(direction, mode),
-                Cmd::FocusOrCycle { args } => commands::focus_or_cycle::run(args),
-            },
-            Err(err) => Err(err),
+        match cli.command {
+            Cmd::Focus { direction } => commands::focus::run(direction),
+            Cmd::Move { direction } => commands::move_win::run(direction),
+            Cmd::Resize { direction, mode } => commands::resize::run(direction, mode),
+            Cmd::FocusOrCycle { args } => commands::focus_or_cycle::run(args),
+            Cmd::BrowserHost { .. } => unreachable!("browser host mode returns before logging init"),
         }
     };
 

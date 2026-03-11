@@ -1047,7 +1047,6 @@ impl Orchestrator {
 mod tests {
     use std::any::TypeId;
     use std::collections::BTreeSet;
-    use std::ffi::OsString;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
@@ -1077,22 +1076,14 @@ mod tests {
         ))
     }
 
-    fn set_env(key: &str, value: Option<&str>) -> Option<OsString> {
-        let old = std::env::var_os(key);
-        if let Some(value) = value {
-            std::env::set_var(key, value);
-        } else {
-            std::env::remove_var(key);
-        }
+    fn load_config(path: &std::path::Path) -> crate::config::Config {
+        let old = crate::config::snapshot();
+        crate::config::prepare_with_path(Some(path)).expect("config should load");
         old
     }
 
-    fn restore_env(key: &str, old: Option<OsString>) {
-        if let Some(old) = old {
-            std::env::set_var(key, old);
-        } else {
-            std::env::remove_var(key);
-        }
+    fn restore_config(old: crate::config::Config) {
+        crate::config::install(old);
     }
 
     #[test]
@@ -1408,11 +1399,7 @@ enabled = true
 "#,
         )
         .expect("config file should be writable");
-        let old_override = set_env(
-            "NIRI_DEEP_CONFIG",
-            Some(config_dir.join("config.toml").to_str().expect("utf-8 path")),
-        );
-        crate::config::prepare().expect("config should load");
+        let old_config = load_config(&config_dir.join("config.toml"));
         let mut orchestrator = Orchestrator::default();
 
         let source_counters = DomainCounters::default();
@@ -1487,8 +1474,7 @@ enabled = true
             "target domain should resync after mutation"
         );
 
-        restore_env("NIRI_DEEP_CONFIG", old_override);
-        crate::config::prepare().expect("config should reload");
+        restore_config(old_config);
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -1509,11 +1495,7 @@ enabled = true
 "#,
         )
         .expect("config file should be writable");
-        let old_override = set_env(
-            "NIRI_DEEP_CONFIG",
-            Some(config_dir.join("config.toml").to_str().expect("utf-8 path")),
-        );
-        crate::config::prepare().expect("config should load");
+        let old_config = load_config(&config_dir.join("config.toml"));
         let mut orchestrator = Orchestrator::default();
 
         let source_counters = DomainCounters::default();
@@ -1580,8 +1562,7 @@ enabled = true
         assert_eq!(source_counters.tear_off_calls.load(Ordering::Relaxed), 1);
         assert_eq!(target_counters.merge_calls.load(Ordering::Relaxed), 0);
 
-        restore_env("NIRI_DEEP_CONFIG", old_override);
-        crate::config::prepare().expect("config should reload");
+        restore_config(old_config);
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -1599,11 +1580,7 @@ enabled = true
 "#,
         )
         .expect("config file should be writable");
-        let old_override = set_env(
-            "NIRI_DEEP_CONFIG",
-            Some(config_dir.join("config.toml").to_str().expect("utf-8 path")),
-        );
-        crate::config::prepare().expect("config should load");
+        let old_config = load_config(&config_dir.join("config.toml"));
         let mut orchestrator = Orchestrator::default();
 
         let counters = DomainCounters::default();
@@ -1663,8 +1640,7 @@ enabled = true
             "domain should resync after within-domain transfer"
         );
 
-        restore_env("NIRI_DEEP_CONFIG", old_override);
-        crate::config::prepare().expect("config should reload");
+        restore_config(old_config);
         let _ = std::fs::remove_dir_all(root);
     }
 

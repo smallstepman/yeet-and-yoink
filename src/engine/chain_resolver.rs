@@ -550,7 +550,6 @@ impl ChainResolver for RuntimeChainResolver {
 
 #[cfg(test)]
 mod tests {
-    use std::ffi::OsString;
     use std::fs;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -574,22 +573,14 @@ mod tests {
         path
     }
 
-    fn set_env(key: &str, value: Option<&str>) -> Option<OsString> {
-        let old = std::env::var_os(key);
-        if let Some(value) = value {
-            std::env::set_var(key, value);
-        } else {
-            std::env::remove_var(key);
-        }
+    fn load_config(path: &std::path::Path) -> crate::config::Config {
+        let old = crate::config::snapshot();
+        crate::config::prepare_with_path(Some(path)).expect("config should load");
         old
     }
 
-    fn restore_env(key: &str, old: Option<OsString>) {
-        if let Some(value) = old {
-            std::env::set_var(key, value);
-        } else {
-            std::env::remove_var(key);
-        }
+    fn restore_config(old: crate::config::Config) {
+        crate::config::install(old);
     }
 
     #[test]
@@ -606,11 +597,7 @@ enabled = true
 "#,
         )
         .expect("config file should be writable");
-        let old_override = set_env(
-            "NIRI_DEEP_CONFIG",
-            Some(config_dir.join("config.toml").to_str().expect("utf-8 path")),
-        );
-        crate::config::prepare().expect("config should load");
+        let old_config = load_config(&config_dir.join("config.toml"));
 
         let adapters = runtime_chain_resolver().default_domain_adapters();
         assert_eq!(
@@ -621,8 +608,7 @@ enabled = true
             Some(foot::ADAPTER_ALIASES[0])
         );
 
-        restore_env("NIRI_DEEP_CONFIG", old_override);
-        crate::config::prepare().expect("config should reload");
+        restore_config(old_config);
         let _ = fs::remove_dir_all(root);
     }
 
@@ -640,11 +626,7 @@ enabled = true
 "#,
         )
         .expect("config file should be writable");
-        let old_override = set_env(
-            "NIRI_DEEP_CONFIG",
-            Some(config_dir.join("config.toml").to_str().expect("utf-8 path")),
-        );
-        crate::config::prepare().expect("config should load");
+        let old_config = load_config(&config_dir.join("config.toml"));
 
         let adapters = runtime_chain_resolver().default_domain_adapters();
         assert_eq!(
@@ -655,8 +637,7 @@ enabled = true
             Some(alacritty::ADAPTER_ALIASES[0])
         );
 
-        restore_env("NIRI_DEEP_CONFIG", old_override);
-        crate::config::prepare().expect("config should reload");
+        restore_config(old_config);
         let _ = fs::remove_dir_all(root);
     }
 
@@ -674,11 +655,7 @@ enabled = true
 "#,
         )
         .expect("config file should be writable");
-        let old_override = set_env(
-            "NIRI_DEEP_CONFIG",
-            Some(config_dir.join("config.toml").to_str().expect("utf-8 path")),
-        );
-        crate::config::prepare().expect("config should load");
+        let old_config = load_config(&config_dir.join("config.toml"));
 
         let adapters = runtime_chain_resolver().default_domain_adapters();
         assert_eq!(
@@ -689,8 +666,7 @@ enabled = true
             Some(ghostty::ADAPTER_ALIASES[0])
         );
 
-        restore_env("NIRI_DEEP_CONFIG", old_override);
-        crate::config::prepare().expect("config should reload");
+        restore_config(old_config);
         let _ = fs::remove_dir_all(root);
     }
 
@@ -708,18 +684,13 @@ enabled = true
 "#,
         )
         .expect("config file should be writable");
-        let old_override = set_env(
-            "NIRI_DEEP_CONFIG",
-            Some(config_dir.join("config.toml").to_str().expect("utf-8 path")),
-        );
-        crate::config::prepare().expect("config should load");
+        let old_config = load_config(&config_dir.join("config.toml"));
 
         let chain = runtime_chain_resolver().resolve_chain("librewolf", 0, "LibreWolf");
         assert_eq!(chain.len(), 1);
         assert_eq!(chain[0].adapter_name(), "librewolf");
 
-        restore_env("NIRI_DEEP_CONFIG", old_override);
-        crate::config::prepare().expect("config should reload");
+        restore_config(old_config);
         let _ = fs::remove_dir_all(root);
     }
 
@@ -737,18 +708,13 @@ enabled = true
 "#,
         )
         .expect("config file should be writable");
-        let old_override = set_env(
-            "NIRI_DEEP_CONFIG",
-            Some(config_dir.join("config.toml").to_str().expect("utf-8 path")),
-        );
-        crate::config::prepare().expect("config should load");
+        let old_config = load_config(&config_dir.join("config.toml"));
 
         let chain = runtime_chain_resolver().resolve_chain("brave-browser", 0, "Brave Browser");
         assert_eq!(chain.len(), 1);
         assert_eq!(chain[0].adapter_name(), "chromium");
 
-        restore_env("NIRI_DEEP_CONFIG", old_override);
-        crate::config::prepare().expect("config should reload");
+        restore_config(old_config);
         let _ = fs::remove_dir_all(root);
     }
 

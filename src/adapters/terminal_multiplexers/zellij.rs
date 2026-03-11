@@ -23,7 +23,6 @@ pub(crate) struct ZellijMuxProvider;
 
 pub(crate) static ZELLIJ_MUX_PROVIDER: ZellijMuxProvider = ZellijMuxProvider;
 static SESSION_CACHE: OnceLock<Mutex<HashMap<u32, String>>> = OnceLock::new();
-const SOURCE_PANE_ENV: &str = "YEET_AND_YOINK_ZELLIJ_SOURCE_PANE_ID";
 
 impl ZellijMuxProvider {
     fn session_cache() -> &'static Mutex<HashMap<u32, String>> {
@@ -442,9 +441,8 @@ impl ZellijMuxProvider {
             }
         }
 
-        let env_override = std::env::var_os("NIRI_DEEP_ZELLIJ_BREAK_PLUGIN");
-        if let Some(path) = env_override.as_deref() {
-            if let Some(url) = file_url(Path::new(path)) {
+        if let Some(path) = crate::config::zellij_break_plugin_path() {
+            if let Some(url) = file_url(&path) {
                 return Some(url);
             }
         }
@@ -525,12 +523,8 @@ impl ZellijMuxProvider {
 
     fn pane_id_from_environ(pid: u32) -> Option<String> {
         runtime::ProcessTree::for_pid(pid).find_map(|candidate| {
-            runtime::process_environ_var(candidate, SOURCE_PANE_ENV)
+            runtime::process_environ_var(candidate, "ZELLIJ_PANE_ID")
                 .and_then(|pane_id| Self::normalize_pane_id(&pane_id))
-                .or_else(|| {
-                    runtime::process_environ_var(candidate, "ZELLIJ_PANE_ID")
-                        .and_then(|pane_id| Self::normalize_pane_id(&pane_id))
-                })
         })
     }
 
@@ -1127,10 +1121,6 @@ impl TopologyHandler for ZellijMuxProvider {
 
         let attach_command = if let Some(config_path) = Self::no_mirror_config_path() {
             let mut command = Vec::new();
-            if let Some(pane_id) = pane_id.as_deref() {
-                command.push("env".to_string());
-                command.push(format!("{SOURCE_PANE_ENV}={pane_id}"));
-            }
             command.extend([
                 "zellij".to_string(),
                 "--config".to_string(),
@@ -1141,10 +1131,6 @@ impl TopologyHandler for ZellijMuxProvider {
             command
         } else {
             let mut command = Vec::new();
-            if let Some(pane_id) = pane_id.as_deref() {
-                command.push("env".to_string());
-                command.push(format!("{SOURCE_PANE_ENV}={pane_id}"));
-            }
             command.extend(["zellij".to_string(), "attach".to_string(), session.clone()]);
             command
         };
@@ -1205,7 +1191,7 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};
 
-    use super::{ZellijMuxProvider, SOURCE_PANE_ENV};
+    use super::ZellijMuxProvider;
     use crate::engine::contract::{MoveDecision, TerminalMultiplexerProvider, TopologyHandler};
     use crate::engine::runtime::ProcessId;
     use crate::engine::topology::Direction;
@@ -1216,6 +1202,20 @@ mod tests {
 
     fn env_guard() -> std::sync::MutexGuard<'static, ()> {
         crate::utils::env_guard()
+    }
+
+    fn set_break_plugin_path(path: Option<PathBuf>) -> Option<PathBuf> {
+        let old = crate::config::zellij_break_plugin_path();
+        crate::config::update(|cfg| {
+            cfg.runtime.zellij.break_plugin = path;
+        });
+        old
+    }
+
+    fn restore_break_plugin_path(old: Option<PathBuf>) {
+        crate::config::update(|cfg| {
+            cfg.runtime.zellij.break_plugin = old;
+        });
     }
 
     struct ZellijHarness {
@@ -1630,25 +1630,6 @@ exit "$status"
     }
 
     #[test]
-    fn focused_pane_id_for_pid_prefers_spawned_source_pane_env() {
-        let _guard = env_guard();
-        let harness = ZellijHarness::new();
-        let mut child = std::process::Command::new("sleep")
-            .arg("30")
-            .env(SOURCE_PANE_ENV, "terminal_27")
-            .spawn()
-            .expect("sleep should spawn");
-        let provider = ZellijMuxProvider;
-        let pane_id = provider
-            .focused_pane_id_for_pid(child.id())
-            .expect("query should succeed");
-        let _ = child.kill();
-        let _ = child.wait();
-        assert_eq!(pane_id, Some("terminal_27".to_string()));
-        assert!(!harness.command_log().contains("action list-clients"));
-    }
-
-    #[test]
     fn parse_pipe_query_pane_id_accepts_plain_and_prefixed_values() {
         assert_eq!(
             ZellijMuxProvider::parse_pipe_query_pane_id("terminal_8\n"),
@@ -1667,10 +1648,7 @@ exit "$status"
         let harness = ZellijHarness::new();
         let plugin_path = harness.base.join("yeet_and_yoink_zellij_break.wasm");
         fs::write(&plugin_path, "fake wasm").expect("plugin placeholder should be written");
-        std::env::set_var(
-            "NIRI_DEEP_ZELLIJ_BREAK_PLUGIN",
-            plugin_path.to_str().expect("utf-8 plugin path"),
-        );
+        let old_break_plugin = set_break_plugin_path(Some(plugin_path.clone()));
         ZellijMuxProvider::store_session_name(92, "query-pane");
         let plugin_url = ZellijMuxProvider::break_plugin_url().expect("plugin URL should resolve");
         harness.set_response(
@@ -1690,7 +1668,7 @@ exit "$status"
         let log = harness.command_log();
         assert!(log.contains("action=query-pane-id"));
         assert!(!log.contains("action list-clients"));
-        std::env::remove_var("NIRI_DEEP_ZELLIJ_BREAK_PLUGIN");
+        restore_break_plugin_path(old_break_plugin);
     }
 
     #[test]
@@ -1717,10 +1695,7 @@ exit "$status"
         let harness = ZellijHarness::new();
         let plugin_path = harness.base.join("yeet_and_yoink_zellij_break.wasm");
         fs::write(&plugin_path, "fake wasm").expect("plugin placeholder should be written");
-        std::env::set_var(
-            "NIRI_DEEP_ZELLIJ_BREAK_PLUGIN",
-            plugin_path.to_str().expect("utf-8 plugin path"),
-        );
+        let old_break_plugin = set_break_plugin_path(Some(plugin_path.clone()));
         ZellijMuxProvider::store_session_name(42, "jumping-quasar");
         harness.set_response(
             "--session jumping-quasar action list-clients",
@@ -1759,8 +1734,7 @@ exit "$status"
             .move_out(Direction::North, 42)
             .expect("move_out should succeed");
         let command = tear.spawn_command.expect("spawn command should exist");
-        assert_eq!(command.first(), Some(&"env".to_string()));
-        assert!(command.contains(&format!("{SOURCE_PANE_ENV}=terminal_9")));
+        assert_eq!(command.first(), Some(&"zellij".to_string()));
         assert!(command.contains(&"zellij".to_string()));
         assert!(command.contains(&"attach".to_string()));
         assert!(command.contains(&"jumping-quasar".to_string()));
@@ -1775,7 +1749,7 @@ exit "$status"
         let log = harness.command_log();
         assert!(log.contains("action list-clients"));
         assert!(log.contains("pipe --plugin"));
-        std::env::remove_var("NIRI_DEEP_ZELLIJ_BREAK_PLUGIN");
+        restore_break_plugin_path(old_break_plugin);
     }
 
     #[test]
@@ -1784,10 +1758,7 @@ exit "$status"
         let harness = ZellijHarness::new();
         let plugin_path = harness.base.join("yeet_and_yoink_zellij_break.wasm");
         fs::write(&plugin_path, "fake wasm").expect("plugin placeholder should be written");
-        std::env::set_var(
-            "NIRI_DEEP_ZELLIJ_BREAK_PLUGIN",
-            plugin_path.to_str().expect("utf-8 plugin path"),
-        );
+        let old_break_plugin = set_break_plugin_path(Some(plugin_path.clone()));
         ZellijMuxProvider::store_session_name(77, "glowing-zebra");
         harness.set_response(
             "--session glowing-zebra action list-clients",
@@ -1832,7 +1803,7 @@ exit "$status"
             err.to_string().contains("did not detach pane terminal_4"),
             "unexpected error: {err:#}"
         );
-        std::env::remove_var("NIRI_DEEP_ZELLIJ_BREAK_PLUGIN");
+        restore_break_plugin_path(old_break_plugin);
     }
 
     #[test]
@@ -1841,10 +1812,7 @@ exit "$status"
         let harness = ZellijHarness::new();
         let plugin_path = harness.base.join("yeet_and_yoink_zellij_break.wasm");
         fs::write(&plugin_path, "fake wasm").expect("plugin placeholder should be written");
-        std::env::set_var(
-            "NIRI_DEEP_ZELLIJ_BREAK_PLUGIN",
-            plugin_path.to_str().expect("utf-8 plugin path"),
-        );
+        let old_break_plugin = set_break_plugin_path(Some(plugin_path.clone()));
         ZellijMuxProvider::store_session_name(55, "wise-mouse");
         harness.set_response(
             "--session wise-mouse action list-clients",
@@ -1888,7 +1856,7 @@ exit "$status"
             "--name yeet_and_yoink_break --args source_tab_index=0,source_client_count=1 -- break"
         ));
         assert!(!log.contains("--args pane_id=terminal_0"));
-        std::env::remove_var("NIRI_DEEP_ZELLIJ_BREAK_PLUGIN");
+        restore_break_plugin_path(old_break_plugin);
     }
 
     #[test]
@@ -1897,10 +1865,7 @@ exit "$status"
         let harness = ZellijHarness::new();
         let plugin_path = harness.base.join("yeet_and_yoink_zellij_break.wasm");
         fs::write(&plugin_path, "fake wasm").expect("plugin placeholder should be written");
-        std::env::set_var(
-            "NIRI_DEEP_ZELLIJ_BREAK_PLUGIN",
-            plugin_path.to_str().expect("utf-8 plugin path"),
-        );
+        let old_break_plugin = set_break_plugin_path(Some(plugin_path.clone()));
         ZellijMuxProvider::store_session_name(50, "merge-shared");
         ZellijMuxProvider::store_session_name(60, "merge-shared");
         harness.set_response(
@@ -1953,7 +1918,7 @@ exit "$status"
         assert!(log.contains("source_pane_id=terminal_11"));
         assert!(log.contains("target_tab_index=0"));
         assert!(log.contains("-- merge"));
-        std::env::remove_var("NIRI_DEEP_ZELLIJ_BREAK_PLUGIN");
+        restore_break_plugin_path(old_break_plugin);
     }
 
     #[test]
@@ -1962,10 +1927,7 @@ exit "$status"
         let harness = ZellijHarness::new();
         let plugin_path = harness.base.join("yeet_and_yoink_zellij_break.wasm");
         fs::write(&plugin_path, "fake wasm").expect("plugin placeholder should be written");
-        std::env::set_var(
-            "NIRI_DEEP_ZELLIJ_BREAK_PLUGIN",
-            plugin_path.to_str().expect("utf-8 plugin path"),
-        );
+        let old_break_plugin = set_break_plugin_path(Some(plugin_path.clone()));
         ZellijMuxProvider::store_session_name(70, "merge-source");
         ZellijMuxProvider::store_session_name(71, "merge-target");
         harness.set_response(
@@ -1994,6 +1956,6 @@ exit "$status"
         let log = harness.command_log();
         assert!(!log.contains("action=merge"));
         assert!(!log.contains("-- merge"));
-        std::env::remove_var("NIRI_DEEP_ZELLIJ_BREAK_PLUGIN");
+        restore_break_plugin_path(old_break_plugin);
     }
 }

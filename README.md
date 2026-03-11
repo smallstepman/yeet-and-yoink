@@ -12,11 +12,25 @@ domain plugins (WM / terminal / editor), plus a transfer pipeline for cross-doma
 
 `config.toml` is loaded in this order:
 
-1. `NIRI_DEEP_CONFIG` (explicit file path)
+1. `--config <path>` (explicit file path)
 2. Platform config dir from `etcetera` (typically `$XDG_CONFIG_HOME/yeet-and-yoink/config.toml` on Linux)
 
 If no file is present, defaults from `src/config.rs` are used; app integrations stay disabled
 until their matching profiles set `enabled = true`.
+
+Runtime-only overrides that used to live in environment variables now live in config too, for
+example:
+
+```toml
+[runtime.logging]
+debug = true
+
+[runtime.vscode]
+focus_settle_ms = 50
+
+[runtime.zellij]
+break_plugin = "/path/to/yeet_and_yoink_zellij_break.wasm"
+```
 
 ## Minimal config example
 

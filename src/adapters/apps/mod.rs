@@ -445,22 +445,14 @@ mod resolve_chain_tests {
         path
     }
 
-    fn set_env(key: &str, value: Option<&str>) -> Option<std::ffi::OsString> {
-        let old = std::env::var_os(key);
-        if let Some(value) = value {
-            std::env::set_var(key, value);
-        } else {
-            std::env::remove_var(key);
-        }
+    fn load_config(path: &std::path::Path) -> crate::config::Config {
+        let old = crate::config::snapshot();
+        crate::config::prepare_with_path(Some(path)).expect("config should load");
         old
     }
 
-    fn restore_env(key: &str, old: Option<std::ffi::OsString>) {
-        if let Some(old) = old {
-            std::env::set_var(key, old);
-        } else {
-            std::env::remove_var(key);
-        }
+    fn restore_config(old: crate::config::Config) {
+        crate::config::install(old);
     }
 
     #[test]
@@ -493,18 +485,13 @@ enabled = true
 "#,
         )
         .expect("config file should be writable");
-        let old_override = set_env(
-            "NIRI_DEEP_CONFIG",
-            Some(config_dir.join("config.toml").to_str().expect("utf-8 path")),
-        );
-        crate::config::prepare().expect("config should load");
+        let old_config = load_config(&config_dir.join("config.toml"));
 
         let chain = resolve_chain(emacs::APP_IDS[0], 0, "");
         assert_eq!(chain.len(), 1);
         assert_eq!(chain[0].adapter_name(), emacs::ADAPTER_NAME);
 
-        restore_env("NIRI_DEEP_CONFIG", old_override);
-        crate::config::prepare().expect("config should reload");
+        restore_config(old_config);
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -523,17 +510,12 @@ enabled = true
         )
         .expect("config file should be writable");
 
-        let old_override = set_env(
-            "NIRI_DEEP_CONFIG",
-            Some(config_dir.join("config.toml").to_str().expect("utf-8 path")),
-        );
-        crate::config::prepare().expect("config should load");
+        let old_config = load_config(&config_dir.join("config.toml"));
 
         let chain = resolve_chain(emacs::APP_IDS[0], 0, "");
         assert!(chain.is_empty());
 
-        restore_env("NIRI_DEEP_CONFIG", old_override);
-        crate::config::prepare().expect("config should reload");
+        restore_config(old_config);
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -552,17 +534,12 @@ enabled = false
         )
         .expect("config file should be writable");
 
-        let old_override = set_env(
-            "NIRI_DEEP_CONFIG",
-            Some(config_dir.join("config.toml").to_str().expect("utf-8 path")),
-        );
-        crate::config::prepare().expect("config should load");
+        let old_config = load_config(&config_dir.join("config.toml"));
 
         let chain = resolve_chain(emacs::APP_IDS[0], 0, "");
         assert!(chain.is_empty());
 
-        restore_env("NIRI_DEEP_CONFIG", old_override);
-        crate::config::prepare().expect("config should reload");
+        restore_config(old_config);
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -583,11 +560,7 @@ app = "wezterm"
         )
         .expect("config file should be writable");
 
-        let old_override = set_env(
-            "NIRI_DEEP_CONFIG",
-            Some(config_dir.join("config.toml").to_str().expect("utf-8 path")),
-        );
-        crate::config::prepare().expect("config should load");
+        let old_config = load_config(&config_dir.join("config.toml"));
 
         let chain = resolve_chain(wezterm::APP_IDS[0], 0, "");
         assert!(!chain.is_empty());
@@ -599,8 +572,7 @@ app = "wezterm"
             Some(wezterm::ADAPTER_ALIASES[0])
         );
 
-        restore_env("NIRI_DEEP_CONFIG", old_override);
-        crate::config::prepare().expect("config should reload");
+        restore_config(old_config);
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -618,11 +590,7 @@ enabled = true
 "#,
         )
         .expect("config file should be writable");
-        let old_override = set_env(
-            "NIRI_DEEP_CONFIG",
-            Some(config_dir.join("config.toml").to_str().expect("utf-8 path")),
-        );
-        crate::config::prepare().expect("config should load");
+        let old_config = load_config(&config_dir.join("config.toml"));
 
         let chain = resolve_chain(kitty::APP_IDS[0], 0, "");
         assert!(!chain.is_empty());
@@ -631,8 +599,7 @@ enabled = true
             Some("terminal")
         );
 
-        restore_env("NIRI_DEEP_CONFIG", old_override);
-        crate::config::prepare().expect("config should reload");
+        restore_config(old_config);
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -650,11 +617,7 @@ enabled = true
 "#,
         )
         .expect("config file should be writable");
-        let old_override = set_env(
-            "NIRI_DEEP_CONFIG",
-            Some(config_dir.join("config.toml").to_str().expect("utf-8 path")),
-        );
-        crate::config::prepare().expect("config should load");
+        let old_config = load_config(&config_dir.join("config.toml"));
 
         let chain = resolve_chain(foot::APP_IDS[0], 0, "");
         assert!(!chain.is_empty());
@@ -663,8 +626,7 @@ enabled = true
             Some("terminal")
         );
 
-        restore_env("NIRI_DEEP_CONFIG", old_override);
-        crate::config::prepare().expect("config should reload");
+        restore_config(old_config);
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -682,11 +644,7 @@ enabled = true
 "#,
         )
         .expect("config file should be writable");
-        let old_override = set_env(
-            "NIRI_DEEP_CONFIG",
-            Some(config_dir.join("config.toml").to_str().expect("utf-8 path")),
-        );
-        crate::config::prepare().expect("config should load");
+        let old_config = load_config(&config_dir.join("config.toml"));
 
         let chain = resolve_chain(alacritty::APP_IDS[0], 0, "");
         assert!(!chain.is_empty());
@@ -695,8 +653,7 @@ enabled = true
             Some("terminal")
         );
 
-        restore_env("NIRI_DEEP_CONFIG", old_override);
-        crate::config::prepare().expect("config should reload");
+        restore_config(old_config);
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -714,11 +671,7 @@ enabled = true
 "#,
         )
         .expect("config file should be writable");
-        let old_override = set_env(
-            "NIRI_DEEP_CONFIG",
-            Some(config_dir.join("config.toml").to_str().expect("utf-8 path")),
-        );
-        crate::config::prepare().expect("config should load");
+        let old_config = load_config(&config_dir.join("config.toml"));
 
         let chain = resolve_chain(ghostty::APP_IDS[0], 0, "");
         assert!(!chain.is_empty());
@@ -727,8 +680,7 @@ enabled = true
             Some("terminal")
         );
 
-        restore_env("NIRI_DEEP_CONFIG", old_override);
-        crate::config::prepare().expect("config should reload");
+        restore_config(old_config);
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -748,18 +700,13 @@ focus.internal_panes.enabled = false
         )
         .expect("config file should be writable");
 
-        let old_override = set_env(
-            "NIRI_DEEP_CONFIG",
-            Some(config_dir.join("config.toml").to_str().expect("utf-8 path")),
-        );
-        crate::config::prepare().expect("config should load");
+        let old_config = load_config(&config_dir.join("config.toml"));
 
         let chain = resolve_chain(emacs::APP_IDS[0], 0, "");
         assert_eq!(chain.len(), 1);
         assert!(!chain[0].capabilities().focus);
 
-        restore_env("NIRI_DEEP_CONFIG", old_override);
-        crate::config::prepare().expect("config should reload");
+        restore_config(old_config);
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -779,11 +726,7 @@ resize.internal_panes.enabled = false
         )
         .expect("config file should be writable");
 
-        let old_override = set_env(
-            "NIRI_DEEP_CONFIG",
-            Some(config_dir.join("config.toml").to_str().expect("utf-8 path")),
-        );
-        crate::config::prepare().expect("config should load");
+        let old_config = load_config(&config_dir.join("config.toml"));
 
         let chain = resolve_chain(wezterm::APP_IDS[0], 0, "");
         assert!(!chain.is_empty());
@@ -793,8 +736,7 @@ resize.internal_panes.enabled = false
             .expect("wezterm adapter should be in chain");
         assert!(!wezterm.capabilities().resize_internal);
 
-        restore_env("NIRI_DEEP_CONFIG", old_override);
-        crate::config::prepare().expect("config should reload");
+        restore_config(old_config);
         let _ = std::fs::remove_dir_all(root);
     }
 }

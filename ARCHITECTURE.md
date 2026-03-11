@@ -111,7 +111,7 @@ mux_backend = "inherit"
 ```
 
 Config discovery order:
-1. `NIRI_DEEP_CONFIG` environment variable (explicit path)
+1. `--config <path>` CLI flag (explicit path)
 2. Platform config dir (`$XDG_CONFIG_HOME/yeet-and-yoink/config.toml`)
 3. Defaults (all integrations disabled until their matching profiles are explicitly enabled)
 
@@ -261,7 +261,7 @@ The system is heavily configuration-driven:
 ### Override Points
 - `app_adapter_override()`: Pin to specific app
 - `wm_adapter_override()`: Pin to specific WM
-- `NIRI_DEEP_CONFIG`: Explicit config file path
+- `--config <path>`: Explicit config file path
 
 ## Error Handling Philosophy
 
@@ -283,7 +283,7 @@ The system is heavily configuration-driven:
 - End-to-end flow tests
 
 ### Test Isolation
-- Set `NIRI_DEEP_CONFIG` explicitly per test
+- Load an explicit config path per test (for example via `config::prepare_with_path(...)`)
 - Use `--test-threads=1` if tests flap (shared config state)
 
 ## Common Pitfalls (from AGENTS.md)
@@ -334,7 +334,7 @@ cargo test
 cargo build --release
 
 # Run with config
-NIRI_DEEP_CONFIG=./my-config.toml cargo run -- focus west
+cargo run -- --config ./my-config.toml focus west
 
 # With logging
 yny --log-file /tmp/yny.log focus west

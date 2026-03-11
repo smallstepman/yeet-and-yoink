@@ -7,6 +7,7 @@ use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::{fmt, EnvFilter, Layer};
 
+use crate::config;
 use crate::profiling::{ProfileConfig, ProfilingSession};
 
 #[derive(Default)]
@@ -27,14 +28,8 @@ impl LoggingSession {
     }
 }
 
-fn debug_env_enabled() -> bool {
-    let value = match std::env::var("NIRI_DEEP_DEBUG") {
-        Ok(value) => value,
-        Err(_) => return false,
-    };
-
-    let value = value.trim().to_ascii_lowercase();
-    !(value.is_empty() || value == "0" || value == "false" || value == "off" || value == "no")
+fn debug_enabled() -> bool {
+    config::logging_debug_enabled()
 }
 
 fn open_log_file(path: &Path, append: bool) -> std::io::Result<File> {
@@ -49,7 +44,7 @@ fn open_log_file(path: &Path, append: bool) -> std::io::Result<File> {
 }
 
 fn default_fmt_filter(log_file: Option<&Path>) -> EnvFilter {
-    let default_filter = if debug_env_enabled() || log_file.is_some() {
+    let default_filter = if debug_enabled() || log_file.is_some() {
         "debug"
     } else {
         "off"

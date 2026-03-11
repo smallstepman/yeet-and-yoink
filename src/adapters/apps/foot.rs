@@ -10,9 +10,8 @@ crate::adapters::apps::impl_terminal_host_backend!(FootBackend, TERMINAL_LAUNCH_
 
 #[cfg(test)]
 mod tests {
-    use std::ffi::OsString;
     use std::fs;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicU64, Ordering};
 
     use super::FootBackend;
@@ -34,22 +33,14 @@ mod tests {
         path
     }
 
-    fn set_env(key: &str, value: Option<&str>) -> Option<OsString> {
-        let old = std::env::var_os(key);
-        if let Some(value) = value {
-            std::env::set_var(key, value);
-        } else {
-            std::env::remove_var(key);
-        }
+    fn load_config(path: &Path) -> crate::config::Config {
+        let old = crate::config::snapshot();
+        crate::config::prepare_with_path(Some(path)).expect("config should load");
         old
     }
 
-    fn restore_env(key: &str, old: Option<OsString>) {
-        if let Some(value) = old {
-            std::env::set_var(key, value);
-        } else {
-            std::env::remove_var(key);
-        }
+    fn restore_config(old: crate::config::Config) {
+        crate::config::install(old);
     }
 
     #[test]
@@ -66,11 +57,7 @@ enabled = true
 "#,
         )
         .expect("config file should be writable");
-        let old_override = set_env(
-            "NIRI_DEEP_CONFIG",
-            Some(config_dir.join("config.toml").to_str().expect("utf-8 path")),
-        );
-        crate::config::prepare().expect("config should load");
+        let old_config = load_config(&config_dir.join("config.toml"));
 
         let app = FootBackend;
         let caps = AppAdapter::capabilities(&app);
@@ -82,8 +69,7 @@ enabled = true
         assert!(caps.tear_out);
         assert!(caps.merge);
 
-        restore_env("NIRI_DEEP_CONFIG", old_override);
-        crate::config::prepare().expect("config should reload");
+        restore_config(old_config);
         let _ = fs::remove_dir_all(root);
     }
 
@@ -108,11 +94,7 @@ mux_backend = "zellij"
 "#,
         )
         .expect("config file should be writable");
-        let old_override = set_env(
-            "NIRI_DEEP_CONFIG",
-            Some(config_dir.join("config.toml").to_str().expect("utf-8 path")),
-        );
-        crate::config::prepare().expect("config should load");
+        let old_config = load_config(&config_dir.join("config.toml"));
 
         let command = FootBackend::spawn_attach_command("dev".to_string());
         assert_eq!(
@@ -125,8 +107,7 @@ mux_backend = "zellij"
             ])
         );
 
-        restore_env("NIRI_DEEP_CONFIG", old_override);
-        crate::config::prepare().expect("config should reload");
+        restore_config(old_config);
         let _ = fs::remove_dir_all(root);
     }
 }

@@ -29,10 +29,9 @@ pub const APP_IDS: &[&str] = &[
 pub const CHROMIUM_EXTENSION_ID: &str = "oigofebnnajpegmncnciacecfhlokkbp";
 pub const CHROMIUM_EXTENSION_ORIGIN: &str = "chrome-extension://oigofebnnajpegmncnciacecfhlokkbp/";
 pub const CHROMIUM_NATIVE_HOST_NAME: &str = "com.yeet_and_yoink.chromium_bridge";
-pub const CHROMIUM_NATIVE_SOCKET_ENV: &str = "NIRI_DEEP_CHROMIUM_NATIVE_SOCKET";
 
 const NATIVE_BRIDGE: NativeBrowserDescriptor = NativeBrowserDescriptor {
-    socket_env: CHROMIUM_NATIVE_SOCKET_ENV,
+    socket_path_override: crate::config::chromium_native_socket_path,
     socket_basename: "chromium-bridge.sock",
     unavailable_browser_hint:
         "Install/enable the yeet-and-yoink Chromium browser extension and keep Brave/Chromium running.",
@@ -205,13 +204,11 @@ impl TopologyHandler for Chromium {
 mod tests {
     use super::{
         Chromium, MergeExecutionMode, MoveDecision, TopologyHandler, ADAPTER_ALIASES, ADAPTER_NAME,
-        CHROMIUM_NATIVE_SOCKET_ENV,
     };
     use crate::engine::contract::AppAdapter;
     use crate::engine::topology::Direction;
     use serde_json::{json, Value};
     use std::collections::VecDeque;
-    use std::ffi::OsString;
     use std::io::{BufRead, BufReader, Write};
     use std::os::unix::net::{UnixListener, UnixStream};
     use std::path::PathBuf;
@@ -228,7 +225,7 @@ mod tests {
         queue: Arc<Mutex<VecDeque<Value>>>,
         running: Arc<AtomicBool>,
         handle: Option<thread::JoinHandle<()>>,
-        old_socket: Option<OsString>,
+        old_socket: Option<PathBuf>,
     }
 
     impl NativeHarness {
@@ -266,8 +263,10 @@ mod tests {
                 }
             });
 
-            let old_socket = std::env::var_os(CHROMIUM_NATIVE_SOCKET_ENV);
-            std::env::set_var(CHROMIUM_NATIVE_SOCKET_ENV, &socket_path);
+            let old_socket = crate::config::chromium_native_socket_path();
+            crate::config::update(|cfg| {
+                cfg.runtime.browser_native.chromium_socket_path = Some(socket_path.clone());
+            });
 
             Self {
                 socket_path,
@@ -292,11 +291,9 @@ mod tests {
                 handle.join().expect("fake bridge listener should join");
             }
             let _ = std::fs::remove_file(&self.socket_path);
-            if let Some(value) = &self.old_socket {
-                std::env::set_var(CHROMIUM_NATIVE_SOCKET_ENV, value);
-            } else {
-                std::env::remove_var(CHROMIUM_NATIVE_SOCKET_ENV);
-            }
+            crate::config::update(|cfg| {
+                cfg.runtime.browser_native.chromium_socket_path = self.old_socket.clone();
+            });
             assert!(
                 self.queue.lock().expect("queue mutex poisoned").is_empty(),
                 "all fake browser bridge responses should be consumed"

@@ -1,5 +1,4 @@
 use std::any::TypeId;
-use std::ffi::OsString;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -151,22 +150,14 @@ fn env_guard() -> std::sync::MutexGuard<'static, ()> {
         .expect("env guard should lock")
 }
 
-fn set_env(key: &str, value: Option<&std::path::Path>) -> Option<OsString> {
-    let old = std::env::var_os(key);
-    if let Some(value) = value {
-        std::env::set_var(key, value);
-    } else {
-        std::env::remove_var(key);
-    }
+fn load_config(path: &std::path::Path) -> yeet_and_yoink::config::Config {
+    let old = yeet_and_yoink::config::snapshot();
+    yeet_and_yoink::config::prepare_with_path(Some(path)).expect("config should load");
     old
 }
 
-fn restore_env(key: &str, old: Option<OsString>) {
-    if let Some(value) = old {
-        std::env::set_var(key, value);
-    } else {
-        std::env::remove_var(key);
-    }
+fn restore_config(old: yeet_and_yoink::config::Config) {
+    yeet_and_yoink::config::install(old);
 }
 
 fn unique_temp_dir(prefix: &str) -> PathBuf {
@@ -303,8 +294,7 @@ enabled = true
 "#,
     )
     .expect("config file should be writable");
-    let old_override = set_env("NIRI_DEEP_CONFIG", Some(&config_path));
-    yeet_and_yoink::config::prepare().expect("config should load");
+    let old_config = load_config(&config_path);
 
     let mut orchestrator = Orchestrator::default();
     let nvim_counters = DomainCounters::default();
@@ -360,8 +350,7 @@ enabled = true
     assert_eq!(nvim_counters.tear_off_calls.load(Ordering::Relaxed), 1);
     assert_eq!(wezterm_counters.merge_calls.load(Ordering::Relaxed), 1);
 
-    restore_env("NIRI_DEEP_CONFIG", old_override);
-    yeet_and_yoink::config::prepare().expect("config should reload");
+    restore_config(old_config);
     let _ = fs::remove_dir_all(root);
 }
 
@@ -380,8 +369,7 @@ enabled = true
 "#,
     )
     .expect("config file should be writable");
-    let old_override = set_env("NIRI_DEEP_CONFIG", Some(&config_path));
-    yeet_and_yoink::config::prepare().expect("config should load");
+    let old_config = load_config(&config_path);
 
     let mut orchestrator = Orchestrator::default();
     let wezterm_counters = DomainCounters::default();
@@ -437,7 +425,6 @@ enabled = true
     assert_eq!(wezterm_counters.tear_off_calls.load(Ordering::Relaxed), 1);
     assert_eq!(wm_counters.merge_calls.load(Ordering::Relaxed), 0);
 
-    restore_env("NIRI_DEEP_CONFIG", old_override);
-    yeet_and_yoink::config::prepare().expect("config should reload");
+    restore_config(old_config);
     let _ = fs::remove_dir_all(root);
 }

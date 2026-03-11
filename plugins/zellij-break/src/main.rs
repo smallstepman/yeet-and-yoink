@@ -15,16 +15,16 @@ struct PendingTabRestore {
 }
 
 #[derive(Default)]
-struct NiriDeepZellijBreakPlugin {
+struct YeetAndYoinkZellijBreakPlugin {
     pane_manifest: Option<PaneManifest>,
     tabs: Vec<TabInfo>,
     clients: Vec<ClientInfo>,
     pending_tab_restore: Option<PendingTabRestore>,
 }
 
-register_plugin!(NiriDeepZellijBreakPlugin);
+register_plugin!(YeetAndYoinkZellijBreakPlugin);
 
-impl ZellijPlugin for NiriDeepZellijBreakPlugin {
+impl ZellijPlugin for YeetAndYoinkZellijBreakPlugin {
     fn load(&mut self, _configuration: BTreeMap<String, String>) {
         set_selectable(false);
         request_permission(&[
@@ -172,7 +172,7 @@ fn cli_pipe_source_name(pipe_message: &PipeMessage) -> Option<&str> {
     }
 }
 
-impl NiriDeepZellijBreakPlugin {
+impl YeetAndYoinkZellijBreakPlugin {
     fn maybe_restore_source_tab(&mut self, from_timer: bool) {
         let Some(mut pending) = self.pending_tab_restore else {
             return;

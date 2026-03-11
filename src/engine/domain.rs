@@ -683,19 +683,14 @@ enabled = true
 "#,
         )
         .expect("config file should be writable");
-        let old_override = std::env::var_os("NIRI_DEEP_CONFIG");
-        std::env::set_var("NIRI_DEEP_CONFIG", config_dir.join("config.toml"));
-        crate::config::prepare().expect("config should load");
+        let old_config = crate::config::snapshot();
+        crate::config::prepare_with_path(Some(&config_dir.join("config.toml")))
+            .expect("config should load");
 
         let domain = domain_id_for_window(Some(wezterm::APP_IDS[0]), None, Some("term"));
         assert_eq!(domain, super::TERMINAL_DOMAIN_ID);
 
-        if let Some(previous) = old_override {
-            std::env::set_var("NIRI_DEEP_CONFIG", previous);
-        } else {
-            std::env::remove_var("NIRI_DEEP_CONFIG");
-        }
-        crate::config::prepare().expect("config should reload");
+        crate::config::install(old_config);
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -720,19 +715,14 @@ enabled = true
 "#,
         )
         .expect("config file should be writable");
-        let old_override = std::env::var_os("NIRI_DEEP_CONFIG");
-        std::env::set_var("NIRI_DEEP_CONFIG", config_dir.join("config.toml"));
-        crate::config::prepare().expect("config should load");
+        let old_config = crate::config::snapshot();
+        crate::config::prepare_with_path(Some(&config_dir.join("config.toml")))
+            .expect("config should load");
 
         let domain = domain_id_for_window(Some(kitty::APP_IDS[0]), None, Some("term"));
         assert_eq!(domain, super::TERMINAL_DOMAIN_ID);
 
-        if let Some(previous) = old_override {
-            std::env::set_var("NIRI_DEEP_CONFIG", previous);
-        } else {
-            std::env::remove_var("NIRI_DEEP_CONFIG");
-        }
-        crate::config::prepare().expect("config should reload");
+        crate::config::install(old_config);
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -757,19 +747,14 @@ enabled = true
 "#,
         )
         .expect("config file should be writable");
-        let old_override = std::env::var_os("NIRI_DEEP_CONFIG");
-        std::env::set_var("NIRI_DEEP_CONFIG", config_dir.join("config.toml"));
-        crate::config::prepare().expect("config should load");
+        let old_config = crate::config::snapshot();
+        crate::config::prepare_with_path(Some(&config_dir.join("config.toml")))
+            .expect("config should load");
 
         let domain = domain_id_for_window(Some(foot::APP_IDS[0]), None, Some("term"));
         assert_eq!(domain, super::TERMINAL_DOMAIN_ID);
 
-        if let Some(previous) = old_override {
-            std::env::set_var("NIRI_DEEP_CONFIG", previous);
-        } else {
-            std::env::remove_var("NIRI_DEEP_CONFIG");
-        }
-        crate::config::prepare().expect("config should reload");
+        crate::config::install(old_config);
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -794,19 +779,14 @@ enabled = true
 "#,
         )
         .expect("config file should be writable");
-        let old_override = std::env::var_os("NIRI_DEEP_CONFIG");
-        std::env::set_var("NIRI_DEEP_CONFIG", config_dir.join("config.toml"));
-        crate::config::prepare().expect("config should load");
+        let old_config = crate::config::snapshot();
+        crate::config::prepare_with_path(Some(&config_dir.join("config.toml")))
+            .expect("config should load");
 
         let domain = domain_id_for_window(Some(alacritty::APP_IDS[0]), None, Some("term"));
         assert_eq!(domain, super::TERMINAL_DOMAIN_ID);
 
-        if let Some(previous) = old_override {
-            std::env::set_var("NIRI_DEEP_CONFIG", previous);
-        } else {
-            std::env::remove_var("NIRI_DEEP_CONFIG");
-        }
-        crate::config::prepare().expect("config should reload");
+        crate::config::install(old_config);
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -831,19 +811,14 @@ enabled = true
 "#,
         )
         .expect("config file should be writable");
-        let old_override = std::env::var_os("NIRI_DEEP_CONFIG");
-        std::env::set_var("NIRI_DEEP_CONFIG", config_dir.join("config.toml"));
-        crate::config::prepare().expect("config should load");
+        let old_config = crate::config::snapshot();
+        crate::config::prepare_with_path(Some(&config_dir.join("config.toml")))
+            .expect("config should load");
 
         let domain = domain_id_for_window(Some(ghostty::APP_IDS[0]), None, Some("term"));
         assert_eq!(domain, super::TERMINAL_DOMAIN_ID);
 
-        if let Some(previous) = old_override {
-            std::env::set_var("NIRI_DEEP_CONFIG", previous);
-        } else {
-            std::env::remove_var("NIRI_DEEP_CONFIG");
-        }
-        crate::config::prepare().expect("config should reload");
+        crate::config::install(old_config);
         let _ = std::fs::remove_dir_all(root);
     }
 }

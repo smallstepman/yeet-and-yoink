@@ -26,6 +26,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{OnceLock, RwLock};
+use std::time::Duration;
 
 use crate::engine::topology::Direction;
 
@@ -40,6 +41,9 @@ pub struct Config {
 
     #[serde(default)]
     pub app: AppConfig,
+
+    #[serde(default)]
+    pub runtime: RuntimeConfig,
 }
 
 // ---------------------------------------------------------------------------
@@ -104,6 +108,68 @@ pub struct AppConfig {
 
     #[serde(default)]
     pub editor: HashMap<String, EditorAppConfig>,
+}
+
+// ---------------------------------------------------------------------------
+// Runtime config
+// ---------------------------------------------------------------------------
+
+pub const DEFAULT_VSCODE_REMOTE_CONTROL_HOST: &str = "127.0.0.1";
+pub const DEFAULT_VSCODE_REMOTE_CONTROL_PORT: u16 = 3710;
+pub const DEFAULT_VSCODE_FOCUS_SETTLE_MS: u64 = 50;
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct RuntimeConfig {
+    #[serde(default)]
+    pub logging: LoggingRuntimeConfig,
+
+    #[serde(default)]
+    pub browser_native: BrowserNativeRuntimeConfig,
+
+    #[serde(default)]
+    pub vscode: VscodeRuntimeConfig,
+
+    #[serde(default)]
+    pub zellij: ZellijRuntimeConfig,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct LoggingRuntimeConfig {
+    #[serde(default)]
+    pub debug: bool,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct BrowserNativeRuntimeConfig {
+    #[serde(default)]
+    pub chromium_socket_path: Option<PathBuf>,
+
+    #[serde(default)]
+    pub firefox_socket_path: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct VscodeRuntimeConfig {
+    #[serde(default)]
+    pub remote_control_host: Option<String>,
+
+    #[serde(default)]
+    pub remote_control_port: Option<u16>,
+
+    #[serde(default)]
+    pub state_file: Option<PathBuf>,
+
+    #[serde(default)]
+    pub focus_settle_ms: Option<u64>,
+
+    #[serde(default)]
+    pub test_clipboard_file: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct ZellijRuntimeConfig {
+    #[serde(default)]
+    pub break_plugin: Option<PathBuf>,
 }
 
 // ---------------------------------------------------------------------------
@@ -525,9 +591,9 @@ fn write_config(next: Config) {
     }
 }
 
-fn resolve_config_path() -> Result<(PathBuf, bool)> {
-    if let Some(explicit) = std::env::var_os("NIRI_DEEP_CONFIG").map(PathBuf::from) {
-        return Ok((explicit, true));
+fn resolve_config_path(explicit: Option<&Path>) -> Result<(PathBuf, bool)> {
+    if let Some(explicit) = explicit {
+        return Ok((explicit.to_path_buf(), true));
     }
 
     let strategy = choose_base_strategy().context("failed to resolve config directory")?;
@@ -547,7 +613,11 @@ fn load_config_from(path: &Path) -> Result<Config> {
 }
 
 pub fn prepare() -> Result<()> {
-    let (path, explicit) = resolve_config_path()?;
+    prepare_with_path(None::<&Path>)
+}
+
+pub fn prepare_with_path(path: Option<&Path>) -> Result<()> {
+    let (path, explicit) = resolve_config_path(path)?;
     if path.exists() {
         write_config(load_config_from(&path)?);
         return Ok(());
@@ -562,6 +632,75 @@ pub fn prepare() -> Result<()> {
 
     write_config(Config::default());
     Ok(())
+}
+
+pub fn snapshot() -> Config {
+    read_config()
+}
+
+pub fn install(next: Config) {
+    write_config(next);
+}
+
+pub fn update(mutator: impl FnOnce(&mut Config)) {
+    match config_cell().write() {
+        Ok(mut guard) => mutator(&mut guard),
+        Err(poisoned) => mutator(&mut poisoned.into_inner()),
+    }
+}
+
+pub fn logging_debug_enabled() -> bool {
+    read_config().runtime.logging.debug
+}
+
+pub fn chromium_native_socket_path() -> Option<PathBuf> {
+    read_config().runtime.browser_native.chromium_socket_path
+}
+
+pub fn firefox_native_socket_path() -> Option<PathBuf> {
+    read_config().runtime.browser_native.firefox_socket_path
+}
+
+pub fn vscode_remote_control_host() -> String {
+    read_config()
+        .runtime
+        .vscode
+        .remote_control_host
+        .and_then(|value| {
+            let trimmed = value.trim().to_string();
+            (!trimmed.is_empty()).then_some(trimmed)
+        })
+        .unwrap_or_else(|| DEFAULT_VSCODE_REMOTE_CONTROL_HOST.to_string())
+}
+
+pub fn vscode_remote_control_port() -> Option<u16> {
+    read_config()
+        .runtime
+        .vscode
+        .remote_control_port
+        .filter(|port| *port > 0)
+}
+
+pub fn vscode_state_file_path() -> Option<PathBuf> {
+    read_config().runtime.vscode.state_file
+}
+
+pub fn vscode_focus_settle_delay() -> Duration {
+    Duration::from_millis(
+        read_config()
+            .runtime
+            .vscode
+            .focus_settle_ms
+            .unwrap_or(DEFAULT_VSCODE_FOCUS_SETTLE_MS),
+    )
+}
+
+pub fn vscode_test_clipboard_file() -> Option<PathBuf> {
+    read_config().runtime.vscode.test_clipboard_file
+}
+
+pub fn zellij_break_plugin_path() -> Option<PathBuf> {
+    read_config().runtime.zellij.break_plugin
 }
 
 fn normalize_override(value: &str) -> Option<String> {
