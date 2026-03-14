@@ -649,6 +649,54 @@ enabled = true
     }
 
     #[test]
+    fn other_editor_profiles_do_not_enable_unconfigured_direct_adapter_by_default() {
+        let _guard = env_guard();
+        let root = unique_temp_dir("override-filter");
+        let config_dir = root.join("yeet-and-yoink");
+        fs::create_dir_all(&config_dir).expect("config dir should be created");
+        fs::write(
+            config_dir.join("config.toml"),
+            r#"
+[app.editor.vscode]
+enabled = true
+"#,
+        )
+        .expect("config file should be writable");
+
+        let old_config = load_config(&config_dir.join("config.toml"));
+
+        let chain = resolve_app_chain(emacs::APP_IDS[0], 0, "");
+        assert!(chain.is_empty());
+
+        restore_config(old_config);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn explicit_direct_adapter_disable_still_applies() {
+        let _guard = env_guard();
+        let root = unique_temp_dir("direct-disable");
+        let config_dir = root.join("yeet-and-yoink");
+        fs::create_dir_all(&config_dir).expect("config dir should be created");
+        fs::write(
+            config_dir.join("config.toml"),
+            r#"
+[app.editor.emacs]
+enabled = false
+"#,
+        )
+        .expect("config file should be writable");
+
+        let old_config = load_config(&config_dir.join("config.toml"));
+
+        let chain = resolve_app_chain(emacs::APP_IDS[0], 0, "");
+        assert!(chain.is_empty());
+
+        restore_config(old_config);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn editor_profile_does_not_disable_terminal_chain_selection() {
         let _guard = env_guard();
         let root = unique_temp_dir("override-terminal");

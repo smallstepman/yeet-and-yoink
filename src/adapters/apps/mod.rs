@@ -290,42 +290,11 @@ pub(crate) const DIRECT_ADAPTERS: &[DirectAdapterSpec] = &[
 
 #[cfg(test)]
 mod resolve_chain_tests {
-    use std::path::PathBuf;
-    use std::sync::atomic::{AtomicU64, Ordering};
-
     use crate::adapters::apps::{
         alacritty, chromium::Chromium, emacs, foot, ghostty, kitty, librewolf::Librewolf,
         nvim::Nvim, vscode::Vscode, wezterm, TopologyHandler,
     };
     use crate::adapters::terminal_multiplexers::tmux::Tmux;
-
-    use crate::engine::chain_resolver::runtime_chain_resolver;
-    use crate::engine::contract::ChainResolver;
-    static NEXT_ID: AtomicU64 = AtomicU64::new(1);
-
-    fn env_guard() -> std::sync::MutexGuard<'static, ()> {
-        crate::utils::env_guard()
-    }
-
-    fn unique_temp_dir(prefix: &str) -> PathBuf {
-        let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
-        let path = std::env::temp_dir().join(format!(
-            "yeet-and-yoink-app-resolve-{prefix}-{}-{id}",
-            std::process::id()
-        ));
-        std::fs::create_dir_all(&path).expect("temp dir should be created");
-        path
-    }
-
-    fn load_config(path: &std::path::Path) -> crate::config::Config {
-        let old = crate::config::snapshot();
-        crate::config::prepare_with_path(Some(path)).expect("config should load");
-        old
-    }
-
-    fn restore_config(old: crate::config::Config) {
-        crate::config::install(old);
-    }
 
     #[test]
     fn adapters_implement_topology_traits() {
@@ -341,54 +310,6 @@ mod resolve_chain_tests {
         assert_topology_contracts::<Chromium>();
         assert_topology_contracts::<Librewolf>();
         assert_topology_contracts::<Vscode>();
-    }
-
-    #[test]
-    fn other_editor_profiles_do_not_enable_unconfigured_direct_adapter_by_default() {
-        let _guard = env_guard();
-        let root = unique_temp_dir("override-filter");
-        let config_dir = root.join("yeet-and-yoink");
-        std::fs::create_dir_all(&config_dir).expect("config dir should be created");
-        std::fs::write(
-            config_dir.join("config.toml"),
-            r#"
-[app.editor.vscode]
-enabled = true
-"#,
-        )
-        .expect("config file should be writable");
-
-        let old_config = load_config(&config_dir.join("config.toml"));
-
-        let chain = runtime_chain_resolver().resolve_chain(emacs::APP_IDS[0], 0, "");
-        assert!(chain.is_empty());
-
-        restore_config(old_config);
-        let _ = std::fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn explicit_direct_adapter_disable_still_applies() {
-        let _guard = env_guard();
-        let root = unique_temp_dir("direct-disable");
-        let config_dir = root.join("yeet-and-yoink");
-        std::fs::create_dir_all(&config_dir).expect("config dir should be created");
-        std::fs::write(
-            config_dir.join("config.toml"),
-            r#"
-[app.editor.emacs]
-enabled = false
-"#,
-        )
-        .expect("config file should be writable");
-
-        let old_config = load_config(&config_dir.join("config.toml"));
-
-        let chain = runtime_chain_resolver().resolve_chain(emacs::APP_IDS[0], 0, "");
-        assert!(chain.is_empty());
-
-        restore_config(old_config);
-        let _ = std::fs::remove_dir_all(root);
     }
 
 }
