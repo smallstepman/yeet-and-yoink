@@ -1,4 +1,5 @@
 pub mod focus;
+#[cfg(any(test, target_os = "linux"))]
 pub mod focus_or_cycle;
 pub mod move_win;
 pub mod resize;
@@ -24,12 +25,6 @@ pub(crate) fn run_action(kind: ActionKind, dir: Direction) -> Result<()> {
     }
     {
         let _span = tracing::debug_span!("commands.execute_action").entered();
-        orchestrator.execute(
-            &mut wm,
-            ActionRequest {
-                kind,
-                direction: dir,
-            },
-        )
+        orchestrator.execute(&mut wm, ActionRequest::new(kind, dir))
     }
 }

@@ -1,10 +1,25 @@
+#[cfg(target_os = "linux")]
 pub mod i3;
+#[cfg(any(test, target_os = "linux"))]
 pub mod niri;
+#[cfg(target_os = "macos")]
+pub mod paneru;
+#[cfg(target_os = "macos")]
+pub mod yabai;
 
 use anyhow::{anyhow, Context, Result};
 
-use crate::adapters::window_managers::i3::{I3Adapter, I3FocusedWindow};
+#[cfg(target_os = "linux")]
+use crate::adapters::window_managers::i3::I3_SPEC;
+#[cfg(any(test, target_os = "linux"))]
 use crate::adapters::window_managers::niri::Niri;
+#[cfg(target_os = "linux")]
+use crate::adapters::window_managers::niri::NIRI_SPEC;
+#[cfg(target_os = "macos")]
+use crate::adapters::window_managers::paneru::PANERU_SPEC;
+#[cfg(target_os = "macos")]
+use crate::adapters::window_managers::yabai::YABAI_SPEC;
+use crate::config::{selected_wm_backend, WmBackend};
 use crate::engine::runtime::ProcessId;
 use crate::engine::topology::Direction;
 
@@ -181,14 +196,6 @@ impl ResizeIntent {
     }
 }
 
-pub trait FocusedWindowView {
-    fn id(&self) -> u64;
-    fn app_id(&self) -> Option<&str>;
-    fn title(&self) -> Option<&str>;
-    fn pid(&self) -> Option<ProcessId>;
-    fn original_tile_index(&self) -> usize;
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WindowRecord {
     pub id: u64,
@@ -197,6 +204,229 @@ pub struct WindowRecord {
     pub pid: Option<ProcessId>,
     pub is_focused: bool,
     pub original_tile_index: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FocusedWindowRecord {
+    pub id: u64,
+    pub app_id: Option<String>,
+    pub title: Option<String>,
+    pub pid: Option<ProcessId>,
+    pub original_tile_index: usize,
+}
+
+impl FocusedWindowRecord {}
+
+pub trait WindowManagerSession: Send {
+    fn adapter_name(&self) -> &'static str;
+    fn capabilities(&self) -> WindowManagerCapabilities;
+    fn focused_window(&mut self) -> Result<FocusedWindowRecord>;
+    fn windows(&mut self) -> Result<Vec<WindowRecord>>;
+    fn focus_direction(&mut self, direction: Direction) -> Result<()>;
+    fn move_direction(&mut self, direction: Direction) -> Result<()>;
+    fn resize_with_intent(&mut self, intent: ResizeIntent) -> Result<()>;
+    fn spawn(&mut self, command: Vec<String>) -> Result<()>;
+    fn focus_window_by_id(&mut self, id: u64) -> Result<()>;
+    fn close_window_by_id(&mut self, id: u64) -> Result<()>;
+}
+
+pub trait WindowManagerDomainFactory: Send {
+    fn create_domain(
+        &self,
+        domain_id: crate::engine::topology::DomainId,
+    ) -> Result<Box<dyn crate::engine::domain::ErasedDomain>>;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WindowCycleRequest {
+    pub app_id: Option<String>,
+    pub title: Option<String>,
+    pub spawn: Option<String>,
+    pub new: bool,
+    pub summon: bool,
+}
+
+pub trait WindowCycleProvider: Send {
+    fn focus_or_cycle(&mut self, request: &WindowCycleRequest) -> Result<()>;
+}
+
+pub trait WindowTearOutComposer: Send {
+    fn compose_tear_out(&mut self, direction: Direction, source_tile_index: usize) -> Result<()>;
+}
+
+#[derive(Default)]
+pub struct WindowManagerFeatures {
+    pub domain_factory: Option<Box<dyn WindowManagerDomainFactory>>,
+    pub window_cycle: Option<Box<dyn WindowCycleProvider>>,
+    pub tear_out_composer: Option<Box<dyn WindowTearOutComposer>>,
+}
+
+pub struct ConfiguredWindowManager {
+    core: Box<dyn WindowManagerSession>,
+    features: WindowManagerFeatures,
+}
+
+impl ConfiguredWindowManager {
+    pub fn new(core: Box<dyn WindowManagerSession>, features: WindowManagerFeatures) -> Self {
+        Self::try_new(core, features).expect(
+            "configured window manager should have valid capabilities and required features",
+        )
+    }
+
+    pub fn try_new(
+        core: Box<dyn WindowManagerSession>,
+        features: WindowManagerFeatures,
+    ) -> Result<Self> {
+        validate_configured_window_manager(core.as_ref(), &features)?;
+        Ok(Self { core, features })
+    }
+
+    pub fn adapter_name(&self) -> &'static str {
+        self.core.adapter_name()
+    }
+
+    pub fn capabilities(&self) -> WindowManagerCapabilities {
+        self.core.capabilities()
+    }
+
+    pub fn focused_window(&mut self) -> Result<FocusedWindowRecord> {
+        self.core.focused_window()
+    }
+
+    pub fn windows(&mut self) -> Result<Vec<WindowRecord>> {
+        self.core.windows()
+    }
+
+    pub fn focus_direction(&mut self, direction: Direction) -> Result<()> {
+        self.core.focus_direction(direction)
+    }
+
+    pub fn move_direction(&mut self, direction: Direction) -> Result<()> {
+        self.core.move_direction(direction)
+    }
+
+    pub fn resize_with_intent(&mut self, intent: ResizeIntent) -> Result<()> {
+        self.core.resize_with_intent(intent)
+    }
+
+    pub fn spawn(&mut self, command: Vec<String>) -> Result<()> {
+        self.core.spawn(command)
+    }
+
+    pub fn focus_window_by_id(&mut self, id: u64) -> Result<()> {
+        self.core.focus_window_by_id(id)
+    }
+
+    pub fn close_window_by_id(&mut self, id: u64) -> Result<()> {
+        self.core.close_window_by_id(id)
+    }
+
+    pub fn domain_factory(&self) -> Option<&dyn WindowManagerDomainFactory> {
+        self.features.domain_factory.as_deref()
+    }
+
+    pub fn window_cycle(&self) -> Option<&dyn WindowCycleProvider> {
+        self.features.window_cycle.as_deref()
+    }
+
+    pub fn window_cycle_mut(&mut self) -> Option<&mut (dyn WindowCycleProvider + '_)> {
+        match self.features.window_cycle.as_mut() {
+            Some(provider) => Some(provider.as_mut()),
+            None => None,
+        }
+    }
+
+    pub fn tear_out_composer(&self) -> Option<&dyn WindowTearOutComposer> {
+        self.features.tear_out_composer.as_deref()
+    }
+
+    pub fn tear_out_composer_mut(&mut self) -> Option<&mut (dyn WindowTearOutComposer + '_)> {
+        match self.features.tear_out_composer.as_mut() {
+            Some(composer) => Some(composer.as_mut()),
+            None => None,
+        }
+    }
+}
+
+fn validate_configured_window_manager(
+    core: &dyn WindowManagerSession,
+    features: &WindowManagerFeatures,
+) -> Result<()> {
+    let capabilities = core.capabilities();
+    let adapter_name = core.adapter_name();
+
+    capabilities
+        .validate()
+        .with_context(|| format!("invalid capabilities for configured wm '{}'", adapter_name))?;
+
+    if features.tear_out_composer.is_none() {
+        for direction in [
+            Direction::West,
+            Direction::East,
+            Direction::North,
+            Direction::South,
+        ] {
+            if matches!(
+                plan_tear_out(capabilities, direction),
+                CapabilitySupport::Composed
+            ) {
+                return Err(anyhow!(
+                    "configured wm '{}' is missing a tear-out composer for {direction}",
+                    adapter_name
+                ));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+impl WindowManagerSession for ConfiguredWindowManager {
+    fn adapter_name(&self) -> &'static str {
+        ConfiguredWindowManager::adapter_name(self)
+    }
+
+    fn capabilities(&self) -> WindowManagerCapabilities {
+        ConfiguredWindowManager::capabilities(self)
+    }
+
+    fn focused_window(&mut self) -> Result<FocusedWindowRecord> {
+        ConfiguredWindowManager::focused_window(self)
+    }
+
+    fn windows(&mut self) -> Result<Vec<WindowRecord>> {
+        ConfiguredWindowManager::windows(self)
+    }
+
+    fn focus_direction(&mut self, direction: Direction) -> Result<()> {
+        ConfiguredWindowManager::focus_direction(self, direction)
+    }
+
+    fn move_direction(&mut self, direction: Direction) -> Result<()> {
+        ConfiguredWindowManager::move_direction(self, direction)
+    }
+
+    fn resize_with_intent(&mut self, intent: ResizeIntent) -> Result<()> {
+        ConfiguredWindowManager::resize_with_intent(self, intent)
+    }
+
+    fn spawn(&mut self, command: Vec<String>) -> Result<()> {
+        ConfiguredWindowManager::spawn(self, command)
+    }
+
+    fn focus_window_by_id(&mut self, id: u64) -> Result<()> {
+        ConfiguredWindowManager::focus_window_by_id(self, id)
+    }
+
+    fn close_window_by_id(&mut self, id: u64) -> Result<()> {
+        ConfiguredWindowManager::close_window_by_id(self, id)
+    }
+}
+
+pub trait WindowManagerSpec: Sync {
+    fn backend(&self) -> WmBackend;
+    fn name(&self) -> &'static str;
+    fn connect(&self) -> Result<ConfiguredWindowManager>;
 }
 
 pub trait WindowManagerCapabilityDescriptor {
@@ -210,130 +440,38 @@ pub fn validate_declared_capabilities<T: WindowManagerCapabilityDescriptor>() ->
         .with_context(|| format!("invalid capabilities for adapter '{}'", T::NAME))
 }
 
-pub trait WindowManagerMetadata {
-    fn adapter_name(&self) -> &'static str;
-    fn capabilities(&self) -> WindowManagerCapabilities;
-}
+// ---------------------------------------------------------------------------
+// Linux: Niri adapter
+// ---------------------------------------------------------------------------
 
-impl<T: WindowManagerCapabilityDescriptor> WindowManagerMetadata for T {
-    fn adapter_name(&self) -> &'static str {
-        T::NAME
-    }
-
-    fn capabilities(&self) -> WindowManagerCapabilities {
-        T::CAPABILITIES
-    }
-}
-
-pub trait WindowManagerIntrospection {
-    /// Compile-time guardrail: adapter introspection cannot be implemented
-    /// without declaring its GAT window view and required methods.
-    ///
-    /// ```compile_fail
-    /// use yeet_and_yoink::wm::WindowManagerIntrospection;
-    ///
-    /// struct MissingPieces;
-    ///
-    /// impl WindowManagerIntrospection for MissingPieces {}
-    /// ```
-    type FocusedWindow<'a>: FocusedWindowView
-    where
-        Self: 'a;
-
-    fn with_focused_window<R>(
-        &mut self,
-        visit: impl for<'a> FnOnce(Self::FocusedWindow<'a>) -> Result<R>,
-    ) -> Result<R>;
-
-    fn windows(&mut self) -> Result<Vec<WindowRecord>>;
-}
-
-pub trait WindowManagerExecution {
-    fn focus_direction(&mut self, direction: Direction) -> Result<()>;
-    fn move_direction(&mut self, direction: Direction) -> Result<()>;
-    fn move_column(&mut self, direction: Direction) -> Result<()>;
-    fn consume_into_column_and_move(
-        &mut self,
-        direction: Direction,
-        original_tile_index: usize,
-    ) -> Result<()>;
-    fn resize_with_intent(&mut self, intent: ResizeIntent) -> Result<()>;
-    fn spawn(&mut self, command: Vec<String>) -> Result<()>;
-    fn focus_window_by_id(&mut self, id: u64) -> Result<()>;
-    fn close_window_by_id(&mut self, id: u64) -> Result<()>;
-}
-
-/// Compile-time guardrail: callers cannot treat a type as an adapter
-/// unless all supertraits are implemented.
-///
-/// ```compile_fail
-/// use yeet_and_yoink::wm::WindowManagerAdapter;
-///
-/// struct NotAnAdapter;
-///
-/// fn require_adapter<T: WindowManagerAdapter>() {}
-///
-/// fn main() {
-///     require_adapter::<NotAnAdapter>();
-/// }
-/// ```
-pub trait WindowManagerAdapter:
-    WindowManagerMetadata + WindowManagerIntrospection + WindowManagerExecution
-{
-}
-
-impl<T> WindowManagerAdapter for T where
-    T: WindowManagerMetadata + WindowManagerIntrospection + WindowManagerExecution
-{
-}
-
+#[cfg(any(test, target_os = "linux"))]
 pub struct NiriAdapter {
-    inner: Niri,
+    pub(crate) inner: std::sync::Arc<std::sync::Mutex<Niri>>,
 }
 
+#[cfg(any(test, target_os = "linux"))]
 impl NiriAdapter {
     pub fn connect() -> Result<Self> {
         validate_declared_capabilities::<Self>()?;
-        Ok(Self {
-            inner: Niri::connect()?,
-        })
+        Ok(Self::from_shared(std::sync::Arc::new(
+            std::sync::Mutex::new(Niri::connect()?),
+        )))
+    }
+
+    pub(crate) fn from_shared(inner: std::sync::Arc<std::sync::Mutex<Niri>>) -> Self {
+        Self { inner }
+    }
+
+    fn with_inner<R>(&self, f: impl FnOnce(&mut Niri) -> Result<R>) -> Result<R> {
+        let mut inner = self
+            .inner
+            .lock()
+            .map_err(|_| anyhow!("niri adapter mutex should not be poisoned"))?;
+        f(&mut inner)
     }
 }
 
-#[derive(Clone, Copy)]
-pub struct NiriFocusedWindow<'a> {
-    inner: &'a niri_ipc::Window,
-}
-
-impl FocusedWindowView for NiriFocusedWindow<'_> {
-    fn id(&self) -> u64 {
-        self.inner.id
-    }
-
-    fn app_id(&self) -> Option<&str> {
-        self.inner.app_id.as_deref()
-    }
-
-    fn title(&self) -> Option<&str> {
-        self.inner.title.as_deref()
-    }
-
-    fn pid(&self) -> Option<ProcessId> {
-        self.inner
-            .pid
-            .and_then(|raw| u32::try_from(raw).ok())
-            .and_then(ProcessId::new)
-    }
-
-    fn original_tile_index(&self) -> usize {
-        self.inner
-            .layout
-            .pos_in_scrolling_layout
-            .map(|(_, tile_idx)| tile_idx)
-            .unwrap_or(1)
-    }
-}
-
+#[cfg(any(test, target_os = "linux"))]
 impl WindowManagerCapabilityDescriptor for NiriAdapter {
     const NAME: &'static str = "niri";
     const CAPABILITIES: WindowManagerCapabilities = WindowManagerCapabilities {
@@ -359,24 +497,37 @@ impl WindowManagerCapabilityDescriptor for NiriAdapter {
     };
 }
 
-impl WindowManagerIntrospection for NiriAdapter {
-    type FocusedWindow<'a>
-        = NiriFocusedWindow<'a>
-    where
-        Self: 'a;
+#[cfg(any(test, target_os = "linux"))]
+impl WindowManagerSession for NiriAdapter {
+    fn adapter_name(&self) -> &'static str {
+        Self::NAME
+    }
 
-    fn with_focused_window<R>(
-        &mut self,
-        visit: impl for<'a> FnOnce(Self::FocusedWindow<'a>) -> Result<R>,
-    ) -> Result<R> {
-        let window = self.inner.focused_window()?;
-        visit(NiriFocusedWindow { inner: &window })
+    fn capabilities(&self) -> WindowManagerCapabilities {
+        Self::CAPABILITIES
+    }
+
+    fn focused_window(&mut self) -> Result<FocusedWindowRecord> {
+        let window = self.with_inner(|inner| inner.focused_window())?;
+        Ok(FocusedWindowRecord {
+            id: window.id,
+            app_id: window.app_id,
+            title: window.title,
+            pid: window
+                .pid
+                .and_then(|raw| u32::try_from(raw).ok())
+                .and_then(ProcessId::new),
+            original_tile_index: window
+                .layout
+                .pos_in_scrolling_layout
+                .map(|(_, tile_idx)| tile_idx)
+                .unwrap_or(1),
+        })
     }
 
     fn windows(&mut self) -> Result<Vec<WindowRecord>> {
         Ok(self
-            .inner
-            .windows()?
+            .with_inner(|inner| inner.windows())?
             .into_iter()
             .map(|window| WindowRecord {
                 id: window.id,
@@ -395,302 +546,184 @@ impl WindowManagerIntrospection for NiriAdapter {
             })
             .collect())
     }
-}
 
-impl WindowManagerExecution for NiriAdapter {
     fn focus_direction(&mut self, direction: Direction) -> Result<()> {
-        self.inner.focus_direction(direction)
+        self.with_inner(|inner| inner.focus_direction(direction))
     }
 
     fn move_direction(&mut self, direction: Direction) -> Result<()> {
-        self.inner.move_direction(direction)
-    }
-
-    fn move_column(&mut self, direction: Direction) -> Result<()> {
-        self.inner.move_column(direction)
-    }
-
-    fn consume_into_column_and_move(
-        &mut self,
-        direction: Direction,
-        original_tile_index: usize,
-    ) -> Result<()> {
-        self.inner
-            .consume_into_column_and_move(direction, original_tile_index)
+        self.with_inner(|inner| inner.move_direction(direction))
     }
 
     fn resize_with_intent(&mut self, intent: ResizeIntent) -> Result<()> {
-        self.inner
-            .resize_window(intent.direction, intent.grow(), intent.step.abs().max(1))
+        self.with_inner(|inner| {
+            inner.resize_window(intent.direction, intent.grow(), intent.step.abs().max(1))
+        })
     }
 
     fn spawn(&mut self, command: Vec<String>) -> Result<()> {
-        self.inner.spawn(command)
+        self.with_inner(|inner| inner.spawn(command))
     }
 
     fn focus_window_by_id(&mut self, id: u64) -> Result<()> {
-        self.inner.focus_window_by_id(id)
+        self.with_inner(|inner| inner.focus_window_by_id(id))
     }
 
     fn close_window_by_id(&mut self, id: u64) -> Result<()> {
-        self.inner.close_window_by_id(id)
+        self.with_inner(|inner| inner.close_window_by_id(id))
     }
 }
 
-pub struct WindowManagerRegistration {
-    pub name: &'static str,
-    pub priority: u8,
-    pub detector: fn() -> bool,
-    pub capabilities: WindowManagerCapabilities,
-    pub connect: fn() -> Result<SelectedWindowManager>,
+#[cfg(any(test, target_os = "linux"))]
+impl WindowTearOutComposer for NiriAdapter {
+    fn compose_tear_out(&mut self, direction: Direction, source_tile_index: usize) -> Result<()> {
+        self.with_inner(|inner| match direction {
+            Direction::West | Direction::East => inner.move_column(direction),
+            Direction::North | Direction::South => {
+                inner.consume_into_column_and_move(direction, source_tile_index)
+            }
+        })
+    }
 }
 
-fn detect_niri() -> bool {
-    std::env::var_os("NIRI_SOCKET").is_some() || std::env::var_os("WAYLAND_DISPLAY").is_some()
+struct UnsupportedWindowManagerSpec {
+    backend: WmBackend,
+    name: &'static str,
 }
 
-fn connect_niri() -> Result<SelectedWindowManager> {
-    Ok(SelectedWindowManager::Niri(NiriAdapter::connect()?))
+impl WindowManagerSpec for UnsupportedWindowManagerSpec {
+    fn backend(&self) -> WmBackend {
+        self.backend
+    }
+
+    fn name(&self) -> &'static str {
+        self.name
+    }
+
+    fn connect(&self) -> Result<ConfiguredWindowManager> {
+        Err(anyhow!(
+            "wm backend '{}' is not supported on {}",
+            self.name,
+            std::env::consts::OS
+        ))
+    }
 }
 
-fn detect_i3() -> bool {
-    std::env::var_os("I3SOCK").is_some()
-        || std::env::var_os("SWAYSOCK").is_some()
-        || std::env::var("XDG_CURRENT_DESKTOP")
-            .map(|value| {
-                let value = value.to_ascii_lowercase();
-                value.contains("i3") || value.contains("sway")
-            })
-            .unwrap_or(false)
-}
+#[cfg(not(target_os = "linux"))]
+static UNSUPPORTED_NIRI_SPEC: UnsupportedWindowManagerSpec = UnsupportedWindowManagerSpec {
+    backend: WmBackend::Niri,
+    name: "niri",
+};
+#[cfg(not(target_os = "linux"))]
+static UNSUPPORTED_I3_SPEC: UnsupportedWindowManagerSpec = UnsupportedWindowManagerSpec {
+    backend: WmBackend::I3,
+    name: "i3",
+};
+#[cfg(not(target_os = "macos"))]
+static UNSUPPORTED_PANERU_SPEC: UnsupportedWindowManagerSpec = UnsupportedWindowManagerSpec {
+    backend: WmBackend::Paneru,
+    name: "paneru",
+};
+#[cfg(not(target_os = "macos"))]
+static UNSUPPORTED_YABAI_SPEC: UnsupportedWindowManagerSpec = UnsupportedWindowManagerSpec {
+    backend: WmBackend::Yabai,
+    name: "yabai",
+};
 
-fn connect_i3() -> Result<SelectedWindowManager> {
-    Ok(SelectedWindowManager::I3(I3Adapter::connect()?))
-}
-
-const REGISTRY: &[WindowManagerRegistration] = &[
-    WindowManagerRegistration {
-        name: NiriAdapter::NAME,
-        priority: 100,
-        detector: detect_niri,
-        capabilities: NiriAdapter::CAPABILITIES,
-        connect: connect_niri,
-    },
-    WindowManagerRegistration {
-        name: I3Adapter::NAME,
-        priority: 90,
-        detector: detect_i3,
-        capabilities: I3Adapter::CAPABILITIES,
-        connect: connect_i3,
-    },
-];
-
-fn preferred_window_manager_name() -> Option<String> {
-    crate::config::wm_adapter_override().and_then(|raw| {
-        let normalized = raw.trim().to_ascii_lowercase();
-        if normalized.is_empty() {
-            None
-        } else {
-            Some(normalized)
+pub fn spec_for_backend(backend: WmBackend) -> &'static dyn WindowManagerSpec {
+    match backend {
+        WmBackend::Niri => {
+            #[cfg(target_os = "linux")]
+            {
+                &NIRI_SPEC
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                &UNSUPPORTED_NIRI_SPEC
+            }
         }
-    })
+        WmBackend::I3 => {
+            #[cfg(target_os = "linux")]
+            {
+                &I3_SPEC
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                &UNSUPPORTED_I3_SPEC
+            }
+        }
+        WmBackend::Paneru => {
+            #[cfg(target_os = "macos")]
+            {
+                &PANERU_SPEC
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                &UNSUPPORTED_PANERU_SPEC
+            }
+        }
+        WmBackend::Yabai => {
+            #[cfg(target_os = "macos")]
+            {
+                &YABAI_SPEC
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                &UNSUPPORTED_YABAI_SPEC
+            }
+        }
+    }
 }
 
-pub fn connect_selected() -> Result<SelectedWindowManager> {
-    let _span = tracing::debug_span!("window_managers.connect_selected").entered();
-    let preferred = preferred_window_manager_name();
-
-    if let Some(preferred) = preferred.as_deref() {
-        if let Some(registration) = REGISTRY.iter().find(|item| item.name == preferred) {
-            registration.capabilities.validate().with_context(|| {
-                format!("invalid wm capability declaration for '{}'", preferred)
-            })?;
-            return (registration.connect)();
-        }
+fn connect_backend(
+    backend: WmBackend,
+    spec: &'static dyn WindowManagerSpec,
+) -> Result<ConfiguredWindowManager> {
+    if spec.backend() != backend {
         return Err(anyhow!(
-            "unknown window-manager adapter override '{}'",
-            preferred
+            "wm backend '{}' resolved to mismatched spec '{}'",
+            backend.as_str(),
+            spec.name()
         ));
     }
 
-    let registration = REGISTRY
-        .iter()
-        .filter(|item| (item.detector)())
-        .max_by_key(|item| item.priority)
-        .or_else(|| REGISTRY.first())
-        .context("no window-manager adapters are registered")?;
-
-    registration.capabilities.validate().with_context(|| {
-        format!(
-            "invalid wm capability declaration for '{}'",
-            registration.name
-        )
-    })?;
-    (registration.connect)()
+    spec.connect()
+        .with_context(|| format!("failed to connect configured wm '{}'", spec.name()))
 }
 
-pub enum SelectedWindowManager {
-    Niri(NiriAdapter),
-    I3(I3Adapter),
+#[cfg(test)]
+fn connect_backend_for_test(
+    backend: WmBackend,
+    spec: &'static dyn WindowManagerSpec,
+) -> Result<ConfiguredWindowManager> {
+    connect_backend(backend, spec)
 }
 
-#[derive(Clone, Copy)]
-pub enum SelectedFocusedWindow<'a> {
-    Niri(NiriFocusedWindow<'a>),
-    I3(I3FocusedWindow<'a>),
-}
-
-impl FocusedWindowView for SelectedFocusedWindow<'_> {
-    fn id(&self) -> u64 {
-        match self {
-            Self::Niri(inner) => inner.id(),
-            Self::I3(inner) => inner.id(),
-        }
-    }
-
-    fn app_id(&self) -> Option<&str> {
-        match self {
-            Self::Niri(inner) => inner.app_id(),
-            Self::I3(inner) => inner.app_id(),
-        }
-    }
-
-    fn title(&self) -> Option<&str> {
-        match self {
-            Self::Niri(inner) => inner.title(),
-            Self::I3(inner) => inner.title(),
-        }
-    }
-
-    fn pid(&self) -> Option<ProcessId> {
-        match self {
-            Self::Niri(inner) => inner.pid(),
-            Self::I3(inner) => inner.pid(),
-        }
-    }
-
-    fn original_tile_index(&self) -> usize {
-        match self {
-            Self::Niri(inner) => inner.original_tile_index(),
-            Self::I3(inner) => inner.original_tile_index(),
-        }
-    }
-}
-
-impl WindowManagerMetadata for SelectedWindowManager {
-    fn adapter_name(&self) -> &'static str {
-        match self {
-            Self::Niri(inner) => inner.adapter_name(),
-            Self::I3(inner) => inner.adapter_name(),
-        }
-    }
-
-    fn capabilities(&self) -> WindowManagerCapabilities {
-        match self {
-            Self::Niri(inner) => inner.capabilities(),
-            Self::I3(inner) => inner.capabilities(),
-        }
-    }
-}
-
-impl WindowManagerIntrospection for SelectedWindowManager {
-    type FocusedWindow<'a>
-        = SelectedFocusedWindow<'a>
-    where
-        Self: 'a;
-
-    fn with_focused_window<R>(
-        &mut self,
-        visit: impl for<'a> FnOnce(Self::FocusedWindow<'a>) -> Result<R>,
-    ) -> Result<R> {
-        match self {
-            Self::Niri(inner) => {
-                inner.with_focused_window(|window| visit(SelectedFocusedWindow::Niri(window)))
-            }
-            Self::I3(inner) => {
-                inner.with_focused_window(|window| visit(SelectedFocusedWindow::I3(window)))
-            }
-        }
-    }
-
-    fn windows(&mut self) -> Result<Vec<WindowRecord>> {
-        match self {
-            Self::Niri(inner) => inner.windows(),
-            Self::I3(inner) => inner.windows(),
-        }
-    }
-}
-
-impl WindowManagerExecution for SelectedWindowManager {
-    fn focus_direction(&mut self, direction: Direction) -> Result<()> {
-        match self {
-            Self::Niri(inner) => inner.focus_direction(direction),
-            Self::I3(inner) => inner.focus_direction(direction),
-        }
-    }
-
-    fn move_direction(&mut self, direction: Direction) -> Result<()> {
-        match self {
-            Self::Niri(inner) => inner.move_direction(direction),
-            Self::I3(inner) => inner.move_direction(direction),
-        }
-    }
-
-    fn move_column(&mut self, direction: Direction) -> Result<()> {
-        match self {
-            Self::Niri(inner) => inner.move_column(direction),
-            Self::I3(inner) => inner.move_column(direction),
-        }
-    }
-
-    fn consume_into_column_and_move(
-        &mut self,
-        direction: Direction,
-        original_tile_index: usize,
-    ) -> Result<()> {
-        match self {
-            Self::Niri(inner) => inner.consume_into_column_and_move(direction, original_tile_index),
-            Self::I3(inner) => inner.consume_into_column_and_move(direction, original_tile_index),
-        }
-    }
-
-    fn resize_with_intent(&mut self, intent: ResizeIntent) -> Result<()> {
-        match self {
-            Self::Niri(inner) => inner.resize_with_intent(intent),
-            Self::I3(inner) => inner.resize_with_intent(intent),
-        }
-    }
-
-    fn spawn(&mut self, command: Vec<String>) -> Result<()> {
-        match self {
-            Self::Niri(inner) => inner.spawn(command),
-            Self::I3(inner) => inner.spawn(command),
-        }
-    }
-
-    fn focus_window_by_id(&mut self, id: u64) -> Result<()> {
-        match self {
-            Self::Niri(inner) => inner.focus_window_by_id(id),
-            Self::I3(inner) => inner.focus_window_by_id(id),
-        }
-    }
-
-    fn close_window_by_id(&mut self, id: u64) -> Result<()> {
-        match self {
-            Self::Niri(inner) => inner.close_window_by_id(id),
-            Self::I3(inner) => inner.close_window_by_id(id),
-        }
-    }
+pub fn connect_selected() -> Result<ConfiguredWindowManager> {
+    let _span = tracing::debug_span!("window_managers.connect_selected").entered();
+    let backend = selected_wm_backend();
+    let spec = spec_for_backend(backend);
+    connect_backend(backend, spec)
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
         plan_resize, plan_tear_out, validate_declared_capabilities, CapabilitySupport,
-        DirectionalCapability, NiriAdapter, PrimitiveWindowManagerCapabilities,
-        WindowManagerCapabilities, WindowManagerCapabilityDescriptor,
+        ConfiguredWindowManager, DirectionalCapability, FocusedWindowRecord,
+        PrimitiveWindowManagerCapabilities, ResizeIntent, WindowCycleProvider,
+        WindowManagerCapabilities, WindowManagerCapabilityDescriptor, WindowManagerFeatures,
+        WindowManagerSession, WindowManagerSpec,
     };
+    use crate::config::WmBackend;
     use crate::engine::topology::Direction;
+    use anyhow::Result;
+    use std::sync::{Arc, Mutex};
+
+    #[cfg(target_os = "linux")]
+    use super::NiriAdapter;
+    #[cfg(target_os = "macos")]
+    use crate::adapters::window_managers::yabai::YabaiAdapter;
 
     struct InvalidComposedCapabilities;
 
@@ -723,12 +756,21 @@ mod tests {
             .contains("invalid capabilities for adapter"));
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn niri_capabilities_are_valid() {
         validate_declared_capabilities::<NiriAdapter>()
             .expect("niri capability descriptor should be valid");
     }
 
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn yabai_capabilities_are_valid() {
+        validate_declared_capabilities::<YabaiAdapter>()
+            .expect("yabai capability descriptor should be valid");
+    }
+
+    #[cfg(target_os = "linux")]
     #[test]
     fn tear_out_and_resize_plans_resolve_native_composed_and_unsupported() {
         let capabilities = NiriAdapter::CAPABILITIES;
@@ -740,6 +782,301 @@ mod tests {
             plan_tear_out(capabilities, Direction::North),
             CapabilitySupport::Composed
         );
+        assert_eq!(
+            plan_resize(capabilities, Direction::West),
+            CapabilitySupport::Native
+        );
+    }
+
+    #[test]
+    fn configured_window_manager_delegates_to_object_safe_core() {
+        let mut wm = fake_configured_wm();
+        assert_eq!(wm.adapter_name(), "fake");
+        assert_eq!(wm.focused_window().unwrap().id, 42);
+        wm.focus_direction(Direction::West).unwrap();
+        assert_eq!(wm.take_calls(), vec!["focus_direction:west"]);
+    }
+
+    #[test]
+    fn configured_window_manager_exposes_optional_capabilities_independently() {
+        let wm = fake_configured_wm_with_cycle_provider();
+        assert!(wm.window_cycle().is_some());
+        assert!(wm.domain_factory().is_none());
+    }
+
+    #[test]
+    fn configured_window_manager_rejects_composed_tear_out_without_composer() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+
+        let err = match ConfiguredWindowManager::try_new(
+            Box::new(FakeSession::with_capabilities(
+                calls,
+                composed_tear_out_capabilities(Direction::North),
+            )),
+            WindowManagerFeatures::default(),
+        ) {
+            Ok(_) => panic!("composed tear-out should require a tear-out composer"),
+            Err(err) => err,
+        };
+
+        assert!(err.to_string().contains("missing a tear-out composer"));
+    }
+
+    #[test]
+    fn configured_window_manager_accepts_composed_tear_out_with_composer() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let mut features = WindowManagerFeatures::default();
+        features.tear_out_composer = Some(Box::new(FakeTearOutComposer));
+
+        let wm = ConfiguredWindowManager::new(
+            Box::new(FakeSession::with_capabilities(
+                calls,
+                composed_tear_out_capabilities(Direction::North),
+            )),
+            features,
+        );
+
+        assert!(wm.tear_out_composer().is_some());
+    }
+
+    #[test]
+    fn built_in_connectors_are_typed_as_configured_window_managers() {
+        fn assert_spec(_spec: &'static dyn WindowManagerSpec) {}
+
+        assert_spec(super::spec_for_backend(WmBackend::Niri));
+        assert_spec(super::spec_for_backend(WmBackend::I3));
+        assert_spec(super::spec_for_backend(WmBackend::Paneru));
+        assert_spec(super::spec_for_backend(WmBackend::Yabai));
+        let _ = super::connect_selected as fn() -> Result<ConfiguredWindowManager>;
+    }
+
+    #[test]
+    fn connect_selected_reports_configured_backend_failure_without_fallback() {
+        let err = match connect_backend_for_test(WmBackend::Niri, failing_spec(WmBackend::Niri)) {
+            Ok(_) => panic!("configured backend should fail without fallback"),
+            Err(err) => err,
+        };
+        assert!(err.to_string().contains("niri"));
+        assert!(!err.to_string().contains("i3"));
+    }
+
+    #[test]
+    fn failing_spec_uses_requested_backend() {
+        let spec = failing_spec(WmBackend::Yabai);
+
+        assert_eq!(spec.backend(), WmBackend::Yabai);
+        assert_eq!(spec.name(), "yabai");
+    }
+
+    fn fake_configured_wm() -> TestConfiguredWindowManager {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        TestConfiguredWindowManager::new(
+            ConfiguredWindowManager::new(
+                Box::new(FakeSession::new(calls.clone())),
+                WindowManagerFeatures::default(),
+            ),
+            calls,
+        )
+    }
+
+    fn fake_configured_wm_with_cycle_provider() -> TestConfiguredWindowManager {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let mut features = WindowManagerFeatures::default();
+        features.window_cycle = Some(Box::new(FakeCycleProvider));
+        TestConfiguredWindowManager::new(
+            ConfiguredWindowManager::new(Box::new(FakeSession::new(calls.clone())), features),
+            calls,
+        )
+    }
+
+    fn composed_tear_out_capabilities(direction: Direction) -> WindowManagerCapabilities {
+        let mut capabilities = WindowManagerCapabilities::none();
+        capabilities.primitives.tear_out_right = true;
+        capabilities.primitives.move_column = true;
+        capabilities.primitives.consume_into_column_and_move = true;
+
+        match direction {
+            Direction::West => capabilities.tear_out.west = CapabilitySupport::Composed,
+            Direction::East => capabilities.tear_out.east = CapabilitySupport::Composed,
+            Direction::North => capabilities.tear_out.north = CapabilitySupport::Composed,
+            Direction::South => capabilities.tear_out.south = CapabilitySupport::Composed,
+        }
+
+        capabilities
+    }
+
+    struct TestConfiguredWindowManager {
+        wm: ConfiguredWindowManager,
+        calls: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl TestConfiguredWindowManager {
+        fn new(wm: ConfiguredWindowManager, calls: Arc<Mutex<Vec<String>>>) -> Self {
+            Self { wm, calls }
+        }
+
+        fn take_calls(&mut self) -> Vec<String> {
+            let mut calls = self
+                .calls
+                .lock()
+                .expect("calls mutex should not be poisoned");
+            std::mem::take(&mut *calls)
+        }
+    }
+
+    impl std::ops::Deref for TestConfiguredWindowManager {
+        type Target = ConfiguredWindowManager;
+
+        fn deref(&self) -> &Self::Target {
+            &self.wm
+        }
+    }
+
+    impl std::ops::DerefMut for TestConfiguredWindowManager {
+        fn deref_mut(&mut self) -> &mut Self::Target {
+            &mut self.wm
+        }
+    }
+
+    struct FakeSession {
+        calls: Arc<Mutex<Vec<String>>>,
+        capabilities: WindowManagerCapabilities,
+    }
+
+    impl FakeSession {
+        fn new(calls: Arc<Mutex<Vec<String>>>) -> Self {
+            Self {
+                calls,
+                capabilities: WindowManagerCapabilities::none(),
+            }
+        }
+
+        fn with_capabilities(
+            calls: Arc<Mutex<Vec<String>>>,
+            capabilities: WindowManagerCapabilities,
+        ) -> Self {
+            Self {
+                calls,
+                capabilities,
+            }
+        }
+
+        fn push_call(&self, call: impl Into<String>) {
+            self.calls
+                .lock()
+                .expect("calls mutex should not be poisoned")
+                .push(call.into());
+        }
+    }
+
+    impl WindowManagerSession for FakeSession {
+        fn adapter_name(&self) -> &'static str {
+            "fake"
+        }
+
+        fn capabilities(&self) -> WindowManagerCapabilities {
+            self.capabilities
+        }
+
+        fn focused_window(&mut self) -> Result<FocusedWindowRecord> {
+            Ok(FocusedWindowRecord {
+                id: 42,
+                app_id: Some("fake-app".to_string()),
+                title: Some("fake-title".to_string()),
+                pid: None,
+                original_tile_index: 1,
+            })
+        }
+
+        fn windows(&mut self) -> Result<Vec<super::WindowRecord>> {
+            Ok(Vec::new())
+        }
+
+        fn focus_direction(&mut self, direction: Direction) -> Result<()> {
+            self.push_call(format!("focus_direction:{direction}"));
+            Ok(())
+        }
+
+        fn move_direction(&mut self, _direction: Direction) -> Result<()> {
+            Ok(())
+        }
+
+        fn resize_with_intent(&mut self, _intent: ResizeIntent) -> Result<()> {
+            Ok(())
+        }
+
+        fn spawn(&mut self, _command: Vec<String>) -> Result<()> {
+            Ok(())
+        }
+
+        fn focus_window_by_id(&mut self, _id: u64) -> Result<()> {
+            Ok(())
+        }
+
+        fn close_window_by_id(&mut self, _id: u64) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    struct FakeCycleProvider;
+
+    impl WindowCycleProvider for FakeCycleProvider {
+        fn focus_or_cycle(&mut self, _request: &super::WindowCycleRequest) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    struct FakeTearOutComposer;
+
+    impl super::WindowTearOutComposer for FakeTearOutComposer {
+        fn compose_tear_out(
+            &mut self,
+            _direction: Direction,
+            _source_tile_index: usize,
+        ) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    fn connect_backend_for_test(
+        backend: WmBackend,
+        spec: &'static dyn WindowManagerSpec,
+    ) -> Result<ConfiguredWindowManager> {
+        super::connect_backend_for_test(backend, spec)
+    }
+
+    fn failing_spec(backend: WmBackend) -> &'static dyn WindowManagerSpec {
+        Box::leak(Box::new(FailingSpec { backend }))
+    }
+
+    struct FailingSpec {
+        backend: WmBackend,
+    }
+
+    impl WindowManagerSpec for FailingSpec {
+        fn backend(&self) -> WmBackend {
+            self.backend
+        }
+
+        fn name(&self) -> &'static str {
+            self.backend.as_str()
+        }
+
+        fn connect(&self) -> Result<ConfiguredWindowManager> {
+            Err(anyhow::anyhow!("{} connection failed", self.name()))
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn yabai_tear_out_and_resize_plans() {
+        let capabilities = YabaiAdapter::CAPABILITIES;
+        // Yabai doesn't support tear-out
+        assert_eq!(
+            plan_tear_out(capabilities, Direction::East),
+            CapabilitySupport::Unsupported
+        );
+        // Yabai has native resize
         assert_eq!(
             plan_resize(capabilities, Direction::West),
             CapabilitySupport::Native

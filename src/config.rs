@@ -56,7 +56,7 @@ pub struct WmConfig {
     ///
     /// ```toml
     /// [wm]
-    /// enabled_integration = "aerospace"
+    /// enabled_integration = "yabai"
     /// ```
     pub enabled_integration: WmBackend,
 }
@@ -65,20 +65,16 @@ pub struct WmConfig {
 #[serde(rename_all = "snake_case")]
 pub enum WmBackend {
     /// Niri - Wayland compositor, Linux only
-    #[cfg(target_os = "linux")]
     Niri,
 
     /// i3 - tiling WM for Linux/X11
-    #[cfg(target_os = "linux")]
     I3,
 
-    /// Yabai - tiling WM for macOS
-    #[cfg(target_os = "macos")]
-    Yabai,
+    /// Paneru - sliding/scrolling tiling WM for macOS (niri-like)
+    Paneru,
 
-    /// AeroSpace - tiling WM for macOS
-    #[cfg(target_os = "macos")]
-    Aerospace,
+    /// Yabai - tiling WM for macOS
+    Yabai,
 }
 
 impl Default for WmBackend {
@@ -89,7 +85,25 @@ impl Default for WmBackend {
         }
         #[cfg(target_os = "macos")]
         {
-            Self::Aerospace
+            Self::Yabai
+        }
+    }
+}
+
+impl WmBackend {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Niri => "niri",
+            Self::I3 => "i3",
+            Self::Paneru => "paneru",
+            Self::Yabai => "yabai",
+        }
+    }
+
+    pub const fn supported_on_current_platform(self) -> bool {
+        match self {
+            Self::Niri | Self::I3 => cfg!(target_os = "linux"),
+            Self::Paneru | Self::Yabai => cfg!(target_os = "macos"),
         }
     }
 }
@@ -875,19 +889,8 @@ fn app_enabled_from(cfg: &Config, section: AppSection, aliases: &[&str]) -> bool
     }
 }
 
-pub fn wm_adapter_override() -> Option<String> {
-    let cfg = read_config();
-    let value = match cfg.wm.enabled_integration {
-        #[cfg(target_os = "linux")]
-        WmBackend::Niri => "niri",
-        #[cfg(target_os = "linux")]
-        WmBackend::I3 => "i3",
-        #[cfg(target_os = "macos")]
-        WmBackend::Yabai => "yabai",
-        #[cfg(target_os = "macos")]
-        WmBackend::Aerospace => "aerospace",
-    };
-    normalize_override(value)
+pub fn selected_wm_backend() -> WmBackend {
+    read_config().wm.enabled_integration
 }
 
 fn app_adapter_override_from(cfg: &Config) -> Option<String> {
@@ -1372,5 +1375,21 @@ app = "wezterm"
             &parsed,
             &["kitty", "terminal"]
         ));
+    }
+
+    #[test]
+    fn wm_backend_deserializes_any_builtin_name() {
+        assert_eq!(
+            toml::from_str::<WmConfig>("enabled_integration = \"niri\"")
+                .unwrap()
+                .enabled_integration,
+            WmBackend::Niri
+        );
+        assert_eq!(
+            toml::from_str::<WmConfig>("enabled_integration = \"yabai\"")
+                .unwrap()
+                .enabled_integration,
+            WmBackend::Yabai
+        );
     }
 }

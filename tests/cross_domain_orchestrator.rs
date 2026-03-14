@@ -8,14 +8,13 @@ use std::sync::{Mutex, OnceLock};
 use anyhow::{anyhow, Result};
 
 use yeet_and_yoink::adapters::window_managers::{
-    FocusedWindowView, ResizeIntent, WindowManagerCapabilities, WindowManagerExecution,
-    WindowManagerIntrospection, WindowManagerMetadata, WindowRecord,
+    ConfiguredWindowManager, FocusedWindowRecord, ResizeIntent, WindowManagerCapabilities,
+    WindowManagerFeatures, WindowManagerSession, WindowRecord,
 };
 use yeet_and_yoink::engine::domain::PaneState;
 use yeet_and_yoink::engine::domain::{DomainLeafSnapshot, DomainSnapshot, ErasedDomain};
 use yeet_and_yoink::engine::domain::{EDITOR_DOMAIN_ID, TERMINAL_DOMAIN_ID, WM_DOMAIN_ID};
 use yeet_and_yoink::engine::orchestrator::{ActionKind, ActionRequest, Orchestrator};
-use yeet_and_yoink::engine::runtime::ProcessId;
 use yeet_and_yoink::engine::topology::Direction;
 use yeet_and_yoink::engine::topology::Rect;
 
@@ -110,36 +109,32 @@ impl ErasedDomain for FakeDomain {
     }
 }
 
-#[derive(Clone, Copy)]
-struct FakeFocusedWindow<'a> {
-    inner: &'a WindowRecord,
-}
-
-impl FocusedWindowView for FakeFocusedWindow<'_> {
-    fn id(&self) -> u64 {
-        self.inner.id
-    }
-
-    fn app_id(&self) -> Option<&str> {
-        self.inner.app_id.as_deref()
-    }
-
-    fn title(&self) -> Option<&str> {
-        self.inner.title.as_deref()
-    }
-
-    fn pid(&self) -> Option<ProcessId> {
-        self.inner.pid
-    }
-
-    fn original_tile_index(&self) -> usize {
-        self.inner.original_tile_index
-    }
+struct FakeWindowManagerState {
+    windows: Vec<WindowRecord>,
+    move_calls: usize,
 }
 
 struct FakeWindowManager {
-    windows: Vec<WindowRecord>,
-    move_calls: usize,
+    state: Arc<Mutex<FakeWindowManagerState>>,
+}
+
+impl FakeWindowManager {
+    fn new(state: Arc<Mutex<FakeWindowManagerState>>) -> Self {
+        Self { state }
+    }
+}
+
+fn configured_fake_wm(
+    state: FakeWindowManagerState,
+) -> (ConfiguredWindowManager, Arc<Mutex<FakeWindowManagerState>>) {
+    let state = Arc::new(Mutex::new(state));
+    (
+        ConfiguredWindowManager::new(
+            Box::new(FakeWindowManager::new(state.clone())),
+            WindowManagerFeatures::default(),
+        ),
+        state,
+    )
 }
 
 fn env_guard() -> std::sync::MutexGuard<'static, ()> {
@@ -171,7 +166,7 @@ fn unique_temp_dir(prefix: &str) -> PathBuf {
     ))
 }
 
-impl WindowManagerMetadata for FakeWindowManager {
+impl WindowManagerSession for FakeWindowManager {
     fn adapter_name(&self) -> &'static str {
         "fake"
     }
@@ -179,66 +174,64 @@ impl WindowManagerMetadata for FakeWindowManager {
     fn capabilities(&self) -> WindowManagerCapabilities {
         WindowManagerCapabilities::none()
     }
-}
 
-impl WindowManagerIntrospection for FakeWindowManager {
-    type FocusedWindow<'a>
-        = FakeFocusedWindow<'a>
-    where
-        Self: 'a;
-
-    fn with_focused_window<R>(
-        &mut self,
-        visit: impl for<'a> FnOnce(Self::FocusedWindow<'a>) -> Result<R>,
-    ) -> Result<R> {
-        let focused = self
+    fn focused_window(&mut self) -> Result<FocusedWindowRecord> {
+        let state = self
+            .state
+            .lock()
+            .expect("fake wm state mutex should not be poisoned");
+        let focused = state
             .windows
             .iter()
             .find(|window| window.is_focused)
             .ok_or_else(|| anyhow!("no focused window"))?;
-        visit(FakeFocusedWindow { inner: focused })
+        Ok(FocusedWindowRecord {
+            id: focused.id,
+            app_id: focused.app_id.clone(),
+            title: focused.title.clone(),
+            pid: focused.pid,
+            original_tile_index: focused.original_tile_index,
+        })
     }
 
     fn windows(&mut self) -> Result<Vec<WindowRecord>> {
-        Ok(self.windows.clone())
+        Ok(self
+            .state
+            .lock()
+            .expect("fake wm state mutex should not be poisoned")
+            .windows
+            .clone())
     }
-}
 
-impl WindowManagerExecution for FakeWindowManager {
     fn focus_direction(&mut self, _direction: Direction) -> Result<()> {
-        if self.windows.len() < 2 {
+        let mut state = self
+            .state
+            .lock()
+            .expect("fake wm state mutex should not be poisoned");
+        if state.windows.len() < 2 {
             return Ok(());
         }
-        let focused_idx = self
+        let focused_idx = state
             .windows
             .iter()
             .position(|window| window.is_focused)
             .ok_or_else(|| anyhow!("no focused window"))?;
-        let target_idx = if focused_idx + 1 < self.windows.len() {
+        let target_idx = if focused_idx + 1 < state.windows.len() {
             focused_idx + 1
         } else {
             focused_idx.saturating_sub(1)
         };
-        for (idx, window) in self.windows.iter_mut().enumerate() {
+        for (idx, window) in state.windows.iter_mut().enumerate() {
             window.is_focused = idx == target_idx;
         }
         Ok(())
     }
 
     fn move_direction(&mut self, _direction: Direction) -> Result<()> {
-        self.move_calls += 1;
-        Ok(())
-    }
-
-    fn move_column(&mut self, _direction: Direction) -> Result<()> {
-        Ok(())
-    }
-
-    fn consume_into_column_and_move(
-        &mut self,
-        _direction: Direction,
-        _original_tile_index: usize,
-    ) -> Result<()> {
+        self.state
+            .lock()
+            .expect("fake wm state mutex should not be poisoned")
+            .move_calls += 1;
         Ok(())
     }
 
@@ -251,8 +244,12 @@ impl WindowManagerExecution for FakeWindowManager {
     }
 
     fn focus_window_by_id(&mut self, id: u64) -> Result<()> {
+        let mut state = self
+            .state
+            .lock()
+            .expect("fake wm state mutex should not be poisoned");
         let mut matched = false;
-        for window in &mut self.windows {
+        for window in &mut state.windows {
             if window.id == id {
                 window.is_focused = true;
                 matched = true;
@@ -267,9 +264,13 @@ impl WindowManagerExecution for FakeWindowManager {
     }
 
     fn close_window_by_id(&mut self, id: u64) -> Result<()> {
-        let original_len = self.windows.len();
-        self.windows.retain(|window| window.id != id);
-        if self.windows.len() == original_len {
+        let mut state = self
+            .state
+            .lock()
+            .expect("fake wm state mutex should not be poisoned");
+        let original_len = state.windows.len();
+        state.windows.retain(|window| window.id != id);
+        if state.windows.len() == original_len {
             return Err(anyhow!("window id {id} not found"));
         }
         Ok(())
@@ -314,7 +315,7 @@ enabled = true
         wezterm_counters.clone(),
     )));
 
-    let mut wm = FakeWindowManager {
+    let (mut wm, state) = configured_fake_wm(FakeWindowManagerState {
         windows: vec![
             WindowRecord {
                 id: 1001,
@@ -334,7 +335,7 @@ enabled = true
             },
         ],
         move_calls: 0,
-    };
+    });
 
     orchestrator
         .execute(
@@ -346,7 +347,13 @@ enabled = true
         )
         .expect("cross-domain move should execute");
 
-    assert_eq!(wm.move_calls, 0);
+    assert_eq!(
+        state
+            .lock()
+            .expect("fake wm state mutex should not be poisoned")
+            .move_calls,
+        0
+    );
     assert_eq!(nvim_counters.tear_off_calls.load(Ordering::Relaxed), 1);
     assert_eq!(wezterm_counters.merge_calls.load(Ordering::Relaxed), 1);
 
@@ -389,7 +396,7 @@ enabled = true
         wm_counters.clone(),
     )));
 
-    let mut wm = FakeWindowManager {
+    let (mut wm, state) = configured_fake_wm(FakeWindowManagerState {
         windows: vec![
             WindowRecord {
                 id: 3003,
@@ -409,7 +416,7 @@ enabled = true
             },
         ],
         move_calls: 0,
-    };
+    });
 
     orchestrator
         .execute(
@@ -421,7 +428,13 @@ enabled = true
         )
         .expect("cross-domain move should still succeed via wm fallback");
 
-    assert_eq!(wm.move_calls, 1);
+    assert_eq!(
+        state
+            .lock()
+            .expect("fake wm state mutex should not be poisoned")
+            .move_calls,
+        1
+    );
     assert_eq!(wezterm_counters.tear_off_calls.load(Ordering::Relaxed), 1);
     assert_eq!(wm_counters.merge_calls.load(Ordering::Relaxed), 0);
 

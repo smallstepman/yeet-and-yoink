@@ -1,13 +1,9 @@
-use std::collections::{HashMap, HashSet};
-use std::fs;
-use std::path::PathBuf;
-
-use anyhow::{bail, Context, Result};
+use anyhow::{bail, Result};
 use clap::Args;
-use niri_ipc::{Window, WorkspaceReferenceArg};
-use serde::{Deserialize, Serialize};
 
-use crate::adapters::window_managers::niri::Niri;
+use crate::adapters::window_managers::{
+    connect_selected, ConfiguredWindowManager, WindowCycleRequest,
+};
 
 #[derive(Debug, Clone, Args)]
 pub struct FocusOrCycleArgs {
@@ -28,176 +24,186 @@ pub struct FocusOrCycleArgs {
     pub summon: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct SummonOrigin {
-    workspace_id: u64,
-    output: Option<String>,
-}
+impl FocusOrCycleArgs {
+    fn try_into_request(self) -> Result<WindowCycleRequest> {
+        if self.app_id.is_none() && self.title.is_none() {
+            bail!("focus-or-cycle requires --app-id and/or --title");
+        }
 
-#[derive(Debug, Default, Serialize, Deserialize)]
-struct SummonState {
-    windows: HashMap<u64, SummonOrigin>,
+        if self.new && self.spawn.is_none() {
+            bail!("--new requires --spawn '<command>'");
+        }
+
+        Ok(WindowCycleRequest {
+            app_id: self.app_id,
+            title: self.title,
+            spawn: self.spawn,
+            new: self.new,
+            summon: self.summon,
+        })
+    }
 }
 
 pub fn run(args: FocusOrCycleArgs) -> Result<()> {
-    if args.app_id.is_none() && args.title.is_none() {
-        bail!("focus-or-cycle requires --app-id and/or --title");
-    }
-
-    let mut niri = Niri::connect()?;
-
-    if args.new {
-        let spawn = args
-            .spawn
-            .as_ref()
-            .context("--new requires --spawn '<command>'")?;
-        return niri.spawn_sh(spawn.clone());
-    }
-
-    let windows = niri.windows()?;
-    let focused_id = windows.iter().find(|w| w.is_focused).map(|w| w.id);
-
-    let app_id = args.app_id.as_deref();
-    let title = args.title.as_deref();
-    let mut matches: Vec<Window> = windows
-        .iter()
-        .filter(|w| window_matches(w, app_id, title))
-        .cloned()
-        .collect();
-
-    if matches.is_empty() {
-        if let Some(spawn) = args.spawn {
-            return niri.spawn_sh(spawn);
-        }
-        bail!("no matching windows found and no --spawn provided");
-    }
-
-    matches.sort_by(|a, b| focus_sort_key(b).cmp(&focus_sort_key(a)));
-    let target_idx = focused_id
-        .and_then(|id| matches.iter().position(|w| w.id == id))
-        .map(|idx| (idx + 1) % matches.len())
-        .unwrap_or(0);
-    let target = matches[target_idx].clone();
-
-    if args.summon {
-        summon_or_return(&mut niri, &target, &windows)?;
-        return Ok(());
-    }
-
-    niri.focus_window_by_id(target.id)
+    let request = args.try_into_request()?;
+    let mut wm = connect_selected()?;
+    run_with_window_manager(request, &mut wm)
 }
 
-fn window_matches(window: &Window, app_id: Option<&str>, title: Option<&str>) -> bool {
-    if let Some(app_id) = app_id {
-        if window.app_id.as_deref() != Some(app_id) {
-            return false;
-        }
-    }
-    if let Some(title) = title {
-        let Some(window_title) = window.title.as_deref() else {
-            return false;
-        };
-        if !window_title.to_lowercase().contains(&title.to_lowercase()) {
-            return false;
-        }
-    }
-    true
+fn run_with_window_manager(
+    request: WindowCycleRequest,
+    wm: &mut ConfiguredWindowManager,
+) -> Result<()> {
+    let adapter_name = wm.adapter_name();
+    let provider = wm.window_cycle_mut().ok_or_else(|| {
+        anyhow::anyhow!("window manager '{adapter_name}' does not support focus-or-cycle")
+    })?;
+    provider.focus_or_cycle(&request)
 }
 
-fn focus_sort_key(window: &Window) -> (u64, u32, u64) {
-    let (secs, nanos) = window
-        .focus_timestamp
-        .map(|ts| (ts.secs, ts.nanos))
-        .unwrap_or((0, 0));
-    (secs, nanos, window.id)
-}
+#[cfg(test)]
+mod tests {
+    use super::{run_with_window_manager, FocusOrCycleArgs};
+    use crate::adapters::window_managers::{
+        ConfiguredWindowManager, FocusedWindowRecord, WindowCycleProvider, WindowCycleRequest,
+        WindowManagerCapabilities, WindowManagerFeatures, WindowManagerSession,
+    };
+    use crate::engine::topology::Direction;
+    use anyhow::Result;
+    use std::sync::{Arc, Mutex};
 
-fn summon_or_return(niri: &mut Niri, target: &Window, all_windows: &[Window]) -> Result<()> {
-    let workspaces = niri.workspaces()?;
-    let focused_workspace = workspaces
-        .iter()
-        .find(|ws| ws.is_focused)
-        .cloned()
-        .context("no focused workspace found")?;
+    #[test]
+    fn focus_or_cycle_dispatches_through_window_cycle_provider() {
+        let mut wm = fake_wm_with_cycle_provider();
+        run_with_window_manager(sample_request(), &mut wm.wm).unwrap();
+        assert_eq!(wm.take_cycle_calls(), vec![sample_request()]);
+    }
 
-    let workspaces_by_id: HashMap<u64, _> = workspaces.iter().map(|ws| (ws.id, ws)).collect();
-    let mut state = load_summon_state()?;
+    #[test]
+    fn focus_or_cycle_returns_clear_error_when_capability_is_missing() {
+        let mut wm = fake_wm_without_cycle_provider();
+        let err = run_with_window_manager(sample_request(), &mut wm).unwrap_err();
+        assert!(err.to_string().contains("does not support focus-or-cycle"));
+    }
 
-    let live_window_ids: HashSet<u64> = all_windows.iter().map(|w| w.id).collect();
-    state
-        .windows
-        .retain(|window_id, _| live_window_ids.contains(window_id));
+    fn sample_request() -> WindowCycleRequest {
+        FocusOrCycleArgs {
+            app_id: Some("org.example.App".to_string()),
+            title: Some("Project".to_string()),
+            spawn: Some("app-launch".to_string()),
+            new: false,
+            summon: false,
+        }
+        .try_into_request()
+        .expect("sample request should be valid")
+    }
 
-    if target.is_focused {
-        if let Some(origin) = state.windows.remove(&target.id) {
-            niri.move_window_to_workspace(
-                target.id,
-                WorkspaceReferenceArg::Id(origin.workspace_id),
-                false,
-            )?;
-            if let Some(output) = origin.output {
-                niri.move_window_to_monitor(target.id, output)?;
-            }
-            save_summon_state(&state)?;
-            return Ok(());
+    fn fake_wm_with_cycle_provider() -> TestConfiguredWindowManager {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let mut features = WindowManagerFeatures::default();
+        features.window_cycle = Some(Box::new(FakeCycleProvider::new(calls.clone())));
+        TestConfiguredWindowManager::new(
+            ConfiguredWindowManager::new(Box::new(FakeSession), features),
+            calls,
+        )
+    }
+
+    fn fake_wm_without_cycle_provider() -> ConfiguredWindowManager {
+        ConfiguredWindowManager::new(Box::new(FakeSession), WindowManagerFeatures::default())
+    }
+
+    struct TestConfiguredWindowManager {
+        wm: ConfiguredWindowManager,
+        cycle_calls: Arc<Mutex<Vec<WindowCycleRequest>>>,
+    }
+
+    impl TestConfiguredWindowManager {
+        fn new(
+            wm: ConfiguredWindowManager,
+            cycle_calls: Arc<Mutex<Vec<WindowCycleRequest>>>,
+        ) -> Self {
+            Self { wm, cycle_calls }
+        }
+
+        fn take_cycle_calls(&mut self) -> Vec<WindowCycleRequest> {
+            let mut cycle_calls = self
+                .cycle_calls
+                .lock()
+                .expect("cycle calls mutex should not be poisoned");
+            std::mem::take(&mut *cycle_calls)
         }
     }
 
-    if target.workspace_id != Some(focused_workspace.id) {
-        state.windows.entry(target.id).or_insert_with(|| {
-            let origin_output = target
-                .workspace_id
-                .and_then(|workspace_id| workspaces_by_id.get(&workspace_id))
-                .and_then(|ws| ws.output.clone());
-            SummonOrigin {
-                workspace_id: target.workspace_id.unwrap_or(focused_workspace.id),
-                output: origin_output,
-            }
-        });
+    struct FakeSession;
 
-        niri.move_window_to_workspace(
-            target.id,
-            WorkspaceReferenceArg::Id(focused_workspace.id),
-            false,
-        )?;
-        if let Some(output) = focused_workspace.output.clone() {
-            niri.move_window_to_monitor(target.id, output)?;
+    impl WindowManagerSession for FakeSession {
+        fn adapter_name(&self) -> &'static str {
+            "fake"
         }
-        save_summon_state(&state)?;
+
+        fn capabilities(&self) -> WindowManagerCapabilities {
+            WindowManagerCapabilities::none()
+        }
+
+        fn focused_window(&mut self) -> Result<FocusedWindowRecord> {
+            Ok(FocusedWindowRecord {
+                id: 1,
+                app_id: Some("fake-app".to_string()),
+                title: Some("fake-title".to_string()),
+                pid: None,
+                original_tile_index: 1,
+            })
+        }
+
+        fn windows(&mut self) -> Result<Vec<crate::adapters::window_managers::WindowRecord>> {
+            Ok(Vec::new())
+        }
+
+        fn focus_direction(&mut self, _direction: Direction) -> Result<()> {
+            Ok(())
+        }
+
+        fn move_direction(&mut self, _direction: Direction) -> Result<()> {
+            Ok(())
+        }
+
+        fn resize_with_intent(
+            &mut self,
+            _intent: crate::adapters::window_managers::ResizeIntent,
+        ) -> Result<()> {
+            Ok(())
+        }
+
+        fn spawn(&mut self, _command: Vec<String>) -> Result<()> {
+            Ok(())
+        }
+
+        fn focus_window_by_id(&mut self, _id: u64) -> Result<()> {
+            Ok(())
+        }
+
+        fn close_window_by_id(&mut self, _id: u64) -> Result<()> {
+            Ok(())
+        }
     }
 
-    niri.focus_window_by_id(target.id)
-}
-
-fn summon_state_path() -> PathBuf {
-    let base = std::env::var_os("XDG_RUNTIME_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("/tmp"));
-    base.join("yeet-and-yoink").join("summon-state.json")
-}
-
-fn load_summon_state() -> Result<SummonState> {
-    let path = summon_state_path();
-    if !path.exists() {
-        return Ok(SummonState::default());
+    struct FakeCycleProvider {
+        cycle_calls: Arc<Mutex<Vec<WindowCycleRequest>>>,
     }
 
-    let raw = fs::read_to_string(&path)
-        .with_context(|| format!("failed to read summon state file: {}", path.display()))?;
-    let state: SummonState = serde_json::from_str(&raw)
-        .with_context(|| format!("failed to parse summon state file: {}", path.display()))?;
-    Ok(state)
-}
-
-fn save_summon_state(state: &SummonState) -> Result<()> {
-    let path = summon_state_path();
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create state directory: {}", parent.display()))?;
+    impl FakeCycleProvider {
+        fn new(cycle_calls: Arc<Mutex<Vec<WindowCycleRequest>>>) -> Self {
+            Self { cycle_calls }
+        }
     }
 
-    let serialized = serde_json::to_string(state).context("failed to serialize summon state")?;
-    fs::write(&path, serialized)
-        .with_context(|| format!("failed to write summon state file: {}", path.display()))?;
-    Ok(())
+    impl WindowCycleProvider for FakeCycleProvider {
+        fn focus_or_cycle(&mut self, request: &WindowCycleRequest) -> Result<()> {
+            self.cycle_calls
+                .lock()
+                .expect("cycle calls mutex should not be poisoned")
+                .push(request.clone());
+            Ok(())
+        }
+    }
 }

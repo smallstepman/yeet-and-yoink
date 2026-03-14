@@ -1199,6 +1199,7 @@ mod tests {
     static NEXT_ID: AtomicU64 = AtomicU64::new(1);
     const TEST_RESPONSES_ENV: &str = "ZELLIJ_TEST_RESPONSES_DIR";
     const TEST_LOG_ENV: &str = "ZELLIJ_TEST_LOG";
+    const TEST_SAFE_KEY_LEN: usize = 120;
 
     fn env_guard() -> std::sync::MutexGuard<'static, ()> {
         crate::utils::env_guard()
@@ -1216,6 +1217,45 @@ mod tests {
         crate::config::update(|cfg| {
             cfg.runtime.zellij.break_plugin = old;
         });
+    }
+
+    fn sanitize_response_key(key: &str) -> String {
+        let mut sanitized: String = key
+            .chars()
+            .map(|ch| {
+                if ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-') {
+                    ch
+                } else {
+                    '_'
+                }
+            })
+            .collect();
+        let suffix = std::process::Command::new("cksum")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .and_then(|mut child| {
+                use std::io::Write;
+                if let Some(stdin) = child.stdin.as_mut() {
+                    let _ = stdin.write_all(key.as_bytes());
+                }
+                child.wait_with_output()
+            })
+            .ok()
+            .and_then(|output| String::from_utf8(output.stdout).ok())
+            .and_then(|stdout| {
+                stdout
+                    .split_whitespace()
+                    .next()
+                    .map(|value| value.to_string())
+            })
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| "0".to_string());
+        let max_prefix_len = TEST_SAFE_KEY_LEN.saturating_sub(suffix.len() + 1);
+        if sanitized.len() > max_prefix_len {
+            sanitized.truncate(max_prefix_len);
+        }
+        format!("{sanitized}_{suffix}")
     }
 
     struct ZellijHarness {
@@ -1241,13 +1281,19 @@ mod tests {
             fs::create_dir_all(&responses_dir).expect("failed to create fake responses dir");
 
             let fake_zellij = bin_dir.join("zellij");
-            fs::write(
-                &fake_zellij,
-                r#"#!/bin/sh
+            let script = r#"#!/bin/sh
 set -eu
 key="$*"
 printf '%s\n' "$key" >> "${ZELLIJ_TEST_LOG}"
-safe_key="$(printf '%s' "$key" | tr -c 'A-Za-z0-9._-' '_')"
+max_key_len="__TEST_SAFE_KEY_LEN__"
+suffix="$(printf '%s' "$key" | cksum | awk '{print $1}')"
+[ -n "$suffix" ] || suffix="0"
+max_prefix_len=$((max_key_len - ${#suffix} - 1))
+if [ "$max_prefix_len" -lt 0 ]; then
+  max_prefix_len=0
+fi
+safe_prefix="$(printf '%s' "$key" | tr -c 'A-Za-z0-9._-' '_' | cut -c "1-${max_prefix_len}")"
+safe_key="${safe_prefix}_${suffix}"
 status_file="${ZELLIJ_TEST_RESPONSES_DIR}/${safe_key}.status"
 stdout_file="${ZELLIJ_TEST_RESPONSES_DIR}/${safe_key}.stdout"
 stderr_file="${ZELLIJ_TEST_RESPONSES_DIR}/${safe_key}.stderr"
@@ -1262,9 +1308,9 @@ if [ -f "$stderr_file" ]; then
   cat "$stderr_file" >&2
 fi
 exit "$status"
-"#,
-            )
-            .expect("failed to write fake zellij script");
+"#
+            .replace("__TEST_SAFE_KEY_LEN__", &TEST_SAFE_KEY_LEN.to_string());
+            fs::write(&fake_zellij, script).expect("failed to write fake zellij script");
             let mut permissions = fs::metadata(&fake_zellij)
                 .expect("failed to stat fake zellij script")
                 .permissions();
@@ -1295,16 +1341,7 @@ exit "$status"
         }
 
         fn set_response(&self, key: &str, status: i32, stdout: &str, stderr: &str) {
-            let safe_key: String = key
-                .chars()
-                .map(|ch| {
-                    if ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-') {
-                        ch
-                    } else {
-                        '_'
-                    }
-                })
-                .collect();
+            let safe_key = sanitize_response_key(key);
             fs::write(
                 self.responses_dir.join(format!("{safe_key}.status")),
                 status.to_string(),

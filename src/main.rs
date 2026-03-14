@@ -2,6 +2,7 @@ use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 use yeet_and_yoink::commands;
+#[cfg(target_os = "linux")]
 use yeet_and_yoink::commands::focus_or_cycle::FocusOrCycleArgs;
 use yeet_and_yoink::commands::resize::ResizeMode;
 use yeet_and_yoink::config;
@@ -12,10 +13,11 @@ use yeet_and_yoink::profiling::ProfileConfig;
 #[derive(Parser)]
 #[command(
     name = "yeet-and-yoink",
-    about = "Deep focus/move integration for niri"
+    about = "Deep focus/move integration for your configured window manager",
+    after_help = "Choose the built-in window manager integration in your config via [wm].enabled_integration. No runtime window-manager detection or probing occurs."
 )]
 struct Cli {
-    /// Load config from an explicit path instead of platform discovery.
+    /// Load config from an explicit path; [wm].enabled_integration selects the built-in WM integration.
     #[arg(long, global = true, value_name = "PATH")]
     config: Option<PathBuf>,
 
@@ -55,6 +57,7 @@ enum Cmd {
         mode: ResizeMode,
     },
     /// Focus existing app instance, cycle through instances, or spawn if absent.
+    #[cfg(target_os = "linux")]
     FocusOrCycle {
         #[command(flatten)]
         args: FocusOrCycleArgs,
@@ -72,6 +75,7 @@ impl Cmd {
             Self::Focus { .. } => "focus",
             Self::Move { .. } => "move",
             Self::Resize { .. } => "resize",
+            #[cfg(target_os = "linux")]
             Self::FocusOrCycle { .. } => "focus-or-cycle",
             Self::BrowserHost { .. } => "browser-host",
         }
@@ -159,8 +163,11 @@ fn main() {
             Cmd::Focus { direction } => commands::focus::run(direction),
             Cmd::Move { direction } => commands::move_win::run(direction),
             Cmd::Resize { direction, mode } => commands::resize::run(direction, mode),
+            #[cfg(target_os = "linux")]
             Cmd::FocusOrCycle { args } => commands::focus_or_cycle::run(args),
-            Cmd::BrowserHost { .. } => unreachable!("browser host mode returns before logging init"),
+            Cmd::BrowserHost { .. } => {
+                unreachable!("browser host mode returns before logging init")
+            }
         }
     };
 
@@ -183,7 +190,27 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::BrowserHostMode;
+    use super::{BrowserHostMode, Cli};
+    use clap::CommandFactory;
+
+    #[test]
+    fn cli_help_describes_configured_wm_selection() {
+        let mut command = Cli::command();
+        let mut help = Vec::new();
+        command
+            .write_long_help(&mut help)
+            .expect("help text should render");
+        let help = String::from_utf8(help).expect("help text should be utf-8");
+
+        assert!(
+            help.contains("Choose the built-in window manager integration in your config"),
+            "help should explain that WM selection is config driven: {help}"
+        );
+        assert!(
+            help.contains("No runtime window-manager detection or probing occurs"),
+            "help should explain that WM probing is disabled: {help}"
+        );
+    }
 
     #[test]
     fn browser_host_mode_parses_firefox_aliases() {
