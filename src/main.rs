@@ -13,7 +13,7 @@ use yeet_and_yoink::profiling::ProfileConfig;
 #[derive(Parser)]
 #[command(
     name = "yeet-and-yoink",
-    about = "Deep focus/move integration for niri"
+    about = "Deep focus/move integration for your window manager"
 )]
 struct Cli {
     /// Load config from an explicit path instead of platform discovery.
@@ -55,7 +55,7 @@ enum Cmd {
         #[arg(value_enum, default_value_t = ResizeMode::Grow)]
         mode: ResizeMode,
     },
-    /// Focus existing app instance, cycle through instances, or spawn if absent. (Linux/Niri only)
+    /// Focus existing app instance, cycle through instances, or spawn if absent.
     #[cfg(target_os = "linux")]
     FocusOrCycle {
         #[command(flatten)]
@@ -164,7 +164,9 @@ fn main() {
             Cmd::Resize { direction, mode } => commands::resize::run(direction, mode),
             #[cfg(target_os = "linux")]
             Cmd::FocusOrCycle { args } => commands::focus_or_cycle::run(args),
-            Cmd::BrowserHost { .. } => unreachable!("browser host mode returns before logging init"),
+            Cmd::BrowserHost { .. } => {
+                unreachable!("browser host mode returns before logging init")
+            }
         }
     };
 

@@ -340,7 +340,18 @@ pub trait WindowManagerDomainFactory: Send {
     ) -> Result<Box<dyn crate::engine::domain::ErasedDomain>>;
 }
 
-pub trait WindowCycleProvider: Send {}
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WindowCycleRequest {
+    pub app_id: Option<String>,
+    pub title: Option<String>,
+    pub spawn: Option<String>,
+    pub new: bool,
+    pub summon: bool,
+}
+
+pub trait WindowCycleProvider: Send {
+    fn focus_or_cycle(&mut self, request: &WindowCycleRequest) -> Result<()>;
+}
 
 pub trait WindowTearOutComposer: Send {}
 
@@ -420,6 +431,13 @@ impl ConfiguredWindowManager {
 
     pub fn window_cycle(&self) -> Option<&dyn WindowCycleProvider> {
         self.features.window_cycle.as_deref()
+    }
+
+    pub fn window_cycle_mut(&mut self) -> Option<&mut (dyn WindowCycleProvider + '_)> {
+        match self.features.window_cycle.as_mut() {
+            Some(provider) => Some(provider.as_mut()),
+            None => None,
+        }
     }
 
     pub fn tear_out_composer(&self) -> Option<&dyn WindowTearOutComposer> {
@@ -581,7 +599,7 @@ impl<T> WindowManagerAdapter for T where
 
 #[cfg(target_os = "linux")]
 pub struct NiriAdapter {
-    inner: Niri,
+    pub(crate) inner: Niri,
 }
 
 #[cfg(target_os = "linux")]
@@ -1457,7 +1475,11 @@ mod tests {
 
     struct FakeCycleProvider;
 
-    impl WindowCycleProvider for FakeCycleProvider {}
+    impl WindowCycleProvider for FakeCycleProvider {
+        fn focus_or_cycle(&mut self, _request: &super::WindowCycleRequest) -> Result<()> {
+            Ok(())
+        }
+    }
 
     fn connect_backend_for_test(
         backend: WmBackend,
