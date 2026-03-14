@@ -1582,7 +1582,7 @@ enabled = true
         };
 
         orchestrator
-            .execute_session(
+            .execute(
                 &mut wm,
                 ActionRequest {
                     kind: ActionKind::Move,
@@ -1678,7 +1678,7 @@ enabled = true
         };
 
         orchestrator
-            .execute_session(
+            .execute(
                 &mut wm,
                 ActionRequest {
                     kind: ActionKind::Move,
@@ -1755,7 +1755,7 @@ enabled = true
         };
 
         orchestrator
-            .execute_session(
+            .execute(
                 &mut wm,
                 ActionRequest {
                     kind: ActionKind::Move,
