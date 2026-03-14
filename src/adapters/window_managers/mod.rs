@@ -1302,12 +1302,20 @@ mod tests {
 
     #[test]
     fn connect_selected_reports_configured_backend_failure_without_fallback() {
-        let err = match connect_backend_for_test(WmBackend::Niri, failing_spec("niri")) {
+        let err = match connect_backend_for_test(WmBackend::Niri, failing_spec(WmBackend::Niri)) {
             Ok(_) => panic!("configured backend should fail without fallback"),
             Err(err) => err,
         };
         assert!(err.to_string().contains("niri"));
         assert!(!err.to_string().contains("i3"));
+    }
+
+    #[test]
+    fn failing_spec_uses_requested_backend() {
+        let spec = failing_spec(WmBackend::Yabai);
+
+        assert_eq!(spec.backend(), WmBackend::Yabai);
+        assert_eq!(spec.name(), "yabai");
     }
 
     fn fake_configured_wm() -> TestConfiguredWindowManager {
@@ -1453,25 +1461,25 @@ mod tests {
         super::connect_backend_for_test(backend, spec)
     }
 
-    fn failing_spec(name: &'static str) -> &'static dyn WindowManagerSpec {
-        Box::leak(Box::new(FailingSpec { name }))
+    fn failing_spec(backend: WmBackend) -> &'static dyn WindowManagerSpec {
+        Box::leak(Box::new(FailingSpec { backend }))
     }
 
     struct FailingSpec {
-        name: &'static str,
+        backend: WmBackend,
     }
 
     impl WindowManagerSpec for FailingSpec {
         fn backend(&self) -> WmBackend {
-            WmBackend::Niri
+            self.backend
         }
 
         fn name(&self) -> &'static str {
-            self.name
+            self.backend.as_str()
         }
 
         fn connect(&self) -> Result<ConfiguredWindowManager> {
-            Err(anyhow::anyhow!("{} connection failed", self.name))
+            Err(anyhow::anyhow!("{} connection failed", self.name()))
         }
     }
 
