@@ -1,13 +1,12 @@
 use anyhow::{bail, Context, Result};
 use serde::Deserialize;
 
-use crate::adapters::window_managers::ConfiguredWindowManager;
 use crate::config::WmBackend;
 use crate::engine::runtime::{self, CommandContext, ProcessId};
 use crate::engine::topology::Direction;
 use crate::engine::window_manager::{
-    validate_declared_capabilities, CapabilitySupport, DirectionalCapability,
-    FocusedWindowRecord, PrimitiveWindowManagerCapabilities, ResizeIntent,
+    validate_declared_capabilities, CapabilitySupport, ConfiguredWindowManager,
+    DirectionalCapability, FocusedWindowRecord, PrimitiveWindowManagerCapabilities, ResizeIntent,
     WindowManagerCapabilities, WindowManagerCapabilityDescriptor, WindowManagerFeatures,
     WindowManagerSession, WindowManagerSpec, WindowRecord,
 };

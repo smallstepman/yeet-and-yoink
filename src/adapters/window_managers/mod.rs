@@ -37,17 +37,15 @@ use crate::config::{selected_wm_backend, WmBackend};
 use crate::engine::runtime::ProcessId;
 #[cfg(any(test, target_os = "linux"))]
 use crate::engine::topology::Direction;
-pub use crate::engine::window_manager::{
-    ConfiguredWindowManager, FocusedWindowRecord, ResizeIntent, ResizeKind,
-    WindowCycleProvider, WindowCycleRequest, WindowManagerDomainFactory, WindowManagerFeatures,
-    WindowManagerSession, WindowManagerSpec, WindowRecord, WindowTearOutComposer,
-};
 #[cfg(any(test, target_os = "linux"))]
 use crate::engine::window_manager::{
-    validate_declared_capabilities, CapabilitySupport, DirectionalCapability,
-    PrimitiveWindowManagerCapabilities, WindowManagerCapabilities,
-    WindowManagerCapabilityDescriptor,
+    validate_declared_capabilities, CapabilitySupport, ConfiguredWindowManager,
+    DirectionalCapability, FocusedWindowRecord, PrimitiveWindowManagerCapabilities, ResizeIntent,
+    WindowManagerCapabilities, WindowManagerCapabilityDescriptor, WindowManagerSession,
+    WindowManagerSpec, WindowRecord, WindowTearOutComposer,
 };
+#[cfg(not(any(test, target_os = "linux")))]
+use crate::engine::window_manager::{ConfiguredWindowManager, WindowManagerSpec};
 
 // ---------------------------------------------------------------------------
 // Linux: Niri adapter
@@ -317,9 +315,7 @@ pub fn connect_selected() -> Result<ConfiguredWindowManager> {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        ConfiguredWindowManager, WindowManagerSpec,
-    };
+    use super::{ConfiguredWindowManager, WindowManagerSpec};
     use crate::config::WmBackend;
     use anyhow::Result;
 
