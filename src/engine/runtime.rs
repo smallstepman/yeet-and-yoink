@@ -428,18 +428,26 @@ mod tests {
     use std::process::Output;
 
     use super::{
-        all_pids, foreground_process_name_for_tty_in_tree, parse_stat_pgrp, process_cmdline_args,
-        process_comm, process_environ_var, process_fd_target, process_tree_pids, process_uses_tty,
-        socket_inode_from_fd_target, socket_path_for_pid_from_proc_net_unix,
+        foreground_process_name_for_tty_in_tree, parse_stat_pgrp, process_fd_target,
+        process_tree_pids, process_uses_tty, socket_inode_from_fd_target,
         socket_path_from_proc_net_unix, socket_path_from_ss_output, stderr_text, stdout_text,
-        CommandContext, ProcessTree,
+        CommandContext,
     };
 
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
+    use super::{
+        all_pids, process_cmdline_args, process_comm, process_environ_var,
+        socket_path_for_pid_from_proc_net_unix, ProcessTree,
+    };
+
+    #[cfg(target_os = "linux")]
     use std::os::unix::{
         net::{UnixListener, UnixStream},
         process::ExitStatusExt,
     };
+
+    #[cfg(not(target_os = "linux"))]
+    use std::os::unix::process::ExitStatusExt;
 
     #[test]
     fn command_context_builder_sets_target() {
@@ -454,12 +462,14 @@ mod tests {
         assert!(process_tree_pids(0).is_empty());
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn process_cmdline_args_reads_current_process() {
         let args = process_cmdline_args(std::process::id()).expect("current process has cmdline");
         assert!(!args.is_empty());
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn process_environ_var_reads_current_process() {
         if let Ok(path) = std::env::var("PATH") {
@@ -467,6 +477,7 @@ mod tests {
         }
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn process_tree_helper_reads_env_and_finds_current_process() {
         let tree = ProcessTree::for_pid(std::process::id());
@@ -534,6 +545,7 @@ u_str ESTAB 0 0 /run/user/1000/zellij/0.43.1/implacable-oboe 458031 * 455551 use
         );
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn socket_path_for_pid_from_proc_net_unix_reads_proc_entries() {
         let base = std::env::temp_dir().join(format!(
@@ -554,6 +566,7 @@ u_str ESTAB 0 0 /run/user/1000/zellij/0.43.1/implacable-oboe 458031 * 455551 use
         assert_eq!(discovered, Some(socket_path.to_string_lossy().to_string()));
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn all_pids_includes_current_process() {
         assert!(all_pids().into_iter().any(|pid| pid == std::process::id()));
