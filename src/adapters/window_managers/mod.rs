@@ -160,6 +160,10 @@ pub fn connect_selected() -> Result<ConfiguredWindowManager> {
 mod tests {
     use super::{ConfiguredWindowManager, WindowManagerSpec};
     use crate::config::WmBackend;
+    use crate::engine::window_manager::{
+        CapabilitySupport, WindowCycleProvider, WindowManagerCapabilityDescriptor,
+        WindowManagerSession, WindowTearOutComposer,
+    };
     use anyhow::Result;
 
     #[test]
@@ -192,27 +196,32 @@ mod tests {
     }
 
     #[test]
-    fn niri_backend_wrapper_lives_in_niri_module() {
-        let mod_source = include_str!("mod.rs")
-            .split_once("#[cfg(test)]")
-            .map(|(implementation, _)| implementation)
-            .expect("window manager adapter source should include test module");
-        let niri_source = include_str!("niri.rs")
-            .split_once("#[cfg(test)]")
-            .map(|(implementation, _)| implementation)
-            .expect("niri adapter source should include test module");
+    fn niri_backend_wrapper_remains_available_from_adapter_boundary() {
+        fn assert_niri_traits<T>()
+        where
+            T: WindowManagerCapabilityDescriptor
+                + WindowManagerSession
+                + WindowCycleProvider
+                + WindowTearOutComposer,
+        {
+        }
 
-        assert!(mod_source.contains("pub use self::niri::NiriAdapter"));
-        assert!(!mod_source.contains("pub struct NiriAdapter"));
-        assert!(!mod_source.contains("impl NiriAdapter {"));
-        assert!(!mod_source.contains("impl WindowManagerCapabilityDescriptor for NiriAdapter"));
-        assert!(!mod_source.contains("impl WindowManagerSession for NiriAdapter"));
-        assert!(!mod_source.contains("impl WindowTearOutComposer for NiriAdapter"));
-        assert!(niri_source.contains("pub struct NiriAdapter"));
-        assert!(niri_source.contains("impl NiriAdapter {"));
-        assert!(niri_source.contains("impl WindowManagerCapabilityDescriptor for NiriAdapter"));
-        assert!(niri_source.contains("impl WindowManagerSession for NiriAdapter"));
-        assert!(niri_source.contains("impl WindowTearOutComposer for NiriAdapter"));
+        type Adapter = crate::adapters::window_managers::NiriAdapter;
+
+        assert_niri_traits::<Adapter>();
+
+        let spec = super::spec_for_backend(WmBackend::Niri);
+        let capabilities = <Adapter as WindowManagerCapabilityDescriptor>::CAPABILITIES;
+
+        assert_eq!(spec.backend(), WmBackend::Niri);
+        assert_eq!(spec.name(), <Adapter as WindowManagerCapabilityDescriptor>::NAME);
+        capabilities
+            .validate()
+            .expect("re-exported niri adapter capabilities should stay valid after relocation");
+        assert_eq!(capabilities.tear_out.east, CapabilitySupport::Native);
+        assert_eq!(capabilities.tear_out.west, CapabilitySupport::Composed);
+        assert!(capabilities.primitives.move_column);
+        assert!(capabilities.primitives.consume_into_column_and_move);
     }
 
     fn connect_backend_for_test(
