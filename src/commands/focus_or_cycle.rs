@@ -1,8 +1,7 @@
 use anyhow::{bail, Result};
 use clap::Args;
 
-use crate::adapters::window_managers::connect_selected;
-use crate::engine::window_manager::{ConfiguredWindowManager, WindowCycleRequest};
+use crate::engine::window_manager::{connect_selected, ConfiguredWindowManager, WindowCycleRequest};
 
 #[derive(Debug, Clone, Args)]
 pub struct FocusOrCycleArgs {

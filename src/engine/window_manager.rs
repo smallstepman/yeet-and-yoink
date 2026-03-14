@@ -1,6 +1,7 @@
 use anyhow::{anyhow, Context, Result};
 
-use crate::config::WmBackend;
+use crate::adapters::window_managers::spec_for_backend;
+use crate::config::{selected_wm_backend, WmBackend};
 use crate::engine::runtime::ProcessId;
 use crate::engine::topology::Direction;
 
@@ -423,19 +424,52 @@ pub trait WindowManagerSpec: Sync {
     fn connect(&self) -> Result<ConfiguredWindowManager>;
 }
 
+fn connect_backend(
+    backend: WmBackend,
+    spec: &'static dyn WindowManagerSpec,
+) -> Result<ConfiguredWindowManager> {
+    if spec.backend() != backend {
+        return Err(anyhow!(
+            "wm backend '{}' resolved to mismatched spec '{}'",
+            backend.as_str(),
+            spec.name()
+        ));
+    }
+
+    spec.connect()
+        .with_context(|| format!("failed to connect configured wm '{}'", spec.name()))
+}
+
+#[cfg(test)]
+fn connect_backend_for_test(
+    backend: WmBackend,
+    spec: &'static dyn WindowManagerSpec,
+) -> Result<ConfiguredWindowManager> {
+    connect_backend(backend, spec)
+}
+
+pub fn connect_selected() -> Result<ConfiguredWindowManager> {
+    let _span = tracing::debug_span!("window_manager.connect_selected").entered();
+    let backend = selected_wm_backend();
+    let spec = spec_for_backend(backend);
+    connect_backend(backend, spec)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         plan_resize, plan_tear_out, validate_declared_capabilities, CapabilitySupport,
         ConfiguredWindowManager, DirectionalCapability, FocusedWindowRecord,
-        PrimitiveWindowManagerCapabilities, ResizeIntent, WindowCycleProvider,
-        WindowCycleRequest, WindowManagerCapabilities, WindowManagerCapabilityDescriptor,
-        WindowManagerFeatures, WindowManagerSession, WindowRecord, WindowTearOutComposer,
+        PrimitiveWindowManagerCapabilities, ResizeIntent, WindowCycleProvider, WindowCycleRequest,
+        WindowManagerCapabilities, WindowManagerCapabilityDescriptor, WindowManagerFeatures,
+        WindowManagerSession, WindowManagerSpec, WindowRecord, WindowTearOutComposer,
     };
-    #[cfg(target_os = "linux")]
-    use crate::adapters::window_managers::NiriAdapter;
+    use crate::adapters::window_managers::spec_for_backend;
+    use crate::config::WmBackend;
     #[cfg(target_os = "macos")]
     use crate::adapters::window_managers::yabai::YabaiAdapter;
+    #[cfg(target_os = "linux")]
+    use crate::adapters::window_managers::NiriAdapter;
     use crate::engine::topology::Direction;
     use anyhow::Result;
     use std::sync::{Arc, Mutex};
@@ -546,6 +580,38 @@ mod tests {
         );
     }
 
+    #[test]
+    fn built_in_connectors_are_typed_as_configured_window_managers() {
+        fn assert_spec(_spec: &'static dyn WindowManagerSpec) {}
+
+        assert_spec(spec_for_backend(WmBackend::Niri));
+        assert_spec(spec_for_backend(WmBackend::I3));
+        assert_spec(spec_for_backend(WmBackend::Paneru));
+        assert_spec(spec_for_backend(WmBackend::Yabai));
+        let _ = super::connect_selected as fn() -> Result<ConfiguredWindowManager>;
+    }
+
+    #[test]
+    fn connect_selected_reports_configured_backend_failure_without_fallback() {
+        let err = match super::connect_backend_for_test(
+            WmBackend::Niri,
+            failing_spec(WmBackend::Niri),
+        ) {
+            Ok(_) => panic!("configured backend should fail without fallback"),
+            Err(err) => err,
+        };
+        assert!(err.to_string().contains("niri"));
+        assert!(!err.to_string().contains("i3"));
+    }
+
+    #[test]
+    fn failing_spec_uses_requested_backend() {
+        let spec = failing_spec(WmBackend::Yabai);
+
+        assert_eq!(spec.backend(), WmBackend::Yabai);
+        assert_eq!(spec.name(), "yabai");
+    }
+
     fn fake_configured_wm() -> TestConfiguredWindowManager {
         let calls = Arc::new(Mutex::new(Vec::new()));
         TestConfiguredWindowManager::new(
@@ -603,6 +669,28 @@ mod tests {
             },
             resize: DirectionalCapability::uniform(CapabilitySupport::Unsupported),
         };
+    }
+
+    fn failing_spec(backend: WmBackend) -> &'static dyn WindowManagerSpec {
+        Box::leak(Box::new(FailingSpec { backend }))
+    }
+
+    struct FailingSpec {
+        backend: WmBackend,
+    }
+
+    impl WindowManagerSpec for FailingSpec {
+        fn backend(&self) -> WmBackend {
+            self.backend
+        }
+
+        fn name(&self) -> &'static str {
+            self.backend.as_str()
+        }
+
+        fn connect(&self) -> Result<ConfiguredWindowManager> {
+            Err(anyhow::anyhow!("{} connection failed", self.name()))
+        }
     }
 
     struct TestConfiguredWindowManager {
