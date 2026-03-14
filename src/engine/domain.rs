@@ -5,12 +5,12 @@ use std::sync::OnceLock;
 use anyhow::Result as AnyResult;
 use anyhow::{anyhow, Context, Result};
 
-use crate::adapters::window_managers::ConfiguredWindowManager;
 use crate::engine::contract::{
     AppAdapter, AppKind, MergePreparation, TopologyHandler as AppTopologyHandler,
 };
 use crate::engine::runtime::ProcessId;
 use crate::engine::topology::{Direction, DomainId, LeafId, Rect};
+use crate::engine::window_manager::ConfiguredWindowManager;
 
 pub const WM_DOMAIN_ID: DomainId = 1;
 pub const TERMINAL_DOMAIN_ID: DomainId = 2;
@@ -1025,11 +1025,12 @@ mod configured_window_manager_tests {
         runtime_domains_for_window_manager, DomainLeafSnapshot, DomainSnapshot, ErasedDomain,
         PaneState, WM_DOMAIN_ID,
     };
-    use crate::adapters::window_managers::{
-        ConfiguredWindowManager, FocusedWindowRecord, WindowManagerCapabilities,
-        WindowManagerDomainFactory, WindowManagerFeatures, WindowManagerSession, WindowRecord,
-    };
+    use crate::adapters::window_managers::WindowManagerCapabilities;
     use crate::engine::topology::Rect;
+    use crate::engine::window_manager::{
+        ConfiguredWindowManager, FocusedWindowRecord, WindowManagerDomainFactory,
+        WindowManagerFeatures, WindowManagerSession, WindowRecord,
+    };
 
     struct FakeSession;
 
