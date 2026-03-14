@@ -63,11 +63,10 @@ fn run_with_window_manager(
 #[cfg(test)]
 mod tests {
     use super::{run_with_window_manager, FocusOrCycleArgs};
-    use crate::adapters::window_managers::WindowManagerCapabilities;
     use crate::engine::topology::Direction;
     use crate::engine::window_manager::{
         ConfiguredWindowManager, FocusedWindowRecord, WindowCycleProvider, WindowCycleRequest,
-        WindowManagerFeatures, WindowManagerSession,
+        WindowManagerCapabilities, WindowManagerFeatures, WindowManagerSession,
     };
     use anyhow::Result;
     use std::sync::{Arc, Mutex};

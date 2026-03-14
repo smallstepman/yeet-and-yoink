@@ -1025,11 +1025,10 @@ mod configured_window_manager_tests {
         runtime_domains_for_window_manager, DomainLeafSnapshot, DomainSnapshot, ErasedDomain,
         PaneState, WM_DOMAIN_ID,
     };
-    use crate::adapters::window_managers::WindowManagerCapabilities;
     use crate::engine::topology::Rect;
     use crate::engine::window_manager::{
-        ConfiguredWindowManager, FocusedWindowRecord, WindowManagerDomainFactory,
-        WindowManagerFeatures, WindowManagerSession, WindowRecord,
+        ConfiguredWindowManager, FocusedWindowRecord, WindowManagerCapabilities,
+        WindowManagerDomainFactory, WindowManagerFeatures, WindowManagerSession, WindowRecord,
     };
 
     struct FakeSession;

@@ -11,8 +11,7 @@ use std::any::TypeId;
 
 use crate::adapters::window_managers::{
     ConfiguredWindowManager, NiriAdapter, WindowCycleProvider, WindowCycleRequest,
-    WindowManagerCapabilityDescriptor, WindowManagerDomainFactory, WindowManagerFeatures,
-    WindowManagerSession, WindowManagerSpec,
+    WindowManagerDomainFactory,
 };
 use crate::config::WmBackend;
 use crate::engine::domain::PaneState;
@@ -23,6 +22,10 @@ use crate::engine::domain::{
 };
 use crate::engine::topology::Direction;
 use crate::engine::topology::{DomainId, LeafId, Rect};
+use crate::engine::window_manager::{
+    WindowManagerCapabilityDescriptor, WindowManagerFeatures, WindowManagerSession,
+    WindowManagerSpec,
+};
 use crate::logging;
 
 pub struct Niri {
