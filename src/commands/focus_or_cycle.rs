@@ -65,8 +65,9 @@ mod tests {
     use super::{run_with_window_manager, FocusOrCycleArgs};
     use crate::engine::topology::Direction;
     use crate::engine::window_manager::{
-        ConfiguredWindowManager, FocusedWindowRecord, WindowCycleProvider, WindowCycleRequest,
-        WindowManagerCapabilities, WindowManagerFeatures, WindowManagerSession,
+        ConfiguredWindowManager, FocusedWindowRecord, ResizeIntent, WindowCycleProvider,
+        WindowCycleRequest, WindowManagerCapabilities, WindowManagerFeatures,
+        WindowManagerSession, WindowRecord,
     };
     use anyhow::Result;
     use std::sync::{Arc, Mutex};
@@ -154,7 +155,7 @@ mod tests {
             })
         }
 
-        fn windows(&mut self) -> Result<Vec<crate::adapters::window_managers::WindowRecord>> {
+        fn windows(&mut self) -> Result<Vec<WindowRecord>> {
             Ok(Vec::new())
         }
 
@@ -166,10 +167,7 @@ mod tests {
             Ok(())
         }
 
-        fn resize_with_intent(
-            &mut self,
-            _intent: crate::adapters::window_managers::ResizeIntent,
-        ) -> Result<()> {
+        fn resize_with_intent(&mut self, _intent: ResizeIntent) -> Result<()> {
             Ok(())
         }
 

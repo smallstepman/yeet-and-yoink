@@ -1027,7 +1027,7 @@ mod configured_window_manager_tests {
     };
     use crate::engine::topology::Rect;
     use crate::engine::window_manager::{
-        ConfiguredWindowManager, FocusedWindowRecord, WindowManagerCapabilities,
+        ConfiguredWindowManager, FocusedWindowRecord, ResizeIntent, WindowManagerCapabilities,
         WindowManagerDomainFactory, WindowManagerFeatures, WindowManagerSession, WindowRecord,
     };
 
@@ -1067,10 +1067,7 @@ mod configured_window_manager_tests {
             Ok(())
         }
 
-        fn resize_with_intent(
-            &mut self,
-            _intent: crate::adapters::window_managers::ResizeIntent,
-        ) -> Result<()> {
+        fn resize_with_intent(&mut self, _intent: ResizeIntent) -> Result<()> {
             Ok(())
         }
 
@@ -1189,10 +1186,7 @@ mod configured_window_manager_tests {
             FakeSession.move_direction(direction)
         }
 
-        fn resize_with_intent(
-            &mut self,
-            intent: crate::adapters::window_managers::ResizeIntent,
-        ) -> Result<()> {
+        fn resize_with_intent(&mut self, intent: ResizeIntent) -> Result<()> {
             FakeSession.resize_with_intent(intent)
         }
 

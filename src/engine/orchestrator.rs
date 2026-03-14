@@ -1056,7 +1056,7 @@ mod tests {
     use crate::engine::topology::Direction;
     use crate::engine::topology::{GlobalLeaf, Rect};
     use crate::engine::window_manager::{
-        CapabilitySupport, ConfiguredWindowManager, FocusedWindowRecord,
+        CapabilitySupport, ConfiguredWindowManager, FocusedWindowRecord, ResizeIntent,
         WindowManagerCapabilities, WindowManagerFeatures, WindowManagerSession, WindowRecord,
         WindowTearOutComposer,
     };
@@ -1126,10 +1126,7 @@ mod tests {
             Ok(())
         }
 
-        fn resize_with_intent(
-            &mut self,
-            _intent: crate::adapters::window_managers::ResizeIntent,
-        ) -> Result<()> {
+        fn resize_with_intent(&mut self, _intent: ResizeIntent) -> Result<()> {
             Ok(())
         }
 
@@ -1455,10 +1452,7 @@ mod tests {
             Ok(())
         }
 
-        fn resize_with_intent(
-            &mut self,
-            _intent: crate::adapters::window_managers::ResizeIntent,
-        ) -> Result<()> {
+        fn resize_with_intent(&mut self, _intent: ResizeIntent) -> Result<()> {
             Ok(())
         }
 
