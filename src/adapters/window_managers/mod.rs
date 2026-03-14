@@ -12,11 +12,14 @@ use anyhow::{anyhow, Context, Result};
 #[cfg(target_os = "linux")]
 use crate::adapters::window_managers::i3::{I3Adapter, I3FocusedWindow};
 #[cfg(target_os = "linux")]
-use crate::adapters::window_managers::niri::Niri;
+use crate::adapters::window_managers::i3::I3_SPEC;
+#[cfg(target_os = "linux")]
+use crate::adapters::window_managers::niri::{Niri, NIRI_SPEC};
 #[cfg(target_os = "macos")]
-use crate::adapters::window_managers::paneru::{PaneruAdapter, PaneruFocusedWindow};
+use crate::adapters::window_managers::paneru::{PaneruAdapter, PaneruFocusedWindow, PANERU_SPEC};
 #[cfg(target_os = "macos")]
-use crate::adapters::window_managers::yabai::{YabaiAdapter, YabaiFocusedWindow};
+use crate::adapters::window_managers::yabai::{YabaiAdapter, YabaiFocusedWindow, YABAI_SPEC};
+use crate::config::{selected_wm_backend, WmBackend};
 use crate::engine::runtime::ProcessId;
 use crate::engine::topology::Direction;
 
@@ -473,6 +476,12 @@ impl WindowManagerSession for ConfiguredWindowManager {
     }
 }
 
+pub trait WindowManagerSpec: Sync {
+    fn backend(&self) -> WmBackend;
+    fn name(&self) -> &'static str;
+    fn connect(&self) -> Result<ConfiguredWindowManager>;
+}
+
 pub trait WindowManagerCapabilityDescriptor {
     const NAME: &'static str;
     const CAPABILITIES: WindowManagerCapabilities;
@@ -722,173 +731,124 @@ impl WindowManagerExecution for NiriAdapter {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Platform-specific registry and detection
-// ---------------------------------------------------------------------------
-
-pub struct WindowManagerRegistration {
-    pub name: &'static str,
-    pub priority: u8,
-    pub detector: fn() -> bool,
-    pub capabilities: WindowManagerCapabilities,
-    pub connect: fn() -> Result<ConfiguredWindowManager>,
+struct UnsupportedWindowManagerSpec {
+    backend: WmBackend,
+    name: &'static str,
 }
 
-// ---------------------------------------------------------------------------
-// Linux detection and connection
-// ---------------------------------------------------------------------------
+impl WindowManagerSpec for UnsupportedWindowManagerSpec {
+    fn backend(&self) -> WmBackend {
+        self.backend
+    }
 
-#[cfg(target_os = "linux")]
-fn detect_niri() -> bool {
-    std::env::var_os("NIRI_SOCKET").is_some() || std::env::var_os("WAYLAND_DISPLAY").is_some()
+    fn name(&self) -> &'static str {
+        self.name
+    }
+
+    fn connect(&self) -> Result<ConfiguredWindowManager> {
+        Err(anyhow!(
+            "wm backend '{}' is not supported on {}",
+            self.name,
+            std::env::consts::OS
+        ))
+    }
 }
 
-#[cfg(target_os = "linux")]
-fn connect_niri() -> Result<ConfiguredWindowManager> {
-    Ok(ConfiguredWindowManager::new(
-        Box::new(NiriAdapter::connect()?),
-        WindowManagerFeatures::default(),
-    ))
-}
+#[cfg(not(target_os = "linux"))]
+static UNSUPPORTED_NIRI_SPEC: UnsupportedWindowManagerSpec = UnsupportedWindowManagerSpec {
+    backend: WmBackend::Niri,
+    name: "niri",
+};
+#[cfg(not(target_os = "linux"))]
+static UNSUPPORTED_I3_SPEC: UnsupportedWindowManagerSpec = UnsupportedWindowManagerSpec {
+    backend: WmBackend::I3,
+    name: "i3",
+};
+#[cfg(not(target_os = "macos"))]
+static UNSUPPORTED_PANERU_SPEC: UnsupportedWindowManagerSpec = UnsupportedWindowManagerSpec {
+    backend: WmBackend::Paneru,
+    name: "paneru",
+};
+#[cfg(not(target_os = "macos"))]
+static UNSUPPORTED_YABAI_SPEC: UnsupportedWindowManagerSpec = UnsupportedWindowManagerSpec {
+    backend: WmBackend::Yabai,
+    name: "yabai",
+};
 
-#[cfg(target_os = "linux")]
-fn detect_i3() -> bool {
-    std::env::var_os("I3SOCK").is_some()
-        || std::env::var_os("SWAYSOCK").is_some()
-        || std::env::var("XDG_CURRENT_DESKTOP")
-            .map(|value| {
-                let value = value.to_ascii_lowercase();
-                value.contains("i3") || value.contains("sway")
-            })
-            .unwrap_or(false)
-}
-
-#[cfg(target_os = "linux")]
-fn connect_i3() -> Result<ConfiguredWindowManager> {
-    Ok(ConfiguredWindowManager::new(
-        Box::new(I3Adapter::connect()?),
-        WindowManagerFeatures::default(),
-    ))
-}
-
-#[cfg(target_os = "linux")]
-const REGISTRY: &[WindowManagerRegistration] = &[
-    WindowManagerRegistration {
-        name: NiriAdapter::NAME,
-        priority: 100,
-        detector: detect_niri,
-        capabilities: NiriAdapter::CAPABILITIES,
-        connect: connect_niri,
-    },
-    WindowManagerRegistration {
-        name: I3Adapter::NAME,
-        priority: 90,
-        detector: detect_i3,
-        capabilities: I3Adapter::CAPABILITIES,
-        connect: connect_i3,
-    },
-];
-
-// ---------------------------------------------------------------------------
-// macOS detection and connection
-// ---------------------------------------------------------------------------
-
-#[cfg(target_os = "macos")]
-fn detect_paneru() -> bool {
-    // Check if paneru socket exists
-    std::path::Path::new("/tmp/paneru.socket").exists()
-}
-
-#[cfg(target_os = "macos")]
-fn connect_paneru() -> Result<ConfiguredWindowManager> {
-    Ok(ConfiguredWindowManager::new(
-        Box::new(PaneruAdapter::connect()?),
-        WindowManagerFeatures::default(),
-    ))
-}
-
-#[cfg(target_os = "macos")]
-fn detect_yabai() -> bool {
-    // Check if yabai is running by looking for its socket or process
-    std::process::Command::new("pgrep")
-        .args(["-x", "yabai"])
-        .output()
-        .map(|output| output.status.success())
-        .unwrap_or(false)
-}
-
-#[cfg(target_os = "macos")]
-fn connect_yabai() -> Result<ConfiguredWindowManager> {
-    Ok(ConfiguredWindowManager::new(
-        Box::new(YabaiAdapter::connect()?),
-        WindowManagerFeatures::default(),
-    ))
-}
-
-#[cfg(target_os = "macos")]
-const REGISTRY: &[WindowManagerRegistration] = &[
-    WindowManagerRegistration {
-        name: PaneruAdapter::NAME,
-        priority: 110, // Higher than yabai since it's niri-like
-        detector: detect_paneru,
-        capabilities: PaneruAdapter::CAPABILITIES,
-        connect: connect_paneru,
-    },
-    WindowManagerRegistration {
-        name: YabaiAdapter::NAME,
-        priority: 100,
-        detector: detect_yabai,
-        capabilities: YabaiAdapter::CAPABILITIES,
-        connect: connect_yabai,
-    },
-];
-
-// ---------------------------------------------------------------------------
-// Connection selection (platform-independent)
-// ---------------------------------------------------------------------------
-
-fn preferred_window_manager_name() -> Option<String> {
-    crate::config::wm_adapter_override().and_then(|raw| {
-        let normalized = raw.trim().to_ascii_lowercase();
-        if normalized.is_empty() {
-            None
-        } else {
-            Some(normalized)
+pub fn spec_for_backend(backend: WmBackend) -> &'static dyn WindowManagerSpec {
+    match backend {
+        WmBackend::Niri => {
+            #[cfg(target_os = "linux")]
+            {
+                &NIRI_SPEC
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                &UNSUPPORTED_NIRI_SPEC
+            }
         }
-    })
+        WmBackend::I3 => {
+            #[cfg(target_os = "linux")]
+            {
+                &I3_SPEC
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                &UNSUPPORTED_I3_SPEC
+            }
+        }
+        WmBackend::Paneru => {
+            #[cfg(target_os = "macos")]
+            {
+                &PANERU_SPEC
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                &UNSUPPORTED_PANERU_SPEC
+            }
+        }
+        WmBackend::Yabai => {
+            #[cfg(target_os = "macos")]
+            {
+                &YABAI_SPEC
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                &UNSUPPORTED_YABAI_SPEC
+            }
+        }
+    }
+}
+
+fn connect_backend(
+    backend: WmBackend,
+    spec: &'static dyn WindowManagerSpec,
+) -> Result<ConfiguredWindowManager> {
+    if spec.backend() != backend {
+        return Err(anyhow!(
+            "wm backend '{}' resolved to mismatched spec '{}'",
+            backend.as_str(),
+            spec.name()
+        ));
+    }
+
+    spec.connect()
+        .with_context(|| format!("failed to connect configured wm '{}'", spec.name()))
+}
+
+#[cfg(test)]
+fn connect_backend_for_test(
+    backend: WmBackend,
+    spec: &'static dyn WindowManagerSpec,
+) -> Result<ConfiguredWindowManager> {
+    connect_backend(backend, spec)
 }
 
 pub fn connect_selected() -> Result<ConfiguredWindowManager> {
     let _span = tracing::debug_span!("window_managers.connect_selected").entered();
-    let preferred = preferred_window_manager_name();
-
-    if let Some(preferred) = preferred.as_deref() {
-        if let Some(registration) = REGISTRY.iter().find(|item| item.name == preferred) {
-            registration.capabilities.validate().with_context(|| {
-                format!("invalid wm capability declaration for '{}'", preferred)
-            })?;
-            return (registration.connect)();
-        }
-        return Err(anyhow!(
-            "unknown window-manager adapter override '{}'",
-            preferred
-        ));
-    }
-
-    let registration = REGISTRY
-        .iter()
-        .filter(|item| (item.detector)())
-        .max_by_key(|item| item.priority)
-        .or_else(|| REGISTRY.first())
-        .context("no window-manager adapters are registered")?;
-
-    registration.capabilities.validate().with_context(|| {
-        format!(
-            "invalid wm capability declaration for '{}'",
-            registration.name
-        )
-    })?;
-    (registration.connect)()
+    let backend = selected_wm_backend();
+    let spec = spec_for_backend(backend);
+    connect_backend(backend, spec)
 }
 
 // ---------------------------------------------------------------------------
@@ -1238,8 +1198,9 @@ mod tests {
         ConfiguredWindowManager, DirectionalCapability, FocusedWindowRecord,
         PrimitiveWindowManagerCapabilities, ResizeIntent, WindowCycleProvider,
         WindowManagerCapabilities, WindowManagerCapabilityDescriptor, WindowManagerFeatures,
-        WindowManagerSession,
+        WindowManagerSession, WindowManagerSpec,
     };
+    use crate::config::WmBackend;
     use crate::engine::topology::Direction;
     use anyhow::Result;
     use std::sync::{Arc, Mutex};
@@ -1330,17 +1291,23 @@ mod tests {
 
     #[test]
     fn built_in_connectors_are_typed_as_configured_window_managers() {
-        fn assert_connector(_connect: fn() -> Result<ConfiguredWindowManager>) {}
+        fn assert_spec(_spec: &'static dyn WindowManagerSpec) {}
 
-        #[cfg(target_os = "linux")]
-        assert_connector(super::connect_niri);
-        #[cfg(target_os = "linux")]
-        assert_connector(super::connect_i3);
-        #[cfg(target_os = "macos")]
-        assert_connector(super::connect_paneru);
-        #[cfg(target_os = "macos")]
-        assert_connector(super::connect_yabai);
+        assert_spec(super::spec_for_backend(WmBackend::Niri));
+        assert_spec(super::spec_for_backend(WmBackend::I3));
+        assert_spec(super::spec_for_backend(WmBackend::Paneru));
+        assert_spec(super::spec_for_backend(WmBackend::Yabai));
         let _ = super::connect_selected as fn() -> Result<ConfiguredWindowManager>;
+    }
+
+    #[test]
+    fn connect_selected_reports_configured_backend_failure_without_fallback() {
+        let err = match connect_backend_for_test(WmBackend::Niri, failing_spec("niri")) {
+            Ok(_) => panic!("configured backend should fail without fallback"),
+            Err(err) => err,
+        };
+        assert!(err.to_string().contains("niri"));
+        assert!(!err.to_string().contains("i3"));
     }
 
     fn fake_configured_wm() -> TestConfiguredWindowManager {
@@ -1478,6 +1445,35 @@ mod tests {
     struct FakeCycleProvider;
 
     impl WindowCycleProvider for FakeCycleProvider {}
+
+    fn connect_backend_for_test(
+        backend: WmBackend,
+        spec: &'static dyn WindowManagerSpec,
+    ) -> Result<ConfiguredWindowManager> {
+        super::connect_backend_for_test(backend, spec)
+    }
+
+    fn failing_spec(name: &'static str) -> &'static dyn WindowManagerSpec {
+        Box::leak(Box::new(FailingSpec { name }))
+    }
+
+    struct FailingSpec {
+        name: &'static str,
+    }
+
+    impl WindowManagerSpec for FailingSpec {
+        fn backend(&self) -> WmBackend {
+            WmBackend::Niri
+        }
+
+        fn name(&self) -> &'static str {
+            self.name
+        }
+
+        fn connect(&self) -> Result<ConfiguredWindowManager> {
+            Err(anyhow::anyhow!("{} connection failed", self.name))
+        }
+    }
 
     #[cfg(target_os = "macos")]
     #[test]

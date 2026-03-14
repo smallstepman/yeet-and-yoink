@@ -2,15 +2,37 @@ use anyhow::{bail, Context, Result};
 use serde::Deserialize;
 
 use crate::adapters::window_managers::{
-    validate_declared_capabilities, CapabilitySupport, DirectionalCapability, FocusedWindowView,
-    PrimitiveWindowManagerCapabilities, ResizeIntent, WindowManagerCapabilities,
-    WindowManagerCapabilityDescriptor, WindowManagerExecution, WindowManagerIntrospection,
-    WindowRecord,
+    validate_declared_capabilities, CapabilitySupport, ConfiguredWindowManager,
+    DirectionalCapability, FocusedWindowView, PrimitiveWindowManagerCapabilities, ResizeIntent,
+    WindowManagerCapabilities, WindowManagerCapabilityDescriptor, WindowManagerExecution,
+    WindowManagerFeatures, WindowManagerIntrospection, WindowManagerSpec, WindowRecord,
 };
+use crate::config::WmBackend;
 use crate::engine::runtime::{self, CommandContext, ProcessId};
 use crate::engine::topology::Direction;
 
 pub struct I3Adapter;
+
+pub struct I3Spec;
+
+pub static I3_SPEC: I3Spec = I3Spec;
+
+impl WindowManagerSpec for I3Spec {
+    fn backend(&self) -> WmBackend {
+        WmBackend::I3
+    }
+
+    fn name(&self) -> &'static str {
+        I3Adapter::NAME
+    }
+
+    fn connect(&self) -> Result<ConfiguredWindowManager> {
+        Ok(ConfiguredWindowManager::new(
+            Box::new(I3Adapter::connect()?),
+            WindowManagerFeatures::default(),
+        ))
+    }
+}
 
 impl I3Adapter {
     pub fn connect() -> Result<Self> {

@@ -7,16 +7,38 @@
 use anyhow::{bail, Context, Result};
 
 use crate::adapters::window_managers::{
-    validate_declared_capabilities, CapabilitySupport, DirectionalCapability, FocusedWindowView,
-    PrimitiveWindowManagerCapabilities, ResizeIntent, WindowManagerCapabilities,
-    WindowManagerCapabilityDescriptor, WindowManagerExecution, WindowManagerIntrospection,
-    WindowRecord,
+    validate_declared_capabilities, CapabilitySupport, ConfiguredWindowManager,
+    DirectionalCapability, FocusedWindowView, PrimitiveWindowManagerCapabilities, ResizeIntent,
+    WindowManagerCapabilities, WindowManagerCapabilityDescriptor, WindowManagerExecution,
+    WindowManagerFeatures, WindowManagerIntrospection, WindowManagerSpec, WindowRecord,
 };
+use crate::config::WmBackend;
 use crate::engine::runtime::{self, CommandContext, ProcessId};
 use crate::engine::topology::Direction;
 use crate::logging;
 
 pub struct PaneruAdapter;
+
+pub struct PaneruSpec;
+
+pub static PANERU_SPEC: PaneruSpec = PaneruSpec;
+
+impl WindowManagerSpec for PaneruSpec {
+    fn backend(&self) -> WmBackend {
+        WmBackend::Paneru
+    }
+
+    fn name(&self) -> &'static str {
+        PaneruAdapter::NAME
+    }
+
+    fn connect(&self) -> Result<ConfiguredWindowManager> {
+        Ok(ConfiguredWindowManager::new(
+            Box::new(PaneruAdapter::connect()?),
+            WindowManagerFeatures::default(),
+        ))
+    }
+}
 
 impl PaneruAdapter {
     pub fn connect() -> Result<Self> {

@@ -4,8 +4,10 @@ use niri_ipc::{Action, Request, Response, SizeChange, Window, Workspace, Workspa
 use std::any::TypeId;
 
 use crate::adapters::window_managers::{
-    NiriAdapter, WindowManagerExecution, WindowManagerIntrospection,
+    ConfiguredWindowManager, NiriAdapter, WindowManagerExecution, WindowManagerFeatures,
+    WindowManagerIntrospection, WindowManagerSpec,
 };
+use crate::config::WmBackend;
 use crate::engine::domain::PaneState;
 use crate::engine::domain::{decode_native_window_ref, encode_native_window_ref};
 use crate::engine::domain::{
@@ -18,6 +20,27 @@ use crate::logging;
 
 pub struct Niri {
     socket: Socket,
+}
+
+pub struct NiriSpec;
+
+pub static NIRI_SPEC: NiriSpec = NiriSpec;
+
+impl WindowManagerSpec for NiriSpec {
+    fn backend(&self) -> WmBackend {
+        WmBackend::Niri
+    }
+
+    fn name(&self) -> &'static str {
+        NiriAdapter::NAME
+    }
+
+    fn connect(&self) -> Result<ConfiguredWindowManager> {
+        Ok(ConfiguredWindowManager::new(
+            Box::new(NiriAdapter::connect()?),
+            WindowManagerFeatures::default(),
+        ))
+    }
 }
 
 impl Niri {

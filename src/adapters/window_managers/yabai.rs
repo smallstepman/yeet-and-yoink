@@ -7,15 +7,37 @@ use anyhow::{bail, Context, Result};
 use serde::Deserialize;
 
 use crate::adapters::window_managers::{
-    validate_declared_capabilities, CapabilitySupport, DirectionalCapability, FocusedWindowView,
-    PrimitiveWindowManagerCapabilities, ResizeIntent, WindowManagerCapabilities,
-    WindowManagerCapabilityDescriptor, WindowManagerExecution, WindowManagerIntrospection,
-    WindowRecord,
+    validate_declared_capabilities, CapabilitySupport, ConfiguredWindowManager,
+    DirectionalCapability, FocusedWindowView, PrimitiveWindowManagerCapabilities, ResizeIntent,
+    WindowManagerCapabilities, WindowManagerCapabilityDescriptor, WindowManagerExecution,
+    WindowManagerFeatures, WindowManagerIntrospection, WindowManagerSpec, WindowRecord,
 };
+use crate::config::WmBackend;
 use crate::engine::runtime::{self, CommandContext, ProcessId};
 use crate::engine::topology::Direction;
 
 pub struct YabaiAdapter;
+
+pub struct YabaiSpec;
+
+pub static YABAI_SPEC: YabaiSpec = YabaiSpec;
+
+impl WindowManagerSpec for YabaiSpec {
+    fn backend(&self) -> WmBackend {
+        WmBackend::Yabai
+    }
+
+    fn name(&self) -> &'static str {
+        YabaiAdapter::NAME
+    }
+
+    fn connect(&self) -> Result<ConfiguredWindowManager> {
+        Ok(ConfiguredWindowManager::new(
+            Box::new(YabaiAdapter::connect()?),
+            WindowManagerFeatures::default(),
+        ))
+    }
+}
 
 impl YabaiAdapter {
     pub fn connect() -> Result<Self> {
