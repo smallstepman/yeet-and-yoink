@@ -72,6 +72,10 @@ pub enum WmBackend {
     #[cfg(target_os = "linux")]
     I3,
 
+    /// Paneru - sliding/scrolling tiling WM for macOS (niri-like)
+    #[cfg(target_os = "macos")]
+    Paneru,
+
     /// Yabai - tiling WM for macOS
     #[cfg(target_os = "macos")]
     Yabai,
@@ -89,7 +93,7 @@ impl Default for WmBackend {
         }
         #[cfg(target_os = "macos")]
         {
-            Self::Aerospace
+            Self::Yabai
         }
     }
 }
@@ -882,6 +886,8 @@ pub fn wm_adapter_override() -> Option<String> {
         WmBackend::Niri => "niri",
         #[cfg(target_os = "linux")]
         WmBackend::I3 => "i3",
+        #[cfg(target_os = "macos")]
+        WmBackend::Paneru => "paneru",
         #[cfg(target_os = "macos")]
         WmBackend::Yabai => "yabai",
         #[cfg(target_os = "macos")]

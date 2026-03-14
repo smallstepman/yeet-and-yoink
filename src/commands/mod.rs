@@ -1,4 +1,5 @@
 pub mod focus;
+#[cfg(target_os = "linux")]
 pub mod focus_or_cycle;
 pub mod move_win;
 pub mod resize;

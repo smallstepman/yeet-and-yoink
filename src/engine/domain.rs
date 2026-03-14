@@ -5,6 +5,7 @@ use std::sync::OnceLock;
 use anyhow::Result as AnyResult;
 use anyhow::{anyhow, Context, Result};
 
+#[cfg(target_os = "linux")]
 use crate::adapters::window_managers::niri::NiriDomainPlugin;
 use crate::adapters::window_managers::ConfiguredWindowManager;
 use crate::engine::contract::{
@@ -611,6 +612,9 @@ pub fn runtime_domains_for_window_manager(
 ) -> Result<Vec<Box<dyn ErasedDomain>>> {
     let resolver = crate::engine::chain_resolver::runtime_chain_resolver();
     let mut domains: Vec<Box<dyn ErasedDomain>> = Vec::new();
+    
+    // Platform-specific WM domain plugin selection
+    #[cfg(target_os = "linux")]
     match wm.adapter_name() {
         "niri" => {
             if let Ok(domain) = NiriDomainPlugin::connect(WM_DOMAIN_ID) {
@@ -620,6 +624,12 @@ pub fn runtime_domains_for_window_manager(
             }
         }
         other => domains.push(Box::new(UnsupportedDomainPlugin::new(WM_DOMAIN_ID, other))),
+    }
+    
+    #[cfg(target_os = "macos")]
+    {
+        // macOS WMs (yabai, aerospace) don't have custom domain plugins yet
+        domains.push(Box::new(UnsupportedDomainPlugin::new(WM_DOMAIN_ID, wm.adapter_name())));
     }
 
     for adapter in resolver.default_domain_adapters() {

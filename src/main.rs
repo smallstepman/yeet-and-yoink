@@ -2,6 +2,7 @@ use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 use yeet_and_yoink::commands;
+#[cfg(target_os = "linux")]
 use yeet_and_yoink::commands::focus_or_cycle::FocusOrCycleArgs;
 use yeet_and_yoink::commands::resize::ResizeMode;
 use yeet_and_yoink::config;
@@ -54,7 +55,8 @@ enum Cmd {
         #[arg(value_enum, default_value_t = ResizeMode::Grow)]
         mode: ResizeMode,
     },
-    /// Focus existing app instance, cycle through instances, or spawn if absent.
+    /// Focus existing app instance, cycle through instances, or spawn if absent. (Linux/Niri only)
+    #[cfg(target_os = "linux")]
     FocusOrCycle {
         #[command(flatten)]
         args: FocusOrCycleArgs,
@@ -72,6 +74,7 @@ impl Cmd {
             Self::Focus { .. } => "focus",
             Self::Move { .. } => "move",
             Self::Resize { .. } => "resize",
+            #[cfg(target_os = "linux")]
             Self::FocusOrCycle { .. } => "focus-or-cycle",
             Self::BrowserHost { .. } => "browser-host",
         }
@@ -159,6 +162,7 @@ fn main() {
             Cmd::Focus { direction } => commands::focus::run(direction),
             Cmd::Move { direction } => commands::move_win::run(direction),
             Cmd::Resize { direction, mode } => commands::resize::run(direction, mode),
+            #[cfg(target_os = "linux")]
             Cmd::FocusOrCycle { args } => commands::focus_or_cycle::run(args),
             Cmd::BrowserHost { .. } => unreachable!("browser host mode returns before logging init"),
         }

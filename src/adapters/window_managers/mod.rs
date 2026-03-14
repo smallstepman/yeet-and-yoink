@@ -1,10 +1,22 @@
+#[cfg(target_os = "linux")]
 pub mod i3;
+#[cfg(target_os = "linux")]
 pub mod niri;
+#[cfg(target_os = "macos")]
+pub mod paneru;
+#[cfg(target_os = "macos")]
+pub mod yabai;
 
 use anyhow::{anyhow, Context, Result};
 
+#[cfg(target_os = "linux")]
 use crate::adapters::window_managers::i3::{I3Adapter, I3FocusedWindow};
+#[cfg(target_os = "linux")]
 use crate::adapters::window_managers::niri::Niri;
+#[cfg(target_os = "macos")]
+use crate::adapters::window_managers::paneru::{PaneruAdapter, PaneruFocusedWindow};
+#[cfg(target_os = "macos")]
+use crate::adapters::window_managers::yabai::{YabaiAdapter, YabaiFocusedWindow};
 use crate::engine::runtime::ProcessId;
 use crate::engine::topology::Direction;
 
@@ -549,10 +561,16 @@ impl<T> WindowManagerAdapter for T where
 {
 }
 
+// ---------------------------------------------------------------------------
+// Linux: Niri adapter
+// ---------------------------------------------------------------------------
+
+#[cfg(target_os = "linux")]
 pub struct NiriAdapter {
     inner: Niri,
 }
 
+#[cfg(target_os = "linux")]
 impl NiriAdapter {
     pub fn connect() -> Result<Self> {
         validate_declared_capabilities::<Self>()?;
@@ -562,11 +580,13 @@ impl NiriAdapter {
     }
 }
 
+#[cfg(target_os = "linux")]
 #[derive(Clone, Copy)]
 pub struct NiriFocusedWindow<'a> {
     inner: &'a niri_ipc::Window,
 }
 
+#[cfg(target_os = "linux")]
 impl FocusedWindowView for NiriFocusedWindow<'_> {
     fn id(&self) -> u64 {
         self.inner.id
@@ -596,6 +616,7 @@ impl FocusedWindowView for NiriFocusedWindow<'_> {
     }
 }
 
+#[cfg(target_os = "linux")]
 impl WindowManagerCapabilityDescriptor for NiriAdapter {
     const NAME: &'static str = "niri";
     const CAPABILITIES: WindowManagerCapabilities = WindowManagerCapabilities {
@@ -621,6 +642,7 @@ impl WindowManagerCapabilityDescriptor for NiriAdapter {
     };
 }
 
+#[cfg(target_os = "linux")]
 impl WindowManagerIntrospection for NiriAdapter {
     type FocusedWindow<'a>
         = NiriFocusedWindow<'a>
@@ -659,6 +681,7 @@ impl WindowManagerIntrospection for NiriAdapter {
     }
 }
 
+#[cfg(target_os = "linux")]
 impl WindowManagerExecution for NiriAdapter {
     fn focus_direction(&mut self, direction: Direction) -> Result<()> {
         self.inner.focus_direction(direction)
@@ -699,6 +722,10 @@ impl WindowManagerExecution for NiriAdapter {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Platform-specific registry and detection
+// ---------------------------------------------------------------------------
+
 pub struct WindowManagerRegistration {
     pub name: &'static str,
     pub priority: u8,
@@ -707,10 +734,16 @@ pub struct WindowManagerRegistration {
     pub connect: fn() -> Result<ConfiguredWindowManager>,
 }
 
+// ---------------------------------------------------------------------------
+// Linux detection and connection
+// ---------------------------------------------------------------------------
+
+#[cfg(target_os = "linux")]
 fn detect_niri() -> bool {
     std::env::var_os("NIRI_SOCKET").is_some() || std::env::var_os("WAYLAND_DISPLAY").is_some()
 }
 
+#[cfg(target_os = "linux")]
 fn connect_niri() -> Result<ConfiguredWindowManager> {
     Ok(ConfiguredWindowManager::new(
         Box::new(NiriAdapter::connect()?),
@@ -718,6 +751,7 @@ fn connect_niri() -> Result<ConfiguredWindowManager> {
     ))
 }
 
+#[cfg(target_os = "linux")]
 fn detect_i3() -> bool {
     std::env::var_os("I3SOCK").is_some()
         || std::env::var_os("SWAYSOCK").is_some()
@@ -729,6 +763,7 @@ fn detect_i3() -> bool {
             .unwrap_or(false)
 }
 
+#[cfg(target_os = "linux")]
 fn connect_i3() -> Result<ConfiguredWindowManager> {
     Ok(ConfiguredWindowManager::new(
         Box::new(I3Adapter::connect()?),
@@ -736,6 +771,7 @@ fn connect_i3() -> Result<ConfiguredWindowManager> {
     ))
 }
 
+#[cfg(target_os = "linux")]
 const REGISTRY: &[WindowManagerRegistration] = &[
     WindowManagerRegistration {
         name: NiriAdapter::NAME,
@@ -752,6 +788,64 @@ const REGISTRY: &[WindowManagerRegistration] = &[
         connect: connect_i3,
     },
 ];
+
+// ---------------------------------------------------------------------------
+// macOS detection and connection
+// ---------------------------------------------------------------------------
+
+#[cfg(target_os = "macos")]
+fn detect_paneru() -> bool {
+    // Check if paneru socket exists
+    std::path::Path::new("/tmp/paneru.socket").exists()
+}
+
+#[cfg(target_os = "macos")]
+fn connect_paneru() -> Result<ConfiguredWindowManager> {
+    Ok(ConfiguredWindowManager::new(
+        Box::new(PaneruAdapter::connect()?),
+        WindowManagerFeatures::default(),
+    ))
+}
+
+#[cfg(target_os = "macos")]
+fn detect_yabai() -> bool {
+    // Check if yabai is running by looking for its socket or process
+    std::process::Command::new("pgrep")
+        .args(["-x", "yabai"])
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false)
+}
+
+#[cfg(target_os = "macos")]
+fn connect_yabai() -> Result<ConfiguredWindowManager> {
+    Ok(ConfiguredWindowManager::new(
+        Box::new(YabaiAdapter::connect()?),
+        WindowManagerFeatures::default(),
+    ))
+}
+
+#[cfg(target_os = "macos")]
+const REGISTRY: &[WindowManagerRegistration] = &[
+    WindowManagerRegistration {
+        name: PaneruAdapter::NAME,
+        priority: 110, // Higher than yabai since it's niri-like
+        detector: detect_paneru,
+        capabilities: PaneruAdapter::CAPABILITIES,
+        connect: connect_paneru,
+    },
+    WindowManagerRegistration {
+        name: YabaiAdapter::NAME,
+        priority: 100,
+        detector: detect_yabai,
+        capabilities: YabaiAdapter::CAPABILITIES,
+        connect: connect_yabai,
+    },
+];
+
+// ---------------------------------------------------------------------------
+// Connection selection (platform-independent)
+// ---------------------------------------------------------------------------
 
 fn preferred_window_manager_name() -> Option<String> {
     crate::config::wm_adapter_override().and_then(|raw| {
@@ -797,17 +891,37 @@ pub fn connect_selected() -> Result<ConfiguredWindowManager> {
     (registration.connect)()
 }
 
+// ---------------------------------------------------------------------------
+// SelectedWindowManager enum (platform-specific variants)
+// ---------------------------------------------------------------------------
+
+#[cfg(target_os = "linux")]
 pub enum SelectedWindowManager {
     Niri(NiriAdapter),
     I3(I3Adapter),
 }
 
+#[cfg(target_os = "macos")]
+pub enum SelectedWindowManager {
+    Paneru(PaneruAdapter),
+    Yabai(YabaiAdapter),
+}
+
+#[cfg(target_os = "linux")]
 #[derive(Clone, Copy)]
 pub enum SelectedFocusedWindow<'a> {
     Niri(NiriFocusedWindow<'a>),
     I3(I3FocusedWindow<'a>),
 }
 
+#[cfg(target_os = "macos")]
+#[derive(Clone, Copy)]
+pub enum SelectedFocusedWindow<'a> {
+    Paneru(PaneruFocusedWindow<'a>),
+    Yabai(YabaiFocusedWindow<'a>),
+}
+
+#[cfg(target_os = "linux")]
 impl FocusedWindowView for SelectedFocusedWindow<'_> {
     fn id(&self) -> u64 {
         match self {
@@ -845,6 +959,45 @@ impl FocusedWindowView for SelectedFocusedWindow<'_> {
     }
 }
 
+#[cfg(target_os = "macos")]
+impl FocusedWindowView for SelectedFocusedWindow<'_> {
+    fn id(&self) -> u64 {
+        match self {
+            Self::Paneru(inner) => inner.id(),
+            Self::Yabai(inner) => inner.id(),
+        }
+    }
+
+    fn app_id(&self) -> Option<&str> {
+        match self {
+            Self::Paneru(inner) => inner.app_id(),
+            Self::Yabai(inner) => inner.app_id(),
+        }
+    }
+
+    fn title(&self) -> Option<&str> {
+        match self {
+            Self::Paneru(inner) => inner.title(),
+            Self::Yabai(inner) => inner.title(),
+        }
+    }
+
+    fn pid(&self) -> Option<ProcessId> {
+        match self {
+            Self::Paneru(inner) => inner.pid(),
+            Self::Yabai(inner) => inner.pid(),
+        }
+    }
+
+    fn original_tile_index(&self) -> usize {
+        match self {
+            Self::Paneru(inner) => inner.original_tile_index(),
+            Self::Yabai(inner) => inner.original_tile_index(),
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
 impl WindowManagerMetadata for SelectedWindowManager {
     fn adapter_name(&self) -> &'static str {
         match self {
@@ -861,6 +1014,24 @@ impl WindowManagerMetadata for SelectedWindowManager {
     }
 }
 
+#[cfg(target_os = "macos")]
+impl WindowManagerMetadata for SelectedWindowManager {
+    fn adapter_name(&self) -> &'static str {
+        match self {
+            Self::Paneru(inner) => WindowManagerMetadata::adapter_name(inner),
+            Self::Yabai(inner) => WindowManagerMetadata::adapter_name(inner),
+        }
+    }
+
+    fn capabilities(&self) -> WindowManagerCapabilities {
+        match self {
+            Self::Paneru(inner) => WindowManagerMetadata::capabilities(inner),
+            Self::Yabai(inner) => WindowManagerMetadata::capabilities(inner),
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
 impl WindowManagerIntrospection for SelectedWindowManager {
     type FocusedWindow<'a>
         = SelectedFocusedWindow<'a>
@@ -889,6 +1060,36 @@ impl WindowManagerIntrospection for SelectedWindowManager {
     }
 }
 
+#[cfg(target_os = "macos")]
+impl WindowManagerIntrospection for SelectedWindowManager {
+    type FocusedWindow<'a>
+        = SelectedFocusedWindow<'a>
+    where
+        Self: 'a;
+
+    fn with_focused_window<R>(
+        &mut self,
+        visit: impl for<'a> FnOnce(Self::FocusedWindow<'a>) -> Result<R>,
+    ) -> Result<R> {
+        match self {
+            Self::Paneru(inner) => {
+                inner.with_focused_window(|window| visit(SelectedFocusedWindow::Paneru(window)))
+            }
+            Self::Yabai(inner) => {
+                inner.with_focused_window(|window| visit(SelectedFocusedWindow::Yabai(window)))
+            }
+        }
+    }
+
+    fn windows(&mut self) -> Result<Vec<WindowRecord>> {
+        match self {
+            Self::Paneru(inner) => WindowManagerIntrospection::windows(inner),
+            Self::Yabai(inner) => WindowManagerIntrospection::windows(inner),
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
 impl WindowManagerExecution for SelectedWindowManager {
     fn focus_direction(&mut self, direction: Direction) -> Result<()> {
         match self {
@@ -959,11 +1160,82 @@ impl WindowManagerExecution for SelectedWindowManager {
     }
 }
 
+#[cfg(target_os = "macos")]
+impl WindowManagerExecution for SelectedWindowManager {
+    fn focus_direction(&mut self, direction: Direction) -> Result<()> {
+        match self {
+            Self::Paneru(inner) => WindowManagerExecution::focus_direction(inner, direction),
+            Self::Yabai(inner) => WindowManagerExecution::focus_direction(inner, direction),
+        }
+    }
+
+    fn move_direction(&mut self, direction: Direction) -> Result<()> {
+        match self {
+            Self::Paneru(inner) => WindowManagerExecution::move_direction(inner, direction),
+            Self::Yabai(inner) => WindowManagerExecution::move_direction(inner, direction),
+        }
+    }
+
+    fn move_column(&mut self, direction: Direction) -> Result<()> {
+        match self {
+            Self::Paneru(inner) => WindowManagerExecution::move_column(inner, direction),
+            Self::Yabai(inner) => WindowManagerExecution::move_column(inner, direction),
+        }
+    }
+
+    fn consume_into_column_and_move(
+        &mut self,
+        direction: Direction,
+        original_tile_index: usize,
+    ) -> Result<()> {
+        match self {
+            Self::Paneru(inner) => WindowManagerExecution::consume_into_column_and_move(
+                inner,
+                direction,
+                original_tile_index,
+            ),
+            Self::Yabai(inner) => WindowManagerExecution::consume_into_column_and_move(
+                inner,
+                direction,
+                original_tile_index,
+            ),
+        }
+    }
+
+    fn resize_with_intent(&mut self, intent: ResizeIntent) -> Result<()> {
+        match self {
+            Self::Paneru(inner) => WindowManagerExecution::resize_with_intent(inner, intent),
+            Self::Yabai(inner) => WindowManagerExecution::resize_with_intent(inner, intent),
+        }
+    }
+
+    fn spawn(&mut self, command: Vec<String>) -> Result<()> {
+        match self {
+            Self::Paneru(inner) => WindowManagerExecution::spawn(inner, command),
+            Self::Yabai(inner) => WindowManagerExecution::spawn(inner, command),
+        }
+    }
+
+    fn focus_window_by_id(&mut self, id: u64) -> Result<()> {
+        match self {
+            Self::Paneru(inner) => WindowManagerExecution::focus_window_by_id(inner, id),
+            Self::Yabai(inner) => WindowManagerExecution::focus_window_by_id(inner, id),
+        }
+    }
+
+    fn close_window_by_id(&mut self, id: u64) -> Result<()> {
+        match self {
+            Self::Paneru(inner) => WindowManagerExecution::close_window_by_id(inner, id),
+            Self::Yabai(inner) => WindowManagerExecution::close_window_by_id(inner, id),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         plan_resize, plan_tear_out, validate_declared_capabilities, CapabilitySupport,
-        ConfiguredWindowManager, DirectionalCapability, FocusedWindowRecord, NiriAdapter,
+        ConfiguredWindowManager, DirectionalCapability, FocusedWindowRecord,
         PrimitiveWindowManagerCapabilities, ResizeIntent, WindowCycleProvider,
         WindowManagerCapabilities, WindowManagerCapabilityDescriptor, WindowManagerFeatures,
         WindowManagerSession,
@@ -971,6 +1243,11 @@ mod tests {
     use crate::engine::topology::Direction;
     use anyhow::Result;
     use std::sync::{Arc, Mutex};
+
+    #[cfg(target_os = "linux")]
+    use super::NiriAdapter;
+    #[cfg(target_os = "macos")]
+    use super::YabaiAdapter;
 
     struct InvalidComposedCapabilities;
 
@@ -1003,12 +1280,21 @@ mod tests {
             .contains("invalid capabilities for adapter"));
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn niri_capabilities_are_valid() {
         validate_declared_capabilities::<NiriAdapter>()
             .expect("niri capability descriptor should be valid");
     }
 
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn yabai_capabilities_are_valid() {
+        validate_declared_capabilities::<YabaiAdapter>()
+            .expect("yabai capability descriptor should be valid");
+    }
+
+    #[cfg(target_os = "linux")]
     #[test]
     fn tear_out_and_resize_plans_resolve_native_composed_and_unsupported() {
         let capabilities = NiriAdapter::CAPABILITIES;
@@ -1046,8 +1332,14 @@ mod tests {
     fn built_in_connectors_are_typed_as_configured_window_managers() {
         fn assert_connector(_connect: fn() -> Result<ConfiguredWindowManager>) {}
 
+        #[cfg(target_os = "linux")]
         assert_connector(super::connect_niri);
+        #[cfg(target_os = "linux")]
         assert_connector(super::connect_i3);
+        #[cfg(target_os = "macos")]
+        assert_connector(super::connect_paneru);
+        #[cfg(target_os = "macos")]
+        assert_connector(super::connect_yabai);
         let _ = super::connect_selected as fn() -> Result<ConfiguredWindowManager>;
     }
 
@@ -1186,4 +1478,20 @@ mod tests {
     struct FakeCycleProvider;
 
     impl WindowCycleProvider for FakeCycleProvider {}
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn yabai_tear_out_and_resize_plans() {
+        let capabilities = YabaiAdapter::CAPABILITIES;
+        // Yabai doesn't support tear-out
+        assert_eq!(
+            plan_tear_out(capabilities, Direction::East),
+            CapabilitySupport::Unsupported
+        );
+        // Yabai has native resize
+        assert_eq!(
+            plan_resize(capabilities, Direction::West),
+            CapabilitySupport::Native
+        );
+    }
 }
