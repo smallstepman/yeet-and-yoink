@@ -3,6 +3,7 @@ pub use crate::engine::contract::{
     ChainResolver, MergeExecutionMode, MergePreparation, MoveDecision, TearResult, TopologyHandler,
     TopologySnapshot,
 };
+use crate::config::AppSection;
 
 macro_rules! delegate_topology_to_mux_provider {
     ($ty:ty, $launch_prefix:expr) => {
@@ -166,26 +167,126 @@ pub mod nvim;
 pub mod vscode;
 pub mod wezterm;
 
+pub(crate) struct DirectAdapterSpec {
+    pub name: &'static str,
+    pub aliases: &'static [&'static str],
+    pub app_ids: &'static [&'static str],
+    pub section: AppSection,
+    pub build: fn() -> Box<dyn AppAdapter>,
+}
+
+pub(crate) struct TerminalHostSpec {
+    pub aliases: &'static [&'static str],
+    pub app_ids: &'static [&'static str],
+    pub terminal_launch_prefix: &'static [&'static str],
+    pub build: fn() -> Box<dyn AppAdapter>,
+}
+
+pub(crate) fn build_emacs() -> Box<dyn AppAdapter> {
+    Box::new(emacs::EmacsBackend)
+}
+
+pub(crate) fn build_librewolf() -> Box<dyn AppAdapter> {
+    Box::new(librewolf::Librewolf)
+}
+
+pub(crate) fn build_chromium() -> Box<dyn AppAdapter> {
+    Box::new(chromium::Chromium)
+}
+
+pub(crate) fn build_vscode() -> Box<dyn AppAdapter> {
+    Box::new(vscode::Vscode)
+}
+
+pub(crate) fn build_wezterm_terminal() -> Box<dyn AppAdapter> {
+    Box::new(wezterm::WeztermBackend)
+}
+
+pub(crate) fn build_kitty_terminal() -> Box<dyn AppAdapter> {
+    Box::new(kitty::KittyBackend)
+}
+
+pub(crate) fn build_foot_terminal() -> Box<dyn AppAdapter> {
+    Box::new(foot::FootBackend)
+}
+
+pub(crate) fn build_alacritty_terminal() -> Box<dyn AppAdapter> {
+    Box::new(alacritty::AlacrittyBackend)
+}
+
+pub(crate) fn build_ghostty_terminal() -> Box<dyn AppAdapter> {
+    Box::new(ghostty::GhosttyBackend)
+}
+
+pub(crate) const TERMINAL_HOSTS: &[TerminalHostSpec] = &[
+    TerminalHostSpec {
+        aliases: wezterm::ADAPTER_ALIASES,
+        app_ids: wezterm::APP_IDS,
+        terminal_launch_prefix: wezterm::TERMINAL_LAUNCH_PREFIX,
+        build: build_wezterm_terminal,
+    },
+    TerminalHostSpec {
+        aliases: kitty::ADAPTER_ALIASES,
+        app_ids: kitty::APP_IDS,
+        terminal_launch_prefix: kitty::TERMINAL_LAUNCH_PREFIX,
+        build: build_kitty_terminal,
+    },
+    TerminalHostSpec {
+        aliases: foot::ADAPTER_ALIASES,
+        app_ids: foot::APP_IDS,
+        terminal_launch_prefix: foot::TERMINAL_LAUNCH_PREFIX,
+        build: build_foot_terminal,
+    },
+    TerminalHostSpec {
+        aliases: alacritty::ADAPTER_ALIASES,
+        app_ids: alacritty::APP_IDS,
+        terminal_launch_prefix: alacritty::TERMINAL_LAUNCH_PREFIX,
+        build: build_alacritty_terminal,
+    },
+    TerminalHostSpec {
+        aliases: ghostty::ADAPTER_ALIASES,
+        app_ids: ghostty::APP_IDS,
+        terminal_launch_prefix: ghostty::TERMINAL_LAUNCH_PREFIX,
+        build: build_ghostty_terminal,
+    },
+];
+
+pub(crate) const DIRECT_ADAPTERS: &[DirectAdapterSpec] = &[
+    DirectAdapterSpec {
+        name: emacs::ADAPTER_NAME,
+        aliases: emacs::ADAPTER_ALIASES,
+        app_ids: emacs::APP_IDS,
+        section: AppSection::Editor,
+        build: build_emacs,
+    },
+    DirectAdapterSpec {
+        name: librewolf::ADAPTER_NAME,
+        aliases: librewolf::ADAPTER_ALIASES,
+        app_ids: librewolf::APP_IDS,
+        section: AppSection::Browser,
+        build: build_librewolf,
+    },
+    DirectAdapterSpec {
+        name: chromium::ADAPTER_NAME,
+        aliases: chromium::ADAPTER_ALIASES,
+        app_ids: chromium::APP_IDS,
+        section: AppSection::Browser,
+        build: build_chromium,
+    },
+    DirectAdapterSpec {
+        name: "vscode",
+        aliases: &["vscode"],
+        app_ids: &["code", "code-url-handler", "Code", "code-oss"],
+        section: AppSection::Editor,
+        build: build_vscode,
+    },
+];
+
 /// Developer note for adding a new adapter:
 /// 1. Implement `AppAdapter` and declare all booleans in `capabilities`.
 /// 2. Keep unsupported operations disabled in `capabilities` so the orchestrator
 ///    classify them as `Unsupported` without runtime probes.
 /// 3. Add adapter tests that cover focus/move/resize behavior and precedence.
-
-// ---------------------------------------------------------------------------
-// App resolution (delegated to engine ChainResolver)
-// ---------------------------------------------------------------------------
-
-/// Baseline adapters used to seed runtime domains even when the focused window
-/// does not currently belong to that app kind.
-pub fn default_domain_adapters() -> Vec<Box<dyn AppAdapter>> {
-    crate::engine::chain_resolver::runtime_chain_resolver().default_domain_adapters()
-}
-
-/// Resolve a chain of app handlers for a window, innermost-first.
-pub fn resolve_chain(app_id: &str, pid: u32, title: &str) -> Vec<Box<dyn AppAdapter>> {
-    crate::engine::chain_resolver::runtime_chain_resolver().resolve_chain(app_id, pid, title)
-}
 
 #[cfg(test)]
 mod resolve_chain_tests {
@@ -198,7 +299,8 @@ mod resolve_chain_tests {
     };
     use crate::adapters::terminal_multiplexers::tmux::Tmux;
 
-    use super::resolve_chain;
+    use crate::engine::chain_resolver::runtime_chain_resolver;
+    use crate::engine::contract::ChainResolver;
 
     static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -258,7 +360,7 @@ enabled = true
         .expect("config file should be writable");
         let old_config = load_config(&config_dir.join("config.toml"));
 
-        let chain = resolve_chain(emacs::APP_IDS[0], 0, "");
+        let chain = runtime_chain_resolver().resolve_chain(emacs::APP_IDS[0], 0, "");
         assert_eq!(chain.len(), 1);
         assert_eq!(chain[0].adapter_name(), emacs::ADAPTER_NAME);
 
@@ -283,7 +385,7 @@ enabled = true
 
         let old_config = load_config(&config_dir.join("config.toml"));
 
-        let chain = resolve_chain(emacs::APP_IDS[0], 0, "");
+        let chain = runtime_chain_resolver().resolve_chain(emacs::APP_IDS[0], 0, "");
         assert!(chain.is_empty());
 
         restore_config(old_config);
@@ -307,7 +409,7 @@ enabled = false
 
         let old_config = load_config(&config_dir.join("config.toml"));
 
-        let chain = resolve_chain(emacs::APP_IDS[0], 0, "");
+        let chain = runtime_chain_resolver().resolve_chain(emacs::APP_IDS[0], 0, "");
         assert!(chain.is_empty());
 
         restore_config(old_config);
@@ -333,7 +435,7 @@ app = "wezterm"
 
         let old_config = load_config(&config_dir.join("config.toml"));
 
-        let chain = resolve_chain(wezterm::APP_IDS[0], 0, "");
+        let chain = runtime_chain_resolver().resolve_chain(wezterm::APP_IDS[0], 0, "");
         assert!(!chain.is_empty());
         assert_eq!(
             chain
@@ -363,7 +465,7 @@ enabled = true
         .expect("config file should be writable");
         let old_config = load_config(&config_dir.join("config.toml"));
 
-        let chain = resolve_chain(kitty::APP_IDS[0], 0, "");
+        let chain = runtime_chain_resolver().resolve_chain(kitty::APP_IDS[0], 0, "");
         assert!(!chain.is_empty());
         assert_eq!(
             chain.last().map(|adapter| adapter.adapter_name()),
@@ -390,7 +492,7 @@ enabled = true
         .expect("config file should be writable");
         let old_config = load_config(&config_dir.join("config.toml"));
 
-        let chain = resolve_chain(foot::APP_IDS[0], 0, "");
+        let chain = runtime_chain_resolver().resolve_chain(foot::APP_IDS[0], 0, "");
         assert!(!chain.is_empty());
         assert_eq!(
             chain.last().map(|adapter| adapter.adapter_name()),
@@ -417,7 +519,7 @@ enabled = true
         .expect("config file should be writable");
         let old_config = load_config(&config_dir.join("config.toml"));
 
-        let chain = resolve_chain(alacritty::APP_IDS[0], 0, "");
+        let chain = runtime_chain_resolver().resolve_chain(alacritty::APP_IDS[0], 0, "");
         assert!(!chain.is_empty());
         assert_eq!(
             chain.last().map(|adapter| adapter.adapter_name()),
@@ -444,7 +546,7 @@ enabled = true
         .expect("config file should be writable");
         let old_config = load_config(&config_dir.join("config.toml"));
 
-        let chain = resolve_chain(ghostty::APP_IDS[0], 0, "");
+        let chain = runtime_chain_resolver().resolve_chain(ghostty::APP_IDS[0], 0, "");
         assert!(!chain.is_empty());
         assert_eq!(
             chain.last().map(|adapter| adapter.adapter_name()),

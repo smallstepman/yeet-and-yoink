@@ -1,11 +1,7 @@
 use crate::adapters::apps::{
-    alacritty,
-    chromium::{self, Chromium},
-    emacs, foot, ghostty, kitty,
-    librewolf::{self, Librewolf},
+    self, emacs,
     nvim::{self, Nvim},
-    vscode::Vscode,
-    wezterm, AppAdapter, AppKind,
+    AppAdapter, AppKind,
 };
 use crate::adapters::terminal_multiplexers::tmux::Tmux;
 use crate::config::{AppSection, TerminalMuxBackend};
@@ -23,121 +19,6 @@ pub fn runtime_chain_resolver() -> &'static RuntimeChainResolver {
     &RUNTIME_CHAIN_RESOLVER
 }
 
-struct DirectAdapterSpec {
-    name: &'static str,
-    aliases: &'static [&'static str],
-    app_ids: &'static [&'static str],
-    section: AppSection,
-    build: fn() -> Box<dyn AppAdapter>,
-}
-
-fn build_editor() -> Box<dyn AppAdapter> {
-    crate::engine::app_policy::bind_app_policy(Box::new(emacs::EmacsBackend))
-}
-
-fn build_librewolf() -> Box<dyn AppAdapter> {
-    crate::engine::app_policy::bind_app_policy(Box::new(Librewolf))
-}
-
-fn build_chromium() -> Box<dyn AppAdapter> {
-    crate::engine::app_policy::bind_app_policy(Box::new(Chromium))
-}
-
-fn build_vscode() -> Box<dyn AppAdapter> {
-    crate::engine::app_policy::bind_app_policy(Box::new(Vscode))
-}
-
-fn build_wezterm_terminal() -> Box<dyn AppAdapter> {
-    crate::engine::app_policy::bind_app_policy(Box::new(wezterm::WeztermBackend))
-}
-
-fn build_kitty_terminal() -> Box<dyn AppAdapter> {
-    crate::engine::app_policy::bind_app_policy(Box::new(kitty::KittyBackend))
-}
-
-fn build_foot_terminal() -> Box<dyn AppAdapter> {
-    crate::engine::app_policy::bind_app_policy(Box::new(foot::FootBackend))
-}
-
-fn build_alacritty_terminal() -> Box<dyn AppAdapter> {
-    crate::engine::app_policy::bind_app_policy(Box::new(alacritty::AlacrittyBackend))
-}
-
-fn build_ghostty_terminal() -> Box<dyn AppAdapter> {
-    crate::engine::app_policy::bind_app_policy(Box::new(ghostty::GhosttyBackend))
-}
-
-struct TerminalHostSpec {
-    aliases: &'static [&'static str],
-    app_ids: &'static [&'static str],
-    terminal_launch_prefix: &'static [&'static str],
-    build: fn() -> Box<dyn AppAdapter>,
-}
-
-const TERMINAL_HOSTS: &[TerminalHostSpec] = &[
-    TerminalHostSpec {
-        aliases: wezterm::ADAPTER_ALIASES,
-        app_ids: wezterm::APP_IDS,
-        terminal_launch_prefix: wezterm::TERMINAL_LAUNCH_PREFIX,
-        build: build_wezterm_terminal,
-    },
-    TerminalHostSpec {
-        aliases: kitty::ADAPTER_ALIASES,
-        app_ids: kitty::APP_IDS,
-        terminal_launch_prefix: kitty::TERMINAL_LAUNCH_PREFIX,
-        build: build_kitty_terminal,
-    },
-    TerminalHostSpec {
-        aliases: foot::ADAPTER_ALIASES,
-        app_ids: foot::APP_IDS,
-        terminal_launch_prefix: foot::TERMINAL_LAUNCH_PREFIX,
-        build: build_foot_terminal,
-    },
-    TerminalHostSpec {
-        aliases: alacritty::ADAPTER_ALIASES,
-        app_ids: alacritty::APP_IDS,
-        terminal_launch_prefix: alacritty::TERMINAL_LAUNCH_PREFIX,
-        build: build_alacritty_terminal,
-    },
-    TerminalHostSpec {
-        aliases: ghostty::ADAPTER_ALIASES,
-        app_ids: ghostty::APP_IDS,
-        terminal_launch_prefix: ghostty::TERMINAL_LAUNCH_PREFIX,
-        build: build_ghostty_terminal,
-    },
-];
-
-const DIRECT_ADAPTERS: &[DirectAdapterSpec] = &[
-    DirectAdapterSpec {
-        name: emacs::ADAPTER_NAME,
-        aliases: emacs::ADAPTER_ALIASES,
-        app_ids: emacs::APP_IDS,
-        section: AppSection::Editor,
-        build: build_editor,
-    },
-    DirectAdapterSpec {
-        name: librewolf::ADAPTER_NAME,
-        aliases: librewolf::ADAPTER_ALIASES,
-        app_ids: librewolf::APP_IDS,
-        section: AppSection::Browser,
-        build: build_librewolf,
-    },
-    DirectAdapterSpec {
-        name: chromium::ADAPTER_NAME,
-        aliases: chromium::ADAPTER_ALIASES,
-        app_ids: chromium::APP_IDS,
-        section: AppSection::Browser,
-        build: build_chromium,
-    },
-    DirectAdapterSpec {
-        name: "vscode",
-        aliases: &["vscode"],
-        app_ids: &["code", "code-url-handler", "Code", "code-oss"],
-        section: AppSection::Editor,
-        build: build_vscode,
-    },
-];
-
 fn preferred_terminal_adapter_name() -> Option<String> {
     crate::config::app_adapter_override().and_then(|raw| {
         let normalized = raw.trim().to_ascii_lowercase();
@@ -154,7 +35,7 @@ fn matches_adapter_alias(preferred: &str, aliases: &[&str]) -> bool {
 }
 
 fn resolve_direct_adapter(app_id: &str) -> Option<Box<dyn AppAdapter>> {
-    for spec in DIRECT_ADAPTERS {
+    for spec in apps::DIRECT_ADAPTERS {
         if !spec.app_ids.iter().any(|candidate| *candidate == app_id) {
             continue;
         }
@@ -167,7 +48,7 @@ fn resolve_direct_adapter(app_id: &str) -> Option<Box<dyn AppAdapter>> {
             return None;
         }
 
-        return Some((spec.build)());
+        return Some(crate::engine::app_policy::bind_app_policy((spec.build)()));
     }
 
     None
@@ -230,7 +111,7 @@ where
 
 fn shell_pid_for_host_focused_tty(
     terminal_pid: u32,
-    host: &TerminalHostSpec,
+    host: &apps::TerminalHostSpec,
     shells: &[u32],
 ) -> Option<u32> {
     let panes = crate::adapters::terminal_multiplexers::active_mux_provider(host.aliases)
@@ -278,7 +159,7 @@ fn push_first_resolved_nvim_pid(
     false
 }
 
-fn tmux_nvim_pid_for_roots(roots: &[u32], host: &TerminalHostSpec) -> Option<u32> {
+fn tmux_nvim_pid_for_roots(roots: &[u32], host: &apps::TerminalHostSpec) -> Option<u32> {
     for root_pid in roots {
         let (tmux_pids, found_tmux) = resolve_tmux_for_root(*root_pid, host.terminal_launch_prefix);
         logging::debug(format!(
@@ -297,7 +178,10 @@ fn tmux_nvim_pid_for_roots(roots: &[u32], host: &TerminalHostSpec) -> Option<u32
     None
 }
 
-fn resolve_terminal_chain(terminal_pid: u32, host: &TerminalHostSpec) -> Vec<Box<dyn AppAdapter>> {
+fn resolve_terminal_chain(
+    terminal_pid: u32,
+    host: &apps::TerminalHostSpec,
+) -> Vec<Box<dyn AppAdapter>> {
     let mut chain: Vec<Box<dyn AppAdapter>> = Vec::new();
     let host_mux_backend = crate::config::mux_policy_for(host.aliases).backend;
     let nvim_terminal_app = crate::config::editor_terminal_ui_app_for(nvim::ADAPTER_ALIASES);
@@ -384,7 +268,7 @@ fn resolve_terminal_chain(terminal_pid: u32, host: &TerminalHostSpec) -> Vec<Box
                 "resolve_terminal_chain: no focused shell match and tmux resolution is disabled",
             );
         }
-        chain.push((host.build)());
+        chain.push(crate::engine::app_policy::bind_app_policy((host.build)()));
         return chain;
     };
     logging::debug(format!(
@@ -452,7 +336,7 @@ fn resolve_terminal_chain(terminal_pid: u32, host: &TerminalHostSpec) -> Vec<Box
         }
     }
 
-    chain.push((host.build)());
+    chain.push(crate::engine::app_policy::bind_app_policy((host.build)()));
     logging::debug(format!(
         "resolve_terminal_chain: final depth={}",
         chain.len()
@@ -483,7 +367,7 @@ impl ChainResolver for RuntimeChainResolver {
             app_id, pid, title
         ));
 
-        if let Some(host) = TERMINAL_HOSTS
+        if let Some(host) = apps::TERMINAL_HOSTS
             .iter()
             .find(|host| host.app_ids.contains(&app_id))
         {
@@ -506,21 +390,16 @@ impl ChainResolver for RuntimeChainResolver {
     }
 
     fn default_domain_adapters(&self) -> Vec<Box<dyn AppAdapter>> {
-        let terminal_adapter = match preferred_terminal_adapter_name().as_deref() {
-            Some(preferred) if matches_adapter_alias(preferred, alacritty::ADAPTER_ALIASES) => {
-                build_alacritty_terminal()
-            }
-            Some(preferred) if matches_adapter_alias(preferred, foot::ADAPTER_ALIASES) => {
-                build_foot_terminal()
-            }
-            Some(preferred) if matches_adapter_alias(preferred, ghostty::ADAPTER_ALIASES) => {
-                build_ghostty_terminal()
-            }
-            Some(preferred) if matches_adapter_alias(preferred, kitty::ADAPTER_ALIASES) => {
-                build_kitty_terminal()
-            }
-            _ => build_wezterm_terminal(),
-        };
+        let terminal_adapter = preferred_terminal_adapter_name()
+            .as_deref()
+            .and_then(|preferred| {
+                apps::TERMINAL_HOSTS
+                    .iter()
+                    .find(|host| matches_adapter_alias(preferred, host.aliases))
+            })
+            .or_else(|| apps::TERMINAL_HOSTS.first())
+            .map(|host| crate::engine::app_policy::bind_app_policy((host.build)()))
+            .expect("terminal host catalog should not be empty");
         vec![
             terminal_adapter,
             crate::engine::app_policy::bind_app_policy(Box::new(emacs::EmacsBackend)),
