@@ -638,11 +638,11 @@ where
     T: TopologyHandler + ?Sized,
 {
     fn resolve_chain(&self, app_id: &str, pid: u32, title: &str) -> Vec<Box<dyn AppAdapter>> {
-        crate::engine::chain_resolver::runtime_chain_resolver().resolve_chain(app_id, pid, title)
+        crate::engine::chain_resolver::resolve_app_chain(app_id, pid, title)
     }
 
     fn default_domain_adapters(&self) -> Vec<Box<dyn AppAdapter>> {
-        crate::engine::chain_resolver::runtime_chain_resolver().default_domain_adapters()
+        crate::engine::chain_resolver::default_app_domain_adapters()
     }
 
     fn domain_id_for_window(
@@ -651,8 +651,7 @@ where
         pid: Option<ProcessId>,
         title: Option<&str>,
     ) -> DomainId {
-        crate::engine::chain_resolver::runtime_chain_resolver()
-            .domain_id_for_window(app_id, pid, title)
+        crate::engine::chain_resolver::resolve_window_domain_id(app_id, pid, title)
     }
 }
 

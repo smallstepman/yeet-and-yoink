@@ -64,23 +64,19 @@ Geometry solver that:
 
 Key insight: The solver treats all leaves uniformly regardless of domain, enabling consistent navigation across nested tiling systems.
 
-### 3. Domain Contracts (`src/engine/domain.rs`)
+### 3. Domain Contracts (`src/engine/contract.rs`)
 
 Defines the interface all adapters implement:
 
 ```rust
-trait AppAdapter {
-    fn adapter_name(&self) -> &str;
-    fn config_aliases(&self) -> &[&str];
+trait AppAdapter: Send + TopologyHandler + ChainResolver {
+    fn adapter_name(&self) -> &'static str;
+    fn config_aliases(&self) -> Option<&'static [&'static str]>;
     fn kind(&self) -> AppKind;
-    fn capabilities(&self) -> Capabilities;
-    
-    // Core operations
-    fn focus(&self, direction: Direction) -> Result<()>;
-    fn move_pane(&self, direction: Direction) -> Result<MoveResult>;
-    fn resize(&self, direction: Direction, delta: i32) -> Result<()>;
-    fn tear_out(&self, scope: TearOffScope) -> Result<TearOutResult>;
-    fn merge_into(&self, target: &dyn AppAdapter, prep: MergePreparation) -> Result<()>;
+    fn capabilities(&self) -> AdapterCapabilities;
+
+    // Optional adapter-native evaluation hook
+    fn eval(&self, expression: &str, pid: Option<ProcessId>) -> Result<String>;
 }
 ```
 
@@ -117,10 +113,19 @@ Config discovery order:
 
 ### 5. Chain Resolver (`src/engine/chain_resolver.rs`)
 
-Responsible for building the **adapter chain** for a given window:
-- Detects if window is a terminal host → Assembles terminal + mux adapters
-- Detects editors directly
-- Applies config overrides
+The engine owns policy binding and chain/domain resolution for a given window while
+consuming raw adapter catalog/build data from `src/adapters/apps/`.
+
+Engine resolver helpers expose the behavior the rest of the engine uses:
+- `resolve_app_chain(app_id, pid, title)` builds the adapter chain
+- `default_app_domain_adapters()` returns the default domain adapters used to seed topology
+- `resolve_window_domain_id(app_id, pid, title)` maps a window to an engine domain id
+
+That resolver flow:
+- Detects if the window is a terminal host → assembles terminal + mux adapters
+- Detects direct app/editor adapters
+- Binds engine policy wrappers around catalog-provided adapters
+- Applies config overrides before returning engine-owned adapters
 
 Example chains:
 - WezTerm window → `[wezterm_backend, wezterm_mux]`
