@@ -5,8 +5,6 @@ use std::sync::OnceLock;
 use anyhow::Result as AnyResult;
 use anyhow::{anyhow, Context, Result};
 
-#[cfg(target_os = "linux")]
-use crate::adapters::window_managers::niri::NiriDomainPlugin;
 use crate::adapters::window_managers::ConfiguredWindowManager;
 use crate::engine::contract::{
     AppAdapter, AppKind, ChainResolver, MergePreparation, TopologyHandler as AppTopologyHandler,
@@ -378,15 +376,12 @@ fn app_merge_payload_types() -> &'static [TypeId] {
 #[derive(Debug)]
 struct UnsupportedDomainPlugin {
     domain_id: DomainId,
-    name: String,
+    name: &'static str,
 }
 
 impl UnsupportedDomainPlugin {
-    fn new(domain_id: DomainId, name: impl Into<String>) -> Self {
-        Self {
-            domain_id,
-            name: name.into(),
-        }
+    fn new(domain_id: DomainId, name: &'static str) -> Self {
+        Self { domain_id, name }
     }
 }
 
@@ -396,8 +391,7 @@ impl ErasedDomain for UnsupportedDomainPlugin {
     }
 
     fn domain_name(&self) -> &'static str {
-        // The dynamic adapter name is only used in logs/debugging.
-        "wm"
+        self.name
     }
 
     fn rect(&self) -> Rect {
@@ -612,24 +606,14 @@ pub fn runtime_domains_for_window_manager(
 ) -> Result<Vec<Box<dyn ErasedDomain>>> {
     let resolver = crate::engine::chain_resolver::runtime_chain_resolver();
     let mut domains: Vec<Box<dyn ErasedDomain>> = Vec::new();
-    
-    // Platform-specific WM domain plugin selection
-    #[cfg(target_os = "linux")]
-    match wm.adapter_name() {
-        "niri" => {
-            if let Ok(domain) = NiriDomainPlugin::connect(WM_DOMAIN_ID) {
-                domains.push(Box::new(domain));
-            } else {
-                domains.push(Box::new(UnsupportedDomainPlugin::new(WM_DOMAIN_ID, "niri")));
-            }
-        }
-        other => domains.push(Box::new(UnsupportedDomainPlugin::new(WM_DOMAIN_ID, other))),
-    }
-    
-    #[cfg(target_os = "macos")]
-    {
-        // macOS WMs (yabai, aerospace) don't have custom domain plugins yet
-        domains.push(Box::new(UnsupportedDomainPlugin::new(WM_DOMAIN_ID, wm.adapter_name())));
+
+    if let Some(factory) = wm.domain_factory() {
+        domains.push(factory.create_domain(WM_DOMAIN_ID)?);
+    } else {
+        domains.push(Box::new(UnsupportedDomainPlugin::new(
+            WM_DOMAIN_ID,
+            wm.adapter_name(),
+        )));
     }
 
     for adapter in resolver.default_domain_adapters() {
@@ -1033,13 +1017,19 @@ mod transfer_tests {
 
 #[cfg(test)]
 mod configured_window_manager_tests {
+    use std::any::TypeId;
+
     use anyhow::Result;
 
-    use super::{runtime_domains_for_window_manager, WM_DOMAIN_ID};
+    use super::{
+        runtime_domains_for_window_manager, DomainLeafSnapshot, DomainSnapshot, ErasedDomain,
+        PaneState, WM_DOMAIN_ID,
+    };
     use crate::adapters::window_managers::{
         ConfiguredWindowManager, FocusedWindowRecord, WindowManagerCapabilities,
-        WindowManagerFeatures, WindowManagerSession, WindowRecord,
+        WindowManagerDomainFactory, WindowManagerFeatures, WindowManagerSession, WindowRecord,
     };
+    use crate::engine::topology::Rect;
 
     struct FakeSession;
 
@@ -1111,12 +1101,191 @@ mod configured_window_manager_tests {
 
     #[test]
     fn runtime_domains_accept_configured_window_manager_handle() {
-        let mut wm =
-            ConfiguredWindowManager::new(Box::new(FakeSession), WindowManagerFeatures::default());
+        let mut wm = fake_wm_without_domain_factory("fake");
 
         let domains = runtime_domains_for_window_manager(&mut wm)
             .expect("configured window manager should load runtime domains");
 
         assert_eq!(domains[0].domain_id(), WM_DOMAIN_ID);
+    }
+
+    #[test]
+    fn runtime_domains_uses_wm_domain_factory_when_present() {
+        let mut wm = fake_wm_with_domain_factory(fake_domain("wm-test"));
+
+        let domains = runtime_domains_for_window_manager(&mut wm).unwrap();
+
+        assert!(domains
+            .iter()
+            .any(|domain| domain.domain_name() == "wm-test"));
+    }
+
+    #[test]
+    fn runtime_domains_uses_generic_unsupported_domain_when_factory_absent() {
+        let mut wm = fake_wm_without_domain_factory("fake");
+
+        let domains = runtime_domains_for_window_manager(&mut wm).unwrap();
+
+        assert!(domains.iter().any(|domain| domain.domain_name() == "fake"));
+    }
+
+    fn fake_wm_with_domain_factory(domain: Box<dyn ErasedDomain>) -> ConfiguredWindowManager {
+        let mut features = WindowManagerFeatures::default();
+        features.domain_factory = Some(Box::new(FakeDomainFactory::new(domain)));
+        ConfiguredWindowManager::new(Box::new(FakeSession), features)
+    }
+
+    fn fake_wm_without_domain_factory(name: &'static str) -> ConfiguredWindowManager {
+        ConfiguredWindowManager::new(
+            Box::new(NamedFakeSession(name)),
+            WindowManagerFeatures::default(),
+        )
+    }
+
+    fn fake_domain(name: &'static str) -> Box<dyn ErasedDomain> {
+        Box::new(FakeRuntimeDomain::new(name))
+    }
+
+    struct FakeDomainFactory {
+        domain: std::sync::Mutex<Option<Box<dyn ErasedDomain>>>,
+    }
+
+    impl FakeDomainFactory {
+        fn new(domain: Box<dyn ErasedDomain>) -> Self {
+            Self {
+                domain: std::sync::Mutex::new(Some(domain)),
+            }
+        }
+    }
+
+    impl WindowManagerDomainFactory for FakeDomainFactory {
+        fn create_domain(
+            &self,
+            _domain_id: crate::engine::topology::DomainId,
+        ) -> Result<Box<dyn ErasedDomain>> {
+            self.domain
+                .lock()
+                .expect("fake domain factory mutex should not be poisoned")
+                .take()
+                .ok_or_else(|| anyhow::anyhow!("fake domain factory already consumed"))
+        }
+    }
+
+    struct NamedFakeSession(&'static str);
+
+    impl WindowManagerSession for NamedFakeSession {
+        fn adapter_name(&self) -> &'static str {
+            self.0
+        }
+
+        fn capabilities(&self) -> WindowManagerCapabilities {
+            WindowManagerCapabilities::none()
+        }
+
+        fn focused_window(&mut self) -> Result<FocusedWindowRecord> {
+            FakeSession.focused_window()
+        }
+
+        fn windows(&mut self) -> Result<Vec<WindowRecord>> {
+            FakeSession.windows()
+        }
+
+        fn focus_direction(&mut self, direction: crate::engine::topology::Direction) -> Result<()> {
+            FakeSession.focus_direction(direction)
+        }
+
+        fn move_direction(&mut self, direction: crate::engine::topology::Direction) -> Result<()> {
+            FakeSession.move_direction(direction)
+        }
+
+        fn move_column(&mut self, direction: crate::engine::topology::Direction) -> Result<()> {
+            FakeSession.move_column(direction)
+        }
+
+        fn consume_into_column_and_move(
+            &mut self,
+            direction: crate::engine::topology::Direction,
+            original_tile_index: usize,
+        ) -> Result<()> {
+            FakeSession.consume_into_column_and_move(direction, original_tile_index)
+        }
+
+        fn resize_with_intent(
+            &mut self,
+            intent: crate::adapters::window_managers::ResizeIntent,
+        ) -> Result<()> {
+            FakeSession.resize_with_intent(intent)
+        }
+
+        fn spawn(&mut self, command: Vec<String>) -> Result<()> {
+            FakeSession.spawn(command)
+        }
+
+        fn focus_window_by_id(&mut self, id: u64) -> Result<()> {
+            FakeSession.focus_window_by_id(id)
+        }
+
+        fn close_window_by_id(&mut self, id: u64) -> Result<()> {
+            FakeSession.close_window_by_id(id)
+        }
+    }
+
+    struct FakeRuntimeDomain {
+        name: &'static str,
+    }
+
+    impl FakeRuntimeDomain {
+        fn new(name: &'static str) -> Self {
+            Self { name }
+        }
+    }
+
+    impl ErasedDomain for FakeRuntimeDomain {
+        fn domain_id(&self) -> u64 {
+            WM_DOMAIN_ID
+        }
+
+        fn domain_name(&self) -> &'static str {
+            self.name
+        }
+
+        fn rect(&self) -> Rect {
+            Rect {
+                x: 0,
+                y: 0,
+                w: 100,
+                h: 100,
+            }
+        }
+
+        fn fetch_snapshot(&mut self) -> Result<DomainSnapshot> {
+            Ok(DomainSnapshot {
+                domain_id: WM_DOMAIN_ID,
+                rect: self.rect(),
+                leaves: vec![DomainLeafSnapshot {
+                    id: 1,
+                    native_id: vec![1],
+                    rect: self.rect(),
+                    focused: true,
+                }],
+            })
+        }
+
+        fn supported_payload_types(&self) -> Vec<TypeId> {
+            Vec::new()
+        }
+
+        fn tear_off(&mut self, _native_id: &[u8]) -> Result<Box<dyn PaneState>> {
+            anyhow::bail!("fake runtime domain does not support tear-off")
+        }
+
+        fn merge_in(
+            &mut self,
+            _target_native_id: &[u8],
+            _dir: crate::engine::topology::Direction,
+            _payload: Box<dyn PaneState>,
+        ) -> Result<Vec<u8>> {
+            anyhow::bail!("fake runtime domain does not support merge-in")
+        }
     }
 }

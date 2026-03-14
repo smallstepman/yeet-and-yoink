@@ -4,8 +4,8 @@ use niri_ipc::{Action, Request, Response, SizeChange, Window, Workspace, Workspa
 use std::any::TypeId;
 
 use crate::adapters::window_managers::{
-    ConfiguredWindowManager, NiriAdapter, WindowManagerExecution, WindowManagerFeatures,
-    WindowManagerIntrospection, WindowManagerSpec,
+    ConfiguredWindowManager, NiriAdapter, WindowManagerDomainFactory, WindowManagerExecution,
+    WindowManagerFeatures, WindowManagerIntrospection, WindowManagerSpec,
 };
 use crate::config::WmBackend;
 use crate::engine::domain::PaneState;
@@ -26,6 +26,8 @@ pub struct NiriSpec;
 
 pub static NIRI_SPEC: NiriSpec = NiriSpec;
 
+struct NiriDomainFactory;
+
 impl WindowManagerSpec for NiriSpec {
     fn backend(&self) -> WmBackend {
         WmBackend::Niri
@@ -36,10 +38,18 @@ impl WindowManagerSpec for NiriSpec {
     }
 
     fn connect(&self) -> Result<ConfiguredWindowManager> {
+        let mut features = WindowManagerFeatures::default();
+        features.domain_factory = Some(Box::new(NiriDomainFactory));
         Ok(ConfiguredWindowManager::new(
             Box::new(NiriAdapter::connect()?),
-            WindowManagerFeatures::default(),
+            features,
         ))
+    }
+}
+
+impl WindowManagerDomainFactory for NiriDomainFactory {
+    fn create_domain(&self, domain_id: DomainId) -> Result<Box<dyn ErasedDomain>> {
+        Ok(Box::new(NiriDomainPlugin::connect(domain_id)?))
     }
 }
 

@@ -10,9 +10,9 @@ pub mod yabai;
 use anyhow::{anyhow, Context, Result};
 
 #[cfg(target_os = "linux")]
-use crate::adapters::window_managers::i3::{I3Adapter, I3FocusedWindow};
-#[cfg(target_os = "linux")]
 use crate::adapters::window_managers::i3::I3_SPEC;
+#[cfg(target_os = "linux")]
+use crate::adapters::window_managers::i3::{I3Adapter, I3FocusedWindow};
 #[cfg(target_os = "linux")]
 use crate::adapters::window_managers::niri::{Niri, NIRI_SPEC};
 #[cfg(target_os = "macos")]
@@ -333,7 +333,12 @@ where
     }
 }
 
-pub trait WindowManagerDomainFactory: Send {}
+pub trait WindowManagerDomainFactory: Send {
+    fn create_domain(
+        &self,
+        domain_id: crate::engine::topology::DomainId,
+    ) -> Result<Box<dyn crate::engine::domain::ErasedDomain>>;
+}
 
 pub trait WindowCycleProvider: Send {}
 
