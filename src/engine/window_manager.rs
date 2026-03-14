@@ -449,7 +449,7 @@ fn connect_backend_for_test(
 }
 
 pub fn connect_selected() -> Result<ConfiguredWindowManager> {
-    let _span = tracing::debug_span!("window_manager.connect_selected").entered();
+    let _span = tracing::debug_span!("window_managers.connect_selected").entered();
     let backend = selected_wm_backend();
     let spec = spec_for_backend(backend);
     connect_backend(backend, spec)
@@ -465,14 +465,21 @@ mod tests {
         WindowManagerSession, WindowManagerSpec, WindowRecord, WindowTearOutComposer,
     };
     use crate::adapters::window_managers::spec_for_backend;
-    use crate::config::WmBackend;
     #[cfg(target_os = "macos")]
     use crate::adapters::window_managers::yabai::YabaiAdapter;
     #[cfg(target_os = "linux")]
     use crate::adapters::window_managers::NiriAdapter;
+    use crate::config::WmBackend;
     use crate::engine::topology::Direction;
     use anyhow::Result;
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::{Arc, Mutex};
+    use tracing::Subscriber;
+    use tracing_subscriber::layer::{Context as LayerContext, Layer};
+    use tracing_subscriber::prelude::*;
+
+    static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 
     #[test]
     fn configured_window_manager_delegates_to_object_safe_core() {
@@ -605,11 +612,98 @@ mod tests {
     }
 
     #[test]
+    fn connect_selected_emits_legacy_adapter_span_name() {
+        let _guard = crate::utils::env_guard();
+        let root = unique_temp_dir("connect-selected-span");
+        let config_dir = root.join("yeet-and-yoink");
+        std::fs::create_dir_all(&config_dir).expect("config dir should be created");
+        let config_path = config_dir.join("config.toml");
+        std::fs::write(
+            &config_path,
+            format!(
+                r#"
+[wm]
+enabled_integration = "{backend}"
+"#,
+                backend = unsupported_backend().as_str()
+            ),
+        )
+        .expect("config file should be writable");
+
+        let old_config = crate::config::snapshot();
+        crate::config::prepare_with_path(Some(&config_path)).expect("config should load");
+
+        let span_names = Arc::new(Mutex::new(Vec::new()));
+        let subscriber =
+            tracing_subscriber::registry().with(SpanNameLayer::new(span_names.clone()));
+        let result = tracing::subscriber::with_default(subscriber, super::connect_selected);
+
+        crate::config::install(old_config);
+        let _ = std::fs::remove_dir_all(root);
+
+        assert!(result.is_err(), "unsupported backend should fail quickly");
+        assert!(span_names
+            .lock()
+            .expect("span names lock should not be poisoned")
+            .iter()
+            .any(|name| name == "window_managers.connect_selected"));
+    }
+
+    #[test]
     fn failing_spec_uses_requested_backend() {
         let spec = failing_spec(WmBackend::Yabai);
 
         assert_eq!(spec.backend(), WmBackend::Yabai);
         assert_eq!(spec.name(), "yabai");
+    }
+
+    fn unique_temp_dir(prefix: &str) -> PathBuf {
+        let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!(
+            "yeet-and-yoink-window-manager-{prefix}-{}-{id}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&path).expect("temp dir should be created");
+        path
+    }
+
+    fn unsupported_backend() -> WmBackend {
+        #[cfg(target_os = "macos")]
+        {
+            WmBackend::Niri
+        }
+
+        #[cfg(target_os = "linux")]
+        {
+            WmBackend::Yabai
+        }
+    }
+
+    struct SpanNameLayer {
+        names: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl SpanNameLayer {
+        fn new(names: Arc<Mutex<Vec<String>>>) -> Self {
+            Self { names }
+        }
+    }
+
+    impl<S> Layer<S> for SpanNameLayer
+    where
+        S: Subscriber,
+    {
+        fn on_new_span(
+            &self,
+            attrs: &tracing::span::Attributes<'_>,
+            _id: &tracing::Id,
+            _ctx: LayerContext<'_, S>,
+        ) {
+            self.names
+                .lock()
+                .expect("span names lock should not be poisoned")
+                .push(attrs.metadata().name().to_string());
+        }
     }
 
     fn fake_configured_wm() -> TestConfiguredWindowManager {
