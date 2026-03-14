@@ -199,6 +199,183 @@ pub struct WindowRecord {
     pub original_tile_index: usize,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FocusedWindowRecord {
+    pub id: u64,
+    pub app_id: Option<String>,
+    pub title: Option<String>,
+    pub pid: Option<ProcessId>,
+    pub original_tile_index: usize,
+}
+
+impl FocusedWindowRecord {
+    pub fn from_view(window: impl FocusedWindowView) -> Self {
+        Self {
+            id: window.id(),
+            app_id: window.app_id().map(str::to_owned),
+            title: window.title().map(str::to_owned),
+            pid: window.pid(),
+            original_tile_index: window.original_tile_index(),
+        }
+    }
+}
+
+impl FocusedWindowView for FocusedWindowRecord {
+    fn id(&self) -> u64 {
+        self.id
+    }
+
+    fn app_id(&self) -> Option<&str> {
+        self.app_id.as_deref()
+    }
+
+    fn title(&self) -> Option<&str> {
+        self.title.as_deref()
+    }
+
+    fn pid(&self) -> Option<ProcessId> {
+        self.pid
+    }
+
+    fn original_tile_index(&self) -> usize {
+        self.original_tile_index
+    }
+}
+
+pub trait WindowManagerSession: Send {
+    fn adapter_name(&self) -> &'static str;
+    fn capabilities(&self) -> WindowManagerCapabilities;
+    fn focused_window(&mut self) -> Result<FocusedWindowRecord>;
+    fn windows(&mut self) -> Result<Vec<WindowRecord>>;
+    fn focus_direction(&mut self, direction: Direction) -> Result<()>;
+    fn move_direction(&mut self, direction: Direction) -> Result<()>;
+    fn resize_with_intent(&mut self, intent: ResizeIntent) -> Result<()>;
+    fn spawn(&mut self, command: Vec<String>) -> Result<()>;
+    fn focus_window_by_id(&mut self, id: u64) -> Result<()>;
+    fn close_window_by_id(&mut self, id: u64) -> Result<()>;
+}
+
+impl<T> WindowManagerSession for T
+where
+    T: WindowManagerAdapter + Send,
+{
+    fn adapter_name(&self) -> &'static str {
+        WindowManagerMetadata::adapter_name(self)
+    }
+
+    fn capabilities(&self) -> WindowManagerCapabilities {
+        WindowManagerMetadata::capabilities(self)
+    }
+
+    fn focused_window(&mut self) -> Result<FocusedWindowRecord> {
+        self.with_focused_window(|window| Ok(FocusedWindowRecord::from_view(window)))
+    }
+
+    fn windows(&mut self) -> Result<Vec<WindowRecord>> {
+        WindowManagerIntrospection::windows(self)
+    }
+
+    fn focus_direction(&mut self, direction: Direction) -> Result<()> {
+        WindowManagerExecution::focus_direction(self, direction)
+    }
+
+    fn move_direction(&mut self, direction: Direction) -> Result<()> {
+        WindowManagerExecution::move_direction(self, direction)
+    }
+
+    fn resize_with_intent(&mut self, intent: ResizeIntent) -> Result<()> {
+        WindowManagerExecution::resize_with_intent(self, intent)
+    }
+
+    fn spawn(&mut self, command: Vec<String>) -> Result<()> {
+        WindowManagerExecution::spawn(self, command)
+    }
+
+    fn focus_window_by_id(&mut self, id: u64) -> Result<()> {
+        WindowManagerExecution::focus_window_by_id(self, id)
+    }
+
+    fn close_window_by_id(&mut self, id: u64) -> Result<()> {
+        WindowManagerExecution::close_window_by_id(self, id)
+    }
+}
+
+pub trait WindowManagerDomainFactory: Send {}
+
+pub trait WindowCycleProvider: Send {}
+
+pub trait WindowTearOutComposer: Send {}
+
+#[derive(Default)]
+pub struct WindowManagerFeatures {
+    pub domain_factory: Option<Box<dyn WindowManagerDomainFactory>>,
+    pub window_cycle: Option<Box<dyn WindowCycleProvider>>,
+    pub tear_out_composer: Option<Box<dyn WindowTearOutComposer>>,
+}
+
+pub struct ConfiguredWindowManager {
+    core: Box<dyn WindowManagerSession>,
+    features: WindowManagerFeatures,
+}
+
+impl ConfiguredWindowManager {
+    pub fn new(core: Box<dyn WindowManagerSession>, features: WindowManagerFeatures) -> Self {
+        Self { core, features }
+    }
+
+    pub fn adapter_name(&self) -> &'static str {
+        self.core.adapter_name()
+    }
+
+    pub fn capabilities(&self) -> WindowManagerCapabilities {
+        self.core.capabilities()
+    }
+
+    pub fn focused_window(&mut self) -> Result<FocusedWindowRecord> {
+        self.core.focused_window()
+    }
+
+    pub fn windows(&mut self) -> Result<Vec<WindowRecord>> {
+        self.core.windows()
+    }
+
+    pub fn focus_direction(&mut self, direction: Direction) -> Result<()> {
+        self.core.focus_direction(direction)
+    }
+
+    pub fn move_direction(&mut self, direction: Direction) -> Result<()> {
+        self.core.move_direction(direction)
+    }
+
+    pub fn resize_with_intent(&mut self, intent: ResizeIntent) -> Result<()> {
+        self.core.resize_with_intent(intent)
+    }
+
+    pub fn spawn(&mut self, command: Vec<String>) -> Result<()> {
+        self.core.spawn(command)
+    }
+
+    pub fn focus_window_by_id(&mut self, id: u64) -> Result<()> {
+        self.core.focus_window_by_id(id)
+    }
+
+    pub fn close_window_by_id(&mut self, id: u64) -> Result<()> {
+        self.core.close_window_by_id(id)
+    }
+
+    pub fn domain_factory(&self) -> Option<&dyn WindowManagerDomainFactory> {
+        self.features.domain_factory.as_deref()
+    }
+
+    pub fn window_cycle(&self) -> Option<&dyn WindowCycleProvider> {
+        self.features.window_cycle.as_deref()
+    }
+
+    pub fn tear_out_composer(&self) -> Option<&dyn WindowTearOutComposer> {
+        self.features.tear_out_composer.as_deref()
+    }
+}
+
 pub trait WindowManagerCapabilityDescriptor {
     const NAME: &'static str;
     const CAPABILITIES: WindowManagerCapabilities;
@@ -580,15 +757,15 @@ impl FocusedWindowView for SelectedFocusedWindow<'_> {
 impl WindowManagerMetadata for SelectedWindowManager {
     fn adapter_name(&self) -> &'static str {
         match self {
-            Self::Niri(inner) => inner.adapter_name(),
-            Self::I3(inner) => inner.adapter_name(),
+            Self::Niri(inner) => WindowManagerMetadata::adapter_name(inner),
+            Self::I3(inner) => WindowManagerMetadata::adapter_name(inner),
         }
     }
 
     fn capabilities(&self) -> WindowManagerCapabilities {
         match self {
-            Self::Niri(inner) => inner.capabilities(),
-            Self::I3(inner) => inner.capabilities(),
+            Self::Niri(inner) => WindowManagerMetadata::capabilities(inner),
+            Self::I3(inner) => WindowManagerMetadata::capabilities(inner),
         }
     }
 }
@@ -615,8 +792,8 @@ impl WindowManagerIntrospection for SelectedWindowManager {
 
     fn windows(&mut self) -> Result<Vec<WindowRecord>> {
         match self {
-            Self::Niri(inner) => inner.windows(),
-            Self::I3(inner) => inner.windows(),
+            Self::Niri(inner) => WindowManagerIntrospection::windows(inner),
+            Self::I3(inner) => WindowManagerIntrospection::windows(inner),
         }
     }
 }
@@ -624,22 +801,22 @@ impl WindowManagerIntrospection for SelectedWindowManager {
 impl WindowManagerExecution for SelectedWindowManager {
     fn focus_direction(&mut self, direction: Direction) -> Result<()> {
         match self {
-            Self::Niri(inner) => inner.focus_direction(direction),
-            Self::I3(inner) => inner.focus_direction(direction),
+            Self::Niri(inner) => WindowManagerExecution::focus_direction(inner, direction),
+            Self::I3(inner) => WindowManagerExecution::focus_direction(inner, direction),
         }
     }
 
     fn move_direction(&mut self, direction: Direction) -> Result<()> {
         match self {
-            Self::Niri(inner) => inner.move_direction(direction),
-            Self::I3(inner) => inner.move_direction(direction),
+            Self::Niri(inner) => WindowManagerExecution::move_direction(inner, direction),
+            Self::I3(inner) => WindowManagerExecution::move_direction(inner, direction),
         }
     }
 
     fn move_column(&mut self, direction: Direction) -> Result<()> {
         match self {
-            Self::Niri(inner) => inner.move_column(direction),
-            Self::I3(inner) => inner.move_column(direction),
+            Self::Niri(inner) => WindowManagerExecution::move_column(inner, direction),
+            Self::I3(inner) => WindowManagerExecution::move_column(inner, direction),
         }
     }
 
@@ -649,36 +826,48 @@ impl WindowManagerExecution for SelectedWindowManager {
         original_tile_index: usize,
     ) -> Result<()> {
         match self {
-            Self::Niri(inner) => inner.consume_into_column_and_move(direction, original_tile_index),
-            Self::I3(inner) => inner.consume_into_column_and_move(direction, original_tile_index),
+            Self::Niri(inner) => {
+                WindowManagerExecution::consume_into_column_and_move(
+                    inner,
+                    direction,
+                    original_tile_index,
+                )
+            }
+            Self::I3(inner) => {
+                WindowManagerExecution::consume_into_column_and_move(
+                    inner,
+                    direction,
+                    original_tile_index,
+                )
+            }
         }
     }
 
     fn resize_with_intent(&mut self, intent: ResizeIntent) -> Result<()> {
         match self {
-            Self::Niri(inner) => inner.resize_with_intent(intent),
-            Self::I3(inner) => inner.resize_with_intent(intent),
+            Self::Niri(inner) => WindowManagerExecution::resize_with_intent(inner, intent),
+            Self::I3(inner) => WindowManagerExecution::resize_with_intent(inner, intent),
         }
     }
 
     fn spawn(&mut self, command: Vec<String>) -> Result<()> {
         match self {
-            Self::Niri(inner) => inner.spawn(command),
-            Self::I3(inner) => inner.spawn(command),
+            Self::Niri(inner) => WindowManagerExecution::spawn(inner, command),
+            Self::I3(inner) => WindowManagerExecution::spawn(inner, command),
         }
     }
 
     fn focus_window_by_id(&mut self, id: u64) -> Result<()> {
         match self {
-            Self::Niri(inner) => inner.focus_window_by_id(id),
-            Self::I3(inner) => inner.focus_window_by_id(id),
+            Self::Niri(inner) => WindowManagerExecution::focus_window_by_id(inner, id),
+            Self::I3(inner) => WindowManagerExecution::focus_window_by_id(inner, id),
         }
     }
 
     fn close_window_by_id(&mut self, id: u64) -> Result<()> {
         match self {
-            Self::Niri(inner) => inner.close_window_by_id(id),
-            Self::I3(inner) => inner.close_window_by_id(id),
+            Self::Niri(inner) => WindowManagerExecution::close_window_by_id(inner, id),
+            Self::I3(inner) => WindowManagerExecution::close_window_by_id(inner, id),
         }
     }
 }
@@ -687,10 +876,14 @@ impl WindowManagerExecution for SelectedWindowManager {
 mod tests {
     use super::{
         plan_resize, plan_tear_out, validate_declared_capabilities, CapabilitySupport,
-        DirectionalCapability, NiriAdapter, PrimitiveWindowManagerCapabilities,
-        WindowManagerCapabilities, WindowManagerCapabilityDescriptor,
+        ConfiguredWindowManager, DirectionalCapability, FocusedWindowRecord, NiriAdapter,
+        PrimitiveWindowManagerCapabilities, ResizeIntent, WindowCycleProvider,
+        WindowManagerCapabilities, WindowManagerCapabilityDescriptor, WindowManagerFeatures,
+        WindowManagerSession,
     };
+    use anyhow::Result;
     use crate::engine::topology::Direction;
+    use std::sync::{Arc, Mutex};
 
     struct InvalidComposedCapabilities;
 
@@ -745,4 +938,141 @@ mod tests {
             CapabilitySupport::Native
         );
     }
+
+    #[test]
+    fn configured_window_manager_delegates_to_object_safe_core() {
+        let mut wm = fake_configured_wm();
+        assert_eq!(wm.adapter_name(), "fake");
+        assert_eq!(wm.focused_window().unwrap().id, 42);
+        wm.focus_direction(Direction::West).unwrap();
+        assert_eq!(wm.take_calls(), vec!["focus_direction:west"]);
+    }
+
+    #[test]
+    fn configured_window_manager_exposes_optional_capabilities_independently() {
+        let wm = fake_configured_wm_with_cycle_provider();
+        assert!(wm.window_cycle().is_some());
+        assert!(wm.domain_factory().is_none());
+    }
+
+    fn fake_configured_wm() -> TestConfiguredWindowManager {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        TestConfiguredWindowManager::new(
+            ConfiguredWindowManager::new(
+                Box::new(FakeSession::new(calls.clone())),
+                WindowManagerFeatures::default(),
+            ),
+            calls,
+        )
+    }
+
+    fn fake_configured_wm_with_cycle_provider() -> TestConfiguredWindowManager {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let mut features = WindowManagerFeatures::default();
+        features.window_cycle = Some(Box::new(FakeCycleProvider));
+        TestConfiguredWindowManager::new(
+            ConfiguredWindowManager::new(Box::new(FakeSession::new(calls.clone())), features),
+            calls,
+        )
+    }
+
+    struct TestConfiguredWindowManager {
+        wm: ConfiguredWindowManager,
+        calls: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl TestConfiguredWindowManager {
+        fn new(wm: ConfiguredWindowManager, calls: Arc<Mutex<Vec<String>>>) -> Self {
+            Self { wm, calls }
+        }
+
+        fn take_calls(&mut self) -> Vec<String> {
+            let mut calls = self.calls.lock().expect("calls mutex should not be poisoned");
+            std::mem::take(&mut *calls)
+        }
+    }
+
+    impl std::ops::Deref for TestConfiguredWindowManager {
+        type Target = ConfiguredWindowManager;
+
+        fn deref(&self) -> &Self::Target {
+            &self.wm
+        }
+    }
+
+    impl std::ops::DerefMut for TestConfiguredWindowManager {
+        fn deref_mut(&mut self) -> &mut Self::Target {
+            &mut self.wm
+        }
+    }
+
+    struct FakeSession {
+        calls: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl FakeSession {
+        fn new(calls: Arc<Mutex<Vec<String>>>) -> Self {
+            Self { calls }
+        }
+
+        fn push_call(&self, call: impl Into<String>) {
+            self.calls
+                .lock()
+                .expect("calls mutex should not be poisoned")
+                .push(call.into());
+        }
+    }
+
+    impl WindowManagerSession for FakeSession {
+        fn adapter_name(&self) -> &'static str {
+            "fake"
+        }
+
+        fn capabilities(&self) -> WindowManagerCapabilities {
+            WindowManagerCapabilities::none()
+        }
+
+        fn focused_window(&mut self) -> Result<FocusedWindowRecord> {
+            Ok(FocusedWindowRecord {
+                id: 42,
+                app_id: Some("fake-app".to_string()),
+                title: Some("fake-title".to_string()),
+                pid: None,
+                original_tile_index: 1,
+            })
+        }
+
+        fn windows(&mut self) -> Result<Vec<super::WindowRecord>> {
+            Ok(Vec::new())
+        }
+
+        fn focus_direction(&mut self, direction: Direction) -> Result<()> {
+            self.push_call(format!("focus_direction:{direction}"));
+            Ok(())
+        }
+
+        fn move_direction(&mut self, _direction: Direction) -> Result<()> {
+            Ok(())
+        }
+
+        fn resize_with_intent(&mut self, _intent: ResizeIntent) -> Result<()> {
+            Ok(())
+        }
+
+        fn spawn(&mut self, _command: Vec<String>) -> Result<()> {
+            Ok(())
+        }
+
+        fn focus_window_by_id(&mut self, _id: u64) -> Result<()> {
+            Ok(())
+        }
+
+        fn close_window_by_id(&mut self, _id: u64) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    struct FakeCycleProvider;
+
+    impl WindowCycleProvider for FakeCycleProvider {}
 }
