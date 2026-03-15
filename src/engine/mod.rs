@@ -13,10 +13,9 @@ pub use wm::*;
 pub use actions::{ActionKind, ActionRequest, RoutingDecision, RoutingError, Orchestrator};
 
 // ---------------------------------------------------------------------------
-// Backward-compatible module aliases — replaces the deleted shim files so
-// adapter and command files that import engine::contract::X / engine::domain::X
-// / engine::window_manager::X / engine::orchestrator::X continue to compile
-// without changes.
+// Path-compatibility shims: these inline modules preserve existing import paths
+// across the codebase (engine::contract::X, engine::domain::X, etc.) while the
+// canonical items live in their new layer modules.
 // ---------------------------------------------------------------------------
 
 /// Backward-compat alias for `engine::contracts`.
@@ -32,6 +31,11 @@ pub mod domain {
 /// Backward-compat alias for `engine::wm`.
 pub mod window_manager {
     pub use crate::engine::wm::*;
+    // connect_selected and related bootstrap functions live in wm but are also
+    // re-exported here for callers using the engine::window_manager:: path.
+    pub use crate::engine::wm::connect_selected;
+    #[cfg(test)]
+    pub use crate::engine::wm::connect_backend_for_test;
 }
 
 /// Backward-compat alias for `engine::actions` orchestrator types.
