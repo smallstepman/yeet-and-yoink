@@ -1,13 +1,12 @@
 use crate::adapters::apps::{
     self, build_emacs,
     nvim::{self, Nvim},
-    AppAdapter, AppKind,
+    AppAdapter,
 };
 use crate::adapters::terminal_multiplexers::tmux::Tmux;
 use crate::config::{AppSection, TerminalMuxBackend};
-use crate::engine::app_policy::bind_app_policy;
-use crate::engine::contract::ChainResolver;
-use crate::engine::domain::{EDITOR_DOMAIN_ID, TERMINAL_DOMAIN_ID, WM_DOMAIN_ID};
+use crate::engine::domain::WM_DOMAIN_ID;
+use crate::engine::resolution::policy::bind_app_policy;
 use crate::engine::runtime::{self, ProcessId};
 use crate::engine::topology::DomainId;
 use crate::logging;
@@ -362,15 +361,7 @@ fn resolve_terminal_chain(
     chain
 }
 
-fn domain_id_for_app_kind(kind: AppKind) -> DomainId {
-    match kind {
-        AppKind::Terminal => TERMINAL_DOMAIN_ID,
-        AppKind::Editor => EDITOR_DOMAIN_ID,
-        AppKind::Browser => WM_DOMAIN_ID,
-    }
-}
-
-impl ChainResolver for RuntimeChainResolver {
+impl RuntimeChainResolver {
     fn resolve_chain(&self, app_id: &str, pid: u32, title: &str) -> Vec<Box<dyn AppAdapter>> {
         let _span = tracing::debug_span!(
             "chain_resolver.resolve_chain",
@@ -435,7 +426,7 @@ impl ChainResolver for RuntimeChainResolver {
             .map(|adapter| adapter.kind())
             .next()
         {
-            return domain_id_for_app_kind(kind);
+            return super::domain::domain_id_for_app_kind(kind);
         }
         WM_DOMAIN_ID
     }

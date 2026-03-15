@@ -1,8 +1,16 @@
 use crate::adapters::apps::{
-    unsupported_operation, AppAdapter, AppKind, MergeExecutionMode, MergePreparation,
-    MoveDecision, TearResult, TopologyHandler,
+    unsupported_operation, AppAdapter, AppKind, MergeExecutionMode, MergePreparation, MoveDecision,
+    TearResult, TopologyHandler,
 };
 use crate::config::AppSection;
+
+/// Delegates a method body to the inner adapter's `TopologyHandler` implementation.
+/// Use this in delegation-only methods that have no policy logic of their own.
+macro_rules! delegate_to_inner {
+    ($self:ident, TopologyHandler::$method:ident($($arg:expr),*)) => {
+        TopologyHandler::$method($self.inner.as_ref(), $($arg),*)
+    };
+}
 
 struct PolicyBoundApp {
     inner: Box<dyn AppAdapter>,
@@ -35,15 +43,15 @@ impl PolicyBoundApp {
 
 impl AppAdapter for PolicyBoundApp {
     fn adapter_name(&self) -> &'static str {
-        self.inner.adapter_name()
+        self.inner.adapter_name() // delegated — no policy logic
     }
 
     fn config_aliases(&self) -> Option<&'static [&'static str]> {
-        self.inner.config_aliases()
+        self.inner.config_aliases() // delegated — no policy logic
     }
 
     fn kind(&self) -> AppKind {
-        self.inner.kind()
+        self.inner.kind() // delegated — no policy logic
     }
 
     fn capabilities(&self) -> crate::engine::contract::AdapterCapabilities {
@@ -63,7 +71,7 @@ impl AppAdapter for PolicyBoundApp {
         expression: &str,
         pid: Option<crate::engine::runtime::ProcessId>,
     ) -> anyhow::Result<String> {
-        self.inner.eval(expression, pid)
+        self.inner.eval(expression, pid) // delegated — no policy logic
     }
 }
 
@@ -74,7 +82,7 @@ impl TopologyHandler for PolicyBoundApp {
                 return Ok(false);
             }
         }
-        TopologyHandler::can_focus(self.inner.as_ref(), dir, pid)
+        delegate_to_inner!(self, TopologyHandler::can_focus(dir, pid))
     }
 
     fn move_decision(
@@ -86,13 +94,13 @@ impl TopologyHandler for PolicyBoundApp {
             if !policy.move_allowed(dir) {
                 return Ok(MoveDecision::Passthrough);
             }
-            let decision = TopologyHandler::move_decision(self.inner.as_ref(), dir, pid)?;
+            let decision = delegate_to_inner!(self, TopologyHandler::move_decision(dir, pid))?;
             if matches!(decision, MoveDecision::TearOut) && !policy.tear_out_capability() {
                 return Ok(MoveDecision::Passthrough);
             }
             return Ok(decision);
         }
-        TopologyHandler::move_decision(self.inner.as_ref(), dir, pid)
+        delegate_to_inner!(self, TopologyHandler::move_decision(dir, pid))
     }
 
     fn can_resize(
@@ -106,15 +114,15 @@ impl TopologyHandler for PolicyBoundApp {
                 return Ok(false);
             }
         }
-        TopologyHandler::can_resize(self.inner.as_ref(), dir, grow, pid)
+        delegate_to_inner!(self, TopologyHandler::can_resize(dir, grow, pid))
     }
 
     fn at_side(&self, dir: crate::engine::topology::Direction, pid: u32) -> anyhow::Result<bool> {
-        TopologyHandler::at_side(self.inner.as_ref(), dir, pid)
+        delegate_to_inner!(self, TopologyHandler::at_side(dir, pid)) // delegated — no policy logic
     }
 
     fn window_count(&self, pid: u32) -> anyhow::Result<u32> {
-        TopologyHandler::window_count(self.inner.as_ref(), pid)
+        delegate_to_inner!(self, TopologyHandler::window_count(pid)) // delegated — no policy logic
     }
 
     fn focus(&self, dir: crate::engine::topology::Direction, pid: u32) -> anyhow::Result<()> {
@@ -123,7 +131,7 @@ impl TopologyHandler for PolicyBoundApp {
                 return Err(unsupported_operation(self.adapter_name(), "focus"));
             }
         }
-        TopologyHandler::focus(self.inner.as_ref(), dir, pid)
+        delegate_to_inner!(self, TopologyHandler::focus(dir, pid))
     }
 
     fn move_internal(
@@ -136,7 +144,7 @@ impl TopologyHandler for PolicyBoundApp {
                 return Err(unsupported_operation(self.adapter_name(), "move_internal"));
             }
         }
-        TopologyHandler::move_internal(self.inner.as_ref(), dir, pid)
+        delegate_to_inner!(self, TopologyHandler::move_internal(dir, pid))
     }
 
     fn resize_internal(
@@ -154,7 +162,7 @@ impl TopologyHandler for PolicyBoundApp {
                 ));
             }
         }
-        TopologyHandler::resize_internal(self.inner.as_ref(), dir, grow, step, pid)
+        delegate_to_inner!(self, TopologyHandler::resize_internal(dir, grow, step, pid))
     }
 
     fn rearrange(&self, dir: crate::engine::topology::Direction, pid: u32) -> anyhow::Result<()> {
@@ -163,7 +171,7 @@ impl TopologyHandler for PolicyBoundApp {
                 return Err(unsupported_operation(self.adapter_name(), "rearrange"));
             }
         }
-        TopologyHandler::rearrange(self.inner.as_ref(), dir, pid)
+        delegate_to_inner!(self, TopologyHandler::rearrange(dir, pid))
     }
 
     fn move_out(
@@ -176,7 +184,7 @@ impl TopologyHandler for PolicyBoundApp {
                 return Err(unsupported_operation(self.adapter_name(), "move_out"));
             }
         }
-        TopologyHandler::move_out(self.inner.as_ref(), dir, pid)
+        delegate_to_inner!(self, TopologyHandler::move_out(dir, pid))
     }
 
     fn merge_into(
@@ -184,18 +192,18 @@ impl TopologyHandler for PolicyBoundApp {
         dir: crate::engine::topology::Direction,
         source_pid: u32,
     ) -> anyhow::Result<()> {
-        TopologyHandler::merge_into(self.inner.as_ref(), dir, source_pid)
+        delegate_to_inner!(self, TopologyHandler::merge_into(dir, source_pid)) // delegated — no policy logic
     }
 
     fn merge_execution_mode(&self) -> MergeExecutionMode {
-        TopologyHandler::merge_execution_mode(self.inner.as_ref())
+        delegate_to_inner!(self, TopologyHandler::merge_execution_mode()) // delegated — no policy logic
     }
 
     fn prepare_merge(
         &self,
         source_pid: Option<crate::engine::runtime::ProcessId>,
     ) -> anyhow::Result<MergePreparation> {
-        TopologyHandler::prepare_merge(self.inner.as_ref(), source_pid)
+        delegate_to_inner!(self, TopologyHandler::prepare_merge(source_pid)) // delegated — no policy logic
     }
 
     fn augment_merge_preparation_for_target(
@@ -203,11 +211,10 @@ impl TopologyHandler for PolicyBoundApp {
         preparation: MergePreparation,
         target_window_id: Option<u64>,
     ) -> MergePreparation {
-        TopologyHandler::augment_merge_preparation_for_target(
-            self.inner.as_ref(),
-            preparation,
-            target_window_id,
-        )
+        delegate_to_inner!(
+            self,
+            TopologyHandler::augment_merge_preparation_for_target(preparation, target_window_id)
+        ) // delegated — no policy logic
     }
 
     fn merge_into_target(
@@ -217,13 +224,10 @@ impl TopologyHandler for PolicyBoundApp {
         target_pid: Option<crate::engine::runtime::ProcessId>,
         preparation: MergePreparation,
     ) -> anyhow::Result<()> {
-        TopologyHandler::merge_into_target(
-            self.inner.as_ref(),
-            dir,
-            source_pid,
-            target_pid,
-            preparation,
-        )
+        delegate_to_inner!(
+            self,
+            TopologyHandler::merge_into_target(dir, source_pid, target_pid, preparation)
+        ) // delegated — no policy logic
     }
 }
 
@@ -236,7 +240,7 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};
 
-    use crate::adapters::apps::{emacs, wezterm};
+    use crate::adapters::apps::{emacs, wezterm, AppAdapter, AppKind};
 
     use super::bind_app_policy;
 
@@ -314,5 +318,19 @@ resize.internal_panes.enabled = false
 
         restore_config(old_config);
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn delegation_passes_through_adapter_name() {
+        let wrapped = bind_app_policy(Box::new(emacs::EmacsBackend));
+        // adapter_name is a delegation — policy wrapper must not change it
+        assert_eq!(wrapped.adapter_name(), emacs::EmacsBackend.adapter_name());
+    }
+
+    #[test]
+    fn delegation_passes_through_kind() {
+        let wrapped = bind_app_policy(Box::new(emacs::EmacsBackend));
+        // kind is a delegation — policy wrapper must not change it
+        assert_eq!(wrapped.kind(), AppKind::Editor);
     }
 }

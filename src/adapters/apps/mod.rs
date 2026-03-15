@@ -1,9 +1,9 @@
+use crate::config::AppSection;
 pub use crate::engine::contract::{
     unsupported_operation, AdapterCapabilities, AppAdapter, AppCapabilities, AppKind,
-    ChainResolver, MergeExecutionMode, MergePreparation, MoveDecision, TearResult, TopologyHandler,
+    MergeExecutionMode, MergePreparation, MoveDecision, TearResult, TopologyHandler,
     TopologySnapshot,
 };
-use crate::config::AppSection;
 
 macro_rules! delegate_topology_to_mux_provider {
     ($ty:ty, $launch_prefix:expr) => {
@@ -167,20 +167,7 @@ pub mod nvim;
 pub mod vscode;
 pub mod wezterm;
 
-pub(crate) struct DirectAdapterSpec {
-    pub name: &'static str,
-    pub aliases: &'static [&'static str],
-    pub app_ids: &'static [&'static str],
-    pub section: AppSection,
-    pub build: fn() -> Box<dyn AppAdapter>,
-}
-
-pub(crate) struct TerminalHostSpec {
-    pub aliases: &'static [&'static str],
-    pub app_ids: &'static [&'static str],
-    pub terminal_launch_prefix: &'static [&'static str],
-    pub build: fn() -> Box<dyn AppAdapter>,
-}
+pub(crate) use crate::engine::resolution::catalog::{DirectAdapterSpec, TerminalHostSpec};
 
 pub(crate) fn build_emacs() -> Box<dyn AppAdapter> {
     Box::new(emacs::EmacsBackend)
@@ -311,5 +298,4 @@ mod resolve_chain_tests {
         assert_topology_contracts::<Librewolf>();
         assert_topology_contracts::<Vscode>();
     }
-
 }

@@ -23,8 +23,6 @@ pub mod yabai;
 #[cfg(any(test, target_os = "linux"))]
 pub use self::niri::NiriAdapter;
 
-use anyhow::{anyhow, Result};
-
 #[cfg(target_os = "linux")]
 use crate::adapters::window_managers::i3::I3_SPEC;
 #[cfg(target_os = "linux")]
@@ -34,51 +32,15 @@ use crate::adapters::window_managers::paneru::PANERU_SPEC;
 #[cfg(target_os = "macos")]
 use crate::adapters::window_managers::yabai::YABAI_SPEC;
 use crate::config::WmBackend;
-use crate::engine::window_manager::{ConfiguredWindowManager, WindowManagerSpec};
-
-struct UnsupportedWindowManagerSpec {
-    backend: WmBackend,
-    name: &'static str,
-}
-
-impl WindowManagerSpec for UnsupportedWindowManagerSpec {
-    fn backend(&self) -> WmBackend {
-        self.backend
-    }
-
-    fn name(&self) -> &'static str {
-        self.name
-    }
-
-    fn connect(&self) -> Result<ConfiguredWindowManager> {
-        Err(anyhow!(
-            "wm backend '{}' is not supported on {}",
-            self.name,
-            std::env::consts::OS
-        ))
-    }
-}
-
+use crate::engine::wm::configured::WindowManagerSpec;
 #[cfg(not(target_os = "linux"))]
-static UNSUPPORTED_NIRI_SPEC: UnsupportedWindowManagerSpec = UnsupportedWindowManagerSpec {
-    backend: WmBackend::Niri,
-    name: "niri",
-};
+pub(crate) use crate::engine::wm::configured::UNSUPPORTED_I3_SPEC;
 #[cfg(not(target_os = "linux"))]
-static UNSUPPORTED_I3_SPEC: UnsupportedWindowManagerSpec = UnsupportedWindowManagerSpec {
-    backend: WmBackend::I3,
-    name: "i3",
-};
+pub(crate) use crate::engine::wm::configured::UNSUPPORTED_NIRI_SPEC;
 #[cfg(not(target_os = "macos"))]
-static UNSUPPORTED_PANERU_SPEC: UnsupportedWindowManagerSpec = UnsupportedWindowManagerSpec {
-    backend: WmBackend::Paneru,
-    name: "paneru",
-};
+pub(crate) use crate::engine::wm::configured::UNSUPPORTED_PANERU_SPEC;
 #[cfg(not(target_os = "macos"))]
-static UNSUPPORTED_YABAI_SPEC: UnsupportedWindowManagerSpec = UnsupportedWindowManagerSpec {
-    backend: WmBackend::Yabai,
-    name: "yabai",
-};
+pub(crate) use crate::engine::wm::configured::UNSUPPORTED_YABAI_SPEC;
 
 pub fn spec_for_backend(backend: WmBackend) -> &'static dyn WindowManagerSpec {
     match backend {
@@ -163,7 +125,10 @@ mod tests {
         let capabilities = <Adapter as WindowManagerCapabilityDescriptor>::CAPABILITIES;
 
         assert_eq!(spec.backend(), WmBackend::Niri);
-        assert_eq!(spec.name(), <Adapter as WindowManagerCapabilityDescriptor>::NAME);
+        assert_eq!(
+            spec.name(),
+            <Adapter as WindowManagerCapabilityDescriptor>::NAME
+        );
         capabilities
             .validate()
             .expect("re-exported niri adapter capabilities should stay valid after relocation");

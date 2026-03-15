@@ -1,21 +1,22 @@
-use std::collections::{BTreeMap, BTreeSet};
-use std::time::Duration;
+// ---------------------------------------------------------------------------
+// Orchestrator — migrated from engine::orchestrator
+// ---------------------------------------------------------------------------
 
-use anyhow::{Context, Result};
+use std::collections::BTreeMap;
 
-use crate::engine::contract::{
-    AppAdapter, AppKind, MergeExecutionMode, MoveDecision, TopologyHandler,
-};
+use anyhow::Result;
+
+use super::focus::attempt_focused_app_focus;
+use super::movement::attempt_focused_app_move;
+use super::probe::{focused_window_record, probe_directional_target, DirectionalProbeFocusMode};
+use super::resize::attempt_focused_app_resize;
+
 use crate::engine::domain::ErasedDomain;
 use crate::engine::domain::{domain_id_for_window, encode_native_window_ref};
 use crate::engine::domain::{PayloadRegistry, TransferOutcome, TransferPipeline};
-use crate::engine::runtime::ProcessId;
 use crate::engine::topology::Direction;
 use crate::engine::topology::{DomainId, GlobalLeaf, Rect};
-use crate::engine::window_manager::{
-    plan_tear_out, CapabilitySupport, ConfiguredWindowManager, ResizeIntent, ResizeKind,
-    WindowRecord,
-};
+use crate::engine::window_manager::{ConfiguredWindowManager, ResizeIntent, ResizeKind, WindowRecord};
 use crate::logging;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -54,12 +55,6 @@ pub enum RoutingError {
 pub struct Orchestrator {
     payload_registry: PayloadRegistry,
     domains: BTreeMap<DomainId, Box<dyn ErasedDomain>>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum DirectionalProbeFocusMode {
-    RestoreSource,
-    KeepTarget,
 }
 
 impl Default for Orchestrator {
@@ -113,43 +108,10 @@ impl Orchestrator {
     ) -> Result<()> {
         let _span = tracing::debug_span!("orchestrator.execute_focus", ?dir).entered();
         let fallback_dir = dir.into();
-        if self.attempt_focused_app_focus(wm, fallback_dir)? {
+        if attempt_focused_app_focus(wm, fallback_dir)? {
             return Ok(());
         }
         wm.focus_direction(fallback_dir)
-    }
-
-    fn attempt_focused_app_focus(
-        &mut self,
-        wm: &mut ConfiguredWindowManager,
-        dir: Direction,
-    ) -> Result<bool> {
-        let _span = tracing::debug_span!("orchestrator.attempt_focused_app_focus", ?dir).entered();
-        let focused = wm.focused_window()?;
-        let app_id = focused.app_id.unwrap_or_default();
-        let title = focused.title.unwrap_or_default();
-        let source_pid = focused.pid;
-        let owner_pid = source_pid.map(ProcessId::get);
-        let Some(owner_pid) = owner_pid else {
-            return Ok(false);
-        };
-
-        for app in crate::engine::chain_resolver::resolve_app_chain(&app_id, owner_pid, &title) {
-            if !app.capabilities().focus {
-                continue;
-            }
-            let adapter_name = app.adapter_name();
-            if TopologyHandler::can_focus(app.as_ref(), dir, owner_pid)
-                .with_context(|| format!("{adapter_name} can_focus failed"))?
-            {
-                TopologyHandler::focus(app.as_ref(), dir, owner_pid)
-                    .with_context(|| format!("{adapter_name} focus failed"))?;
-                logging::debug(format!("orchestrator: app focus handled by {adapter_name}"));
-                return Ok(true);
-            }
-        }
-
-        Ok(false)
     }
 
     pub fn execute_move(&mut self, wm: &mut ConfiguredWindowManager, dir: Direction) -> Result<()> {
@@ -162,12 +124,12 @@ impl Orchestrator {
         dir: Direction,
     ) -> Result<()> {
         let fallback_dir = dir.into();
-        if self.attempt_focused_app_move(wm, fallback_dir)? {
+        if attempt_focused_app_move(wm, fallback_dir)? {
             return Ok(());
         }
 
-        let focused = Self::focused_window_record(wm)?;
-        let Some(target_window) = self.probe_directional_target(
+        let focused = focused_window_record(wm)?;
+        let Some(target_window) = probe_directional_target(
             wm,
             dir,
             focused.id,
@@ -208,452 +170,6 @@ impl Orchestrator {
         }
     }
 
-    fn attempt_focused_app_move(
-        &mut self,
-        wm: &mut ConfiguredWindowManager,
-        dir: Direction,
-    ) -> Result<bool> {
-        let focused = wm.focused_window()?;
-        let source_window_id = focused.id;
-        let source_tile_index = focused.original_tile_index;
-        let app_id = focused.app_id.unwrap_or_default();
-        let title = focused.title.unwrap_or_default();
-        let source_pid = focused.pid;
-        let owner_pid = source_pid.map(ProcessId::get);
-        let Some(owner_pid) = owner_pid else {
-            return Ok(false);
-        };
-
-        let chain = crate::engine::chain_resolver::resolve_app_chain(&app_id, owner_pid, &title);
-        for (index, app) in chain.iter().enumerate() {
-            let adapter_name = app.adapter_name();
-            let decision = TopologyHandler::move_decision(app.as_ref(), dir, owner_pid)
-                .with_context(|| format!("{adapter_name} move_decision failed"))?;
-            match decision {
-                MoveDecision::Passthrough => {
-                    if self.attempt_passthrough_merge(
-                        wm,
-                        app.as_ref(),
-                        &chain[index + 1..],
-                        &app_id,
-                        &title,
-                        dir,
-                        source_window_id,
-                        source_pid,
-                    )? {
-                        return Ok(true);
-                    }
-                    if matches!(app.kind(), AppKind::Terminal)
-                        && app.capabilities().tear_out
-                        && self
-                            .probe_directional_target_for_adapter(
-                                wm,
-                                dir,
-                                source_window_id,
-                                adapter_name,
-                                DirectionalProbeFocusMode::RestoreSource,
-                            )?
-                            .is_none()
-                    {
-                        self.execute_app_tear_out(
-                            wm,
-                            app.as_ref(),
-                            dir,
-                            owner_pid,
-                            source_window_id,
-                            source_tile_index,
-                            source_pid,
-                            &app_id,
-                            "PassthroughTearOut",
-                        )?;
-                        return Ok(true);
-                    }
-                }
-                MoveDecision::Internal => {
-                    TopologyHandler::move_internal(app.as_ref(), dir, owner_pid)
-                        .with_context(|| format!("{adapter_name} move_internal failed"))?;
-                    logging::debug(format!(
-                        "orchestrator: app move handled by {adapter_name} decision=Internal"
-                    ));
-                    return Ok(true);
-                }
-                MoveDecision::Rearrange => {
-                    TopologyHandler::rearrange(app.as_ref(), dir, owner_pid)
-                        .with_context(|| format!("{adapter_name} rearrange failed"))?;
-                    logging::debug(format!(
-                        "orchestrator: app move handled by {adapter_name} decision=Rearrange"
-                    ));
-                    return Ok(true);
-                }
-                MoveDecision::TearOut => {
-                    self.execute_app_tear_out(
-                        wm,
-                        app.as_ref(),
-                        dir,
-                        owner_pid,
-                        source_window_id,
-                        source_tile_index,
-                        source_pid,
-                        &app_id,
-                        "TearOut",
-                    )?;
-                    return Ok(true);
-                }
-            }
-        }
-
-        Ok(false)
-    }
-
-    fn execute_app_tear_out(
-        &mut self,
-        wm: &mut ConfiguredWindowManager,
-        app: &dyn AppAdapter,
-        dir: Direction,
-        owner_pid: u32,
-        source_window_id: u64,
-        source_tile_index: usize,
-        source_pid: Option<ProcessId>,
-        app_id: &str,
-        decision_label: &str,
-    ) -> Result<()> {
-        let adapter_name = app.adapter_name();
-        let pre_window_ids: BTreeSet<u64> = match wm.windows() {
-            Ok(windows) => windows.into_iter().map(|window| window.id).collect(),
-            Err(err) => {
-                logging::debug(format!(
-                    "orchestrator: unable to snapshot pre-tearout windows err={:#}",
-                    err
-                ));
-                BTreeSet::new()
-            }
-        };
-        let tear = TopologyHandler::move_out(app, dir, owner_pid)
-            .with_context(|| format!("{adapter_name} move_out failed"))?;
-        if let Some(command) = tear.spawn_command {
-            wm.spawn(command)
-                .with_context(|| format!("{adapter_name} tear-out spawn via wm failed"))?;
-        }
-        let tearout_window_id = match self.focus_tearout_window(
-            wm,
-            &pre_window_ids,
-            source_window_id,
-            source_pid,
-            app_id,
-        ) {
-            Ok(window_id) => window_id,
-            Err(err) => {
-                logging::debug(format!(
-                    "orchestrator: unable to focus tear-out window adapter={} err={:#}",
-                    adapter_name, err
-                ));
-                None
-            }
-        };
-        if let Err(err) = self.place_tearout_window(
-            wm,
-            dir,
-            source_window_id,
-            source_tile_index,
-            tearout_window_id,
-        ) {
-            logging::debug(format!(
-                "orchestrator: tear-out placement fallback failed adapter={} err={:#}",
-                adapter_name, err
-            ));
-        }
-        logging::debug(format!(
-            "orchestrator: app move handled by {adapter_name} decision={decision_label}"
-        ));
-        Ok(())
-    }
-
-    fn focus_tearout_window(
-        &self,
-        wm: &mut ConfiguredWindowManager,
-        pre_window_ids: &BTreeSet<u64>,
-        source_window_id: u64,
-        source_pid: Option<ProcessId>,
-        source_app_id: &str,
-    ) -> Result<Option<u64>> {
-        let target_window_id = self.wait_for_tearout_window_id(
-            wm,
-            pre_window_ids,
-            source_window_id,
-            source_pid,
-            source_app_id,
-        )?;
-        if let Some(target_window_id) = target_window_id {
-            if target_window_id != source_window_id {
-                wm.focus_window_by_id(target_window_id)?;
-                return Ok(Some(target_window_id));
-            }
-        }
-        Ok(None)
-    }
-
-    fn wait_for_tearout_window_id(
-        &self,
-        wm: &mut ConfiguredWindowManager,
-        pre_window_ids: &BTreeSet<u64>,
-        source_window_id: u64,
-        source_pid: Option<ProcessId>,
-        source_app_id: &str,
-    ) -> Result<Option<u64>> {
-        const ATTEMPTS: usize = 25;
-        const DELAY: Duration = Duration::from_millis(40);
-
-        for attempt in 0..ATTEMPTS {
-            match wm.windows() {
-                Ok(windows) => {
-                    if let Some(target_window_id) = Self::select_tearout_window_id(
-                        pre_window_ids,
-                        &windows,
-                        source_window_id,
-                        source_pid,
-                        source_app_id,
-                    ) {
-                        if target_window_id != source_window_id {
-                            return Ok(Some(target_window_id));
-                        }
-                    }
-                }
-                Err(err) => {
-                    logging::debug(format!(
-                        "orchestrator: tear-out post-window snapshot failed attempt={} err={:#}",
-                        attempt + 1,
-                        err
-                    ));
-                }
-            }
-
-            if attempt + 1 < ATTEMPTS {
-                std::thread::sleep(DELAY);
-            }
-        }
-
-        Ok(None)
-    }
-
-    fn select_tearout_window_id(
-        pre_window_ids: &BTreeSet<u64>,
-        windows: &[WindowRecord],
-        source_window_id: u64,
-        source_pid: Option<ProcessId>,
-        source_app_id: &str,
-    ) -> Option<u64> {
-        let mut new_windows: Vec<&WindowRecord> = windows
-            .iter()
-            .filter(|window| !pre_window_ids.contains(&window.id))
-            .collect();
-        if new_windows.is_empty() {
-            return windows
-                .iter()
-                .find(|window| window.is_focused && window.id != source_window_id)
-                .map(|window| window.id);
-        }
-        new_windows.sort_by_key(|window| window.id);
-
-        new_windows
-            .iter()
-            .find(|window| {
-                window.pid == source_pid && window.app_id.as_deref() == Some(source_app_id)
-            })
-            .map(|window| window.id)
-            .or_else(|| {
-                new_windows
-                    .iter()
-                    .find(|window| window.pid == source_pid)
-                    .map(|window| window.id)
-            })
-            .or_else(|| {
-                new_windows
-                    .iter()
-                    .find(|window| window.app_id.as_deref() == Some(source_app_id))
-                    .map(|window| window.id)
-            })
-            .or_else(|| {
-                new_windows
-                    .iter()
-                    .find(|window| window.is_focused)
-                    .map(|window| window.id)
-            })
-            .or_else(|| new_windows.first().map(|window| window.id))
-    }
-
-    fn place_tearout_window(
-        &self,
-        wm: &mut ConfiguredWindowManager,
-        dir: Direction,
-        source_window_id: u64,
-        source_tile_index: usize,
-        target_window_id: Option<u64>,
-    ) -> Result<()> {
-        if let Some(target_window_id) = target_window_id.filter(|id| *id != source_window_id) {
-            wm.focus_window_by_id(target_window_id)?;
-        }
-
-        let focused_window_id = wm.focused_window()?.id;
-        if focused_window_id == source_window_id {
-            return Ok(());
-        }
-
-        match plan_tear_out(wm.capabilities(), dir) {
-            CapabilitySupport::Native => wm.move_direction(dir),
-            CapabilitySupport::Unsupported => Ok(()),
-            CapabilitySupport::Composed => {
-                let adapter_name = wm.adapter_name();
-                wm.tear_out_composer_mut()
-                    .with_context(|| {
-                        format!(
-                            "configured wm '{}' is missing a tear-out composer for {dir}",
-                            adapter_name
-                        )
-                    })?
-                    .compose_tear_out(dir, source_tile_index)
-            }
-        }
-    }
-
-    fn focused_window_record(wm: &mut ConfiguredWindowManager) -> Result<WindowRecord> {
-        let window = wm.focused_window()?;
-        Ok(WindowRecord {
-            id: window.id,
-            app_id: window.app_id,
-            title: window.title,
-            pid: window.pid,
-            is_focused: true,
-            original_tile_index: window.original_tile_index,
-        })
-    }
-
-    fn probe_directional_target(
-        &self,
-        wm: &mut ConfiguredWindowManager,
-        dir: Direction,
-        source_window_id: u64,
-        focus_mode: DirectionalProbeFocusMode,
-    ) -> Result<Option<WindowRecord>> {
-        if let Err(err) = wm.focus_direction(dir) {
-            logging::debug(format!(
-                "orchestrator: directional target probe failed dir={} err={:#}",
-                dir, err
-            ));
-            return Ok(None);
-        }
-
-        let target = match Self::focused_window_record(wm) {
-            Ok(window) => window,
-            Err(err) => {
-                let _ = wm.focus_window_by_id(source_window_id);
-                return Err(err.context("failed to read target window during directional probe"));
-            }
-        };
-
-        if target.id == source_window_id {
-            return Ok(None);
-        }
-
-        if matches!(focus_mode, DirectionalProbeFocusMode::RestoreSource) {
-            wm.focus_window_by_id(source_window_id).with_context(|| {
-                format!("failed to restore focus to window {}", source_window_id)
-            })?;
-        }
-        Ok(Some(target))
-    }
-
-    fn probe_directional_target_for_adapter(
-        &self,
-        wm: &mut ConfiguredWindowManager,
-        dir: Direction,
-        source_window_id: u64,
-        adapter_name: &str,
-        focus_mode: DirectionalProbeFocusMode,
-    ) -> Result<Option<WindowRecord>> {
-        let Some(target_window) =
-            self.probe_directional_target(wm, dir, source_window_id, focus_mode)?
-        else {
-            return Ok(None);
-        };
-        if Self::window_matches_adapter(adapter_name, &target_window) {
-            return Ok(Some(target_window));
-        }
-        if matches!(focus_mode, DirectionalProbeFocusMode::KeepTarget) {
-            let _ = wm.focus_window_by_id(source_window_id);
-        }
-        Ok(None)
-    }
-
-    fn probe_in_place_target_for_adapter(
-        &self,
-        wm: &mut ConfiguredWindowManager,
-        outer_chain: &[Box<dyn AppAdapter>],
-        dir: Direction,
-        source_window_id: u64,
-        owner_pid: u32,
-        app_id: &str,
-        title: &str,
-        adapter_name: &str,
-    ) -> Result<Option<Box<dyn AppAdapter>>> {
-        for outer in outer_chain {
-            if !outer.capabilities().focus
-                || !TopologyHandler::can_focus(outer.as_ref(), dir, owner_pid)?
-            {
-                continue;
-            }
-            TopologyHandler::focus(outer.as_ref(), dir, owner_pid)?;
-            let focused_window_id = wm.focused_window()?.id;
-            if focused_window_id != source_window_id {
-                let _ = wm.focus_window_by_id(source_window_id);
-                continue;
-            }
-            let target_app =
-                crate::engine::chain_resolver::resolve_app_chain(app_id, owner_pid, title)
-                    .into_iter()
-                    .find(|candidate| candidate.adapter_name() == adapter_name);
-            if target_app.is_some() {
-                return Ok(target_app);
-            }
-            let _ = TopologyHandler::focus(outer.as_ref(), dir.opposite(), owner_pid);
-        }
-        Ok(None)
-    }
-
-    fn restore_in_place_target_focus(
-        &self,
-        outer_chain: &[Box<dyn AppAdapter>],
-        dir: Direction,
-        owner_pid: u32,
-    ) {
-        for outer in outer_chain {
-            if outer.capabilities().focus
-                && TopologyHandler::can_focus(outer.as_ref(), dir.opposite(), owner_pid)
-                    .unwrap_or(false)
-            {
-                let _ = TopologyHandler::focus(outer.as_ref(), dir.opposite(), owner_pid);
-                break;
-            }
-        }
-    }
-
-    fn resolve_adapter_for_window(
-        adapter_name: &str,
-        window: &WindowRecord,
-    ) -> Option<Box<dyn AppAdapter>> {
-        let owner_pid = window.pid.map(ProcessId::get).unwrap_or(0);
-        crate::engine::chain_resolver::resolve_app_chain(
-            window.app_id.as_deref().unwrap_or_default(),
-            owner_pid,
-            window.title.as_deref().unwrap_or_default(),
-        )
-        .into_iter()
-        .find(|adapter| adapter.adapter_name() == adapter_name)
-    }
-
-    fn window_matches_adapter(adapter_name: &str, window: &WindowRecord) -> bool {
-        Self::resolve_adapter_for_window(adapter_name, window).is_some()
-    }
-
     fn leaf_from_window(window: &WindowRecord, leaf_id: u64) -> GlobalLeaf {
         let domain = domain_id_for_window(
             window.app_id.as_deref(),
@@ -670,199 +186,6 @@ impl Orchestrator {
                 w: 1,
                 h: 1,
             },
-        }
-    }
-
-    fn attempt_passthrough_merge(
-        &mut self,
-        wm: &mut ConfiguredWindowManager,
-        app: &dyn AppAdapter,
-        outer_chain: &[Box<dyn AppAdapter>],
-        app_id: &str,
-        title: &str,
-        dir: Direction,
-        source_window_id: u64,
-        source_pid: Option<ProcessId>,
-    ) -> Result<bool> {
-        if !app.capabilities().merge {
-            return Ok(false);
-        }
-        let adapter_name = app.adapter_name();
-        let preparation = match TopologyHandler::prepare_merge(app, source_pid) {
-            Ok(value) => value,
-            Err(err) => {
-                logging::debug(format!(
-                    "orchestrator: app passthrough merge prepare failed adapter={} err={:#}",
-                    adapter_name, err
-                ));
-                return Ok(false);
-            }
-        };
-
-        match TopologyHandler::merge_execution_mode(app) {
-            MergeExecutionMode::SourceFocused => {
-                let Some(target_window) = self.probe_directional_target_for_adapter(
-                    wm,
-                    dir,
-                    source_window_id,
-                    adapter_name,
-                    DirectionalProbeFocusMode::RestoreSource,
-                )?
-                else {
-                    return Ok(false);
-                };
-                let preparation = TopologyHandler::augment_merge_preparation_for_target(
-                    app,
-                    preparation,
-                    Some(target_window.id),
-                );
-
-                match TopologyHandler::merge_into_target(
-                    app,
-                    dir,
-                    source_pid,
-                    target_window.pid,
-                    preparation,
-                ) {
-                    Ok(()) => {
-                        self.cleanup_merged_source_window(
-                            wm,
-                            source_window_id,
-                            target_window.id,
-                            adapter_name,
-                        );
-                        logging::debug(format!(
-                            "orchestrator: app move handled by {adapter_name} decision=MergeSourceFocused"
-                        ));
-                        Ok(true)
-                    }
-                    Err(err) => {
-                        logging::debug(format!(
-                            "orchestrator: app passthrough merge failed adapter={} err={:#}",
-                            adapter_name, err
-                        ));
-                        Ok(false)
-                    }
-                }
-            }
-            MergeExecutionMode::TargetFocused => {
-                if let Some(owner_pid) = source_pid.map(ProcessId::get) {
-                    if let Some(target_app) = self.probe_in_place_target_for_adapter(
-                        wm,
-                        outer_chain,
-                        dir,
-                        source_window_id,
-                        owner_pid,
-                        app_id,
-                        title,
-                        adapter_name,
-                    )? {
-                        let preparation = TopologyHandler::augment_merge_preparation_for_target(
-                            target_app.as_ref(),
-                            preparation,
-                            Some(source_window_id),
-                        );
-
-                        match TopologyHandler::merge_into_target(
-                            target_app.as_ref(),
-                            dir,
-                            source_pid,
-                            source_pid,
-                            preparation,
-                        ) {
-                            Ok(()) => {
-                                logging::debug(format!(
-                                    "orchestrator: app move handled by {adapter_name} decision=MergeTargetFocusedInPlace"
-                                ));
-                                return Ok(true);
-                            }
-                            Err(err) => {
-                                self.restore_in_place_target_focus(outer_chain, dir, owner_pid);
-                                logging::debug(format!(
-                                    "orchestrator: app passthrough merge failed adapter={} err={:#}",
-                                    adapter_name, err
-                                ));
-                                return Ok(false);
-                            }
-                        }
-                    }
-                }
-
-                let Some(target_window) = self.probe_directional_target_for_adapter(
-                    wm,
-                    dir,
-                    source_window_id,
-                    adapter_name,
-                    DirectionalProbeFocusMode::KeepTarget,
-                )?
-                else {
-                    return Ok(false);
-                };
-                let Some(target_app) =
-                    Self::resolve_adapter_for_window(adapter_name, &target_window)
-                else {
-                    let _ = wm.focus_window_by_id(source_window_id);
-                    return Ok(false);
-                };
-                let preparation = TopologyHandler::augment_merge_preparation_for_target(
-                    target_app.as_ref(),
-                    preparation,
-                    Some(target_window.id),
-                );
-
-                match TopologyHandler::merge_into_target(
-                    target_app.as_ref(),
-                    dir,
-                    source_pid,
-                    target_window.pid,
-                    preparation,
-                ) {
-                    Ok(()) => {
-                        self.cleanup_merged_source_window(
-                            wm,
-                            source_window_id,
-                            target_window.id,
-                            adapter_name,
-                        );
-                        logging::debug(format!(
-                            "orchestrator: app move handled by {adapter_name} decision=MergeTargetFocused"
-                        ));
-                        Ok(true)
-                    }
-                    Err(err) => {
-                        let _ = wm.focus_window_by_id(source_window_id);
-                        logging::debug(format!(
-                            "orchestrator: app passthrough merge failed adapter={} err={:#}",
-                            adapter_name, err
-                        ));
-                        Ok(false)
-                    }
-                }
-            }
-        }
-    }
-
-    fn cleanup_merged_source_window(
-        &self,
-        wm: &mut ConfiguredWindowManager,
-        source_window_id: u64,
-        target_window_id: u64,
-        adapter_name: &str,
-    ) {
-        if source_window_id == target_window_id {
-            return;
-        }
-        if let Err(err) = wm.focus_window_by_id(target_window_id) {
-            logging::debug(format!(
-                "orchestrator: merge cleanup focus failed adapter={} target_window_id={} err={:#}",
-                adapter_name, target_window_id, err
-            ));
-        }
-        if let Err(err) = wm.close_window_by_id(source_window_id) {
-            logging::debug(format!(
-                "orchestrator: merge cleanup close failed adapter={} source_window_id={} err={:#}",
-                adapter_name, source_window_id, err
-            ));
         }
     }
 
@@ -883,7 +206,7 @@ impl Orchestrator {
         grow: bool,
         step: i32,
     ) -> Result<()> {
-        if self.attempt_focused_app_resize(wm, dir, grow, step.max(1))? {
+        if attempt_focused_app_resize(wm, dir, grow, step.max(1))? {
             return Ok(());
         }
         let intent = ResizeIntent::new(
@@ -896,42 +219,6 @@ impl Orchestrator {
             step.max(1),
         );
         wm.resize_with_intent(intent)
-    }
-
-    fn attempt_focused_app_resize(
-        &mut self,
-        wm: &mut ConfiguredWindowManager,
-        dir: Direction,
-        grow: bool,
-        step: i32,
-    ) -> Result<bool> {
-        let focused = wm.focused_window()?;
-        let app_id = focused.app_id.unwrap_or_default();
-        let title = focused.title.unwrap_or_default();
-        let source_pid = focused.pid;
-        let owner_pid = source_pid.map(ProcessId::get);
-        let Some(owner_pid) = owner_pid else {
-            return Ok(false);
-        };
-
-        for app in crate::engine::chain_resolver::resolve_app_chain(&app_id, owner_pid, &title) {
-            if !app.capabilities().resize_internal {
-                continue;
-            }
-            let adapter_name = app.adapter_name();
-            if TopologyHandler::can_resize(app.as_ref(), dir, grow, owner_pid)
-                .with_context(|| format!("{adapter_name} can_resize failed"))?
-            {
-                TopologyHandler::resize_internal(app.as_ref(), dir, grow, step, owner_pid)
-                    .with_context(|| format!("{adapter_name} resize_internal failed"))?;
-                logging::debug(format!(
-                    "orchestrator: app resize handled by {adapter_name}"
-                ));
-                return Ok(true);
-            }
-        }
-
-        Ok(false)
     }
 
     pub fn route(&self, source: &GlobalLeaf, target: &GlobalLeaf) -> RoutingDecision {
@@ -1049,6 +336,10 @@ mod tests {
     use anyhow::{anyhow, Result};
 
     use super::{ActionKind, ActionRequest, Orchestrator};
+    use crate::engine::actions::{
+        cleanup_merged_source_window, focus_tearout_window, place_tearout_window,
+        select_tearout_window_id,
+    };
     use crate::engine::domain::PaneState;
     use crate::engine::domain::{DomainLeafSnapshot, DomainSnapshot, ErasedDomain};
     use crate::engine::domain::{EDITOR_DOMAIN_ID, TERMINAL_DOMAIN_ID};
@@ -1229,18 +520,17 @@ mod tests {
         let implementation = source
             .split_once("#[cfg(test)]")
             .map(|(implementation, _)| implementation)
-            .expect("orchestrator source should include test module");
+            .expect("actions/mod.rs source should include test module");
 
         assert!(!implementation.contains("trait RuntimeWindowManager"));
         assert!(!implementation.contains("W: RuntimeWindowManager"));
         assert!(implementation.contains("pub fn execute("));
         assert!(implementation.contains("wm: &mut ConfiguredWindowManager"));
-        assert!(implementation.contains("fn place_tearout_window("));
     }
 
     #[test]
     fn cross_domain_test_fakes_do_not_depend_on_runtime_window_manager() {
-        let source = include_str!("../../tests/cross_domain_orchestrator.rs");
+        let source = include_str!("../../../tests/cross_domain_orchestrator.rs");
 
         assert!(!source.contains("RuntimeWindowManager"));
     }
@@ -1859,7 +1149,6 @@ enabled = true
 
     #[test]
     fn cleanup_merged_source_window_closes_source_and_keeps_target_focused() {
-        let orchestrator = Orchestrator::default();
         let mut wm = fake_wm(FakeWindowManagerState {
             windows: vec![
                 WindowRecord {
@@ -1887,7 +1176,7 @@ enabled = true
             closed_window_ids: Vec::new(),
         });
 
-        orchestrator.cleanup_merged_source_window(&mut wm.wm, 301, 302, "terminal");
+        cleanup_merged_source_window(&mut wm.wm, 301, 302, "terminal");
 
         let state = wm.snapshot();
         assert_eq!(state.close_calls, 1);
@@ -1913,11 +1202,9 @@ enabled = true
 
     #[test]
     fn place_tearout_window_moves_column_for_composed_west() {
-        let orchestrator = Orchestrator::default();
         let mut wm = fake_wm_with_tearout_composer(Direction::West);
 
-        orchestrator
-            .place_tearout_window(&mut wm.wm, Direction::West, 11, 4, None)
+        place_tearout_window(&mut wm.wm, Direction::West, 11, 4, None)
             .expect("tearout placement should succeed");
         assert_eq!(wm.take_composer_calls(), vec![("west".into(), 4)]);
     }
@@ -1925,10 +1212,8 @@ enabled = true
     #[test]
     fn composed_tearout_routes_through_wm_specific_composer() {
         let mut wm = fake_wm_with_tearout_composer(Direction::North);
-        let orchestrator = Orchestrator::default();
 
-        orchestrator
-            .place_tearout_window(&mut wm.wm, Direction::North, 11, 3, None)
+        place_tearout_window(&mut wm.wm, Direction::North, 11, 3, None)
             .expect("tearout placement should succeed");
 
         assert_eq!(wm.take_composer_calls(), vec![("north".into(), 3)]);
@@ -1936,18 +1221,15 @@ enabled = true
 
     #[test]
     fn place_tearout_window_consumes_for_composed_north() {
-        let orchestrator = Orchestrator::default();
         let mut wm = fake_wm_with_tearout_composer(Direction::North);
 
-        orchestrator
-            .place_tearout_window(&mut wm.wm, Direction::North, 11, 7, None)
+        place_tearout_window(&mut wm.wm, Direction::North, 11, 7, None)
             .expect("tearout placement should succeed");
         assert_eq!(wm.take_composer_calls(), vec![("north".into(), 7)]);
     }
 
     #[test]
     fn focus_tearout_window_retries_until_new_window_appears() {
-        let orchestrator = Orchestrator::default();
         let source_pid = ProcessId::new(5151);
         let mut pre_window_ids = BTreeSet::new();
         pre_window_ids.insert(31);
@@ -1981,15 +1263,14 @@ enabled = true
             closed_window_ids: Vec::new(),
         });
 
-        let focused = orchestrator
-            .focus_tearout_window(
-                &mut wm.wm,
-                &pre_window_ids,
-                31,
-                source_pid,
-                "com.mitchellh.ghostty",
-            )
-            .expect("tearout focus should succeed");
+        let focused = focus_tearout_window(
+            &mut wm.wm,
+            &pre_window_ids,
+            31,
+            source_pid,
+            "com.mitchellh.ghostty",
+        )
+        .expect("tearout focus should succeed");
 
         let state = wm.snapshot();
         assert_eq!(focused, Some(32));
@@ -2006,10 +1287,8 @@ enabled = true
 
     #[test]
     fn place_tearout_window_focuses_known_target_before_composed_north() {
-        let orchestrator = Orchestrator::default();
         let mut wm = fake_wm_with_tearout_composer(Direction::North);
-        orchestrator
-            .place_tearout_window(&mut wm.wm, Direction::North, 11, 9, Some(12))
+        place_tearout_window(&mut wm.wm, Direction::North, 11, 9, Some(12))
             .expect("tearout placement should succeed");
 
         let state = wm.snapshot();
@@ -2056,7 +1335,7 @@ enabled = true
             },
         ];
 
-        let selected = Orchestrator::select_tearout_window_id(
+        let selected = select_tearout_window_id(
             &pre_window_ids,
             &windows,
             10,
@@ -2090,7 +1369,7 @@ enabled = true
             },
         ];
 
-        let selected = Orchestrator::select_tearout_window_id(
+        let selected = select_tearout_window_id(
             &pre_window_ids,
             &windows,
             20,
