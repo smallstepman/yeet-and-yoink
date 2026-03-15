@@ -4,6 +4,7 @@ use crate::engine::contract::{AppAdapter, TopologyHandler};
 use crate::engine::runtime::ProcessId;
 use crate::engine::topology::Direction;
 use crate::engine::window_manager::{ConfiguredWindowManager, WindowRecord};
+use crate::engine::chain_resolver::resolve_app_chain;
 use crate::logging;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -29,7 +30,7 @@ pub(crate) fn resolve_adapter_for_window(
     window: &WindowRecord,
 ) -> Option<Box<dyn AppAdapter>> {
     let owner_pid = window.pid.map(ProcessId::get).unwrap_or(0);
-    crate::engine::chain_resolver::resolve_app_chain(
+    resolve_app_chain(
         window.app_id.as_deref().unwrap_or_default(),
         owner_pid,
         window.title.as_deref().unwrap_or_default(),
@@ -38,7 +39,7 @@ pub(crate) fn resolve_adapter_for_window(
     .find(|adapter| adapter.adapter_name() == adapter_name)
 }
 
-pub(crate) fn window_matches_adapter(adapter_name: &str, window: &WindowRecord) -> bool {
+fn window_matches_adapter(adapter_name: &str, window: &WindowRecord) -> bool {
     resolve_adapter_for_window(adapter_name, window).is_some()
 }
 
@@ -120,7 +121,7 @@ pub(crate) fn probe_in_place_target_for_adapter(
             continue;
         }
         let target_app =
-            crate::engine::chain_resolver::resolve_app_chain(app_id, owner_pid, title)
+            resolve_app_chain(app_id, owner_pid, title)
                 .into_iter()
                 .find(|candidate| candidate.adapter_name() == adapter_name);
         if target_app.is_some() {

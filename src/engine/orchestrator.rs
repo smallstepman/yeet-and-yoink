@@ -16,7 +16,7 @@ use crate::engine::window_manager::{
     plan_tear_out, CapabilitySupport, ConfiguredWindowManager, ResizeIntent, ResizeKind,
     WindowRecord,
 };
-use crate::engine::actions::probe::{
+use crate::engine::actions::{
     focused_window_record, probe_directional_target, probe_directional_target_for_adapter,
     probe_in_place_target_for_adapter, resolve_adapter_for_window, restore_in_place_target_focus,
     DirectionalProbeFocusMode,
