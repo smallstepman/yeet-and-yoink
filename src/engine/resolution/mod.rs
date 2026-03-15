@@ -1,1 +1,1 @@
-// placeholder — populated in subsequent tasks
+pub(crate) mod catalog;
