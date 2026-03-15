@@ -1,13 +1,13 @@
+pub(crate) mod actions;
 pub mod app_policy;
 pub mod chain_resolver;
 pub mod contract;
+pub mod contracts;
 pub mod domain;
 pub mod orchestrator;
+pub mod resolution;
 pub mod runtime;
 pub mod topology;
-pub mod window_manager;
-pub mod contracts;
-pub mod resolution;
 pub mod transfer;
+pub mod window_manager;
 pub mod wm;
-pub mod actions;
