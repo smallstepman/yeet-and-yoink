@@ -8,7 +8,7 @@ use anyhow::Result;
 
 use super::focus::attempt_focused_app_focus;
 use super::movement::attempt_focused_app_move;
-use super::probe::{focused_window_record, probe_directional_target, DirectionalProbeFocusMode};
+use super::probe::{focused_window_record, DirectionalProbeFocusMode, DirectionalWindowProbe};
 use super::resize::attempt_focused_app_resize;
 
 use crate::engine::domain::ErasedDomain;
@@ -131,12 +131,8 @@ impl Orchestrator {
         }
 
         let focused = focused_window_record(wm)?;
-        let Some(target_window) = probe_directional_target(
-            wm,
-            dir,
-            focused.id,
-            DirectionalProbeFocusMode::RestoreSource,
-        )?
+        let mut probe = DirectionalWindowProbe::new(wm, focused.id);
+        let Some(target_window) = probe.window(dir, DirectionalProbeFocusMode::RestoreSource)?
         else {
             return wm.move_direction(fallback_dir);
         };

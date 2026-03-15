@@ -2,9 +2,9 @@ use anyhow::{Context, Result};
 
 use super::AppContext;
 use super::{
-    attempt_passthrough_merge, execute_app_tear_out, probe_directional_target_for_adapter,
-    DirectionalProbeFocusMode,
+    attempt_passthrough_merge, execute_app_tear_out, DirectionalProbeFocusMode,
 };
+use super::probe::DirectionalWindowProbe;
 use crate::engine::contract::{AppKind, MoveDecision, TopologyHandler};
 use crate::engine::topology::Direction;
 use crate::engine::window_manager::ConfiguredWindowManager;
@@ -46,14 +46,9 @@ pub(crate) fn attempt_focused_app_move(
                 }
                 if matches!(app.kind(), AppKind::Terminal)
                     && app.capabilities().tear_out
-                    && probe_directional_target_for_adapter(
-                        wm,
-                        dir,
-                        source_window_id,
-                        adapter_name,
-                        DirectionalProbeFocusMode::RestoreSource,
-                    )?
-                    .is_none()
+                    && DirectionalWindowProbe::new(wm, source_window_id)
+                        .window_matching_adapter(dir, adapter_name, DirectionalProbeFocusMode::RestoreSource)?
+                        .is_none()
                 {
                     execute_app_tear_out(
                         wm,

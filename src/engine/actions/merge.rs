@@ -5,8 +5,9 @@ use crate::engine::runtime::ProcessId;
 use crate::engine::topology::Direction;
 use crate::engine::window_manager::ConfiguredWindowManager;
 use crate::engine::actions::probe::{
-    probe_directional_target_for_adapter, probe_in_place_target_for_adapter,
+    probe_in_place_target_for_adapter,
     resolve_adapter_for_window, restore_in_place_target_focus, DirectionalProbeFocusMode,
+    DirectionalWindowProbe,
 };
 use crate::logging;
 
@@ -37,13 +38,8 @@ pub(crate) fn attempt_passthrough_merge(
 
     match TopologyHandler::merge_execution_mode(app) {
         MergeExecutionMode::SourceFocused => {
-            let Some(target_window) = probe_directional_target_for_adapter(
-                wm,
-                dir,
-                source_window_id,
-                adapter_name,
-                DirectionalProbeFocusMode::RestoreSource,
-            )?
+            let Some(target_window) = DirectionalWindowProbe::new(wm, source_window_id)
+                .window_matching_adapter(dir, adapter_name, DirectionalProbeFocusMode::RestoreSource)?
             else {
                 return Ok(false);
             };
@@ -124,13 +120,8 @@ pub(crate) fn attempt_passthrough_merge(
                 }
             }
 
-            let Some(target_window) = probe_directional_target_for_adapter(
-                wm,
-                dir,
-                source_window_id,
-                adapter_name,
-                DirectionalProbeFocusMode::KeepTarget,
-            )?
+            let Some(target_window) = DirectionalWindowProbe::new(wm, source_window_id)
+                .window_matching_adapter(dir, adapter_name, DirectionalProbeFocusMode::KeepTarget)?
             else {
                 return Ok(false);
             };

@@ -98,6 +98,54 @@ pub(crate) fn probe_directional_target_for_adapter(
     Ok(None)
 }
 
+/// A scoped helper that owns directional focus mutation and restoration for a
+/// single source window.  Callers in movement, merge, and the orchestrator
+/// should build on this rather than invoking the free `probe_directional_*`
+/// functions directly.
+pub(crate) struct DirectionalWindowProbe<'a> {
+    wm: &'a mut ConfiguredWindowManager,
+    source_window_id: u64,
+}
+
+impl<'a> DirectionalWindowProbe<'a> {
+    pub(crate) fn new(wm: &'a mut ConfiguredWindowManager, source_window_id: u64) -> Self {
+        Self {
+            wm,
+            source_window_id,
+        }
+    }
+
+    /// Move focus in `dir`, record the target window, and then apply
+    /// `focus_mode` (restore focus to source, or leave it on the target).
+    ///
+    /// Returns `None` when there is no window in that direction or when the
+    /// focus_direction call fails.
+    pub(crate) fn window(
+        &mut self,
+        dir: Direction,
+        focus_mode: DirectionalProbeFocusMode,
+    ) -> Result<Option<WindowRecord>> {
+        probe_directional_target(self.wm, dir, self.source_window_id, focus_mode)
+    }
+
+    /// Like [`window`] but also filters by adapter name — returns `None` when
+    /// the target window does not match the adapter.
+    pub(crate) fn window_matching_adapter(
+        &mut self,
+        dir: Direction,
+        adapter_name: &str,
+        focus_mode: DirectionalProbeFocusMode,
+    ) -> Result<Option<WindowRecord>> {
+        probe_directional_target_for_adapter(
+            self.wm,
+            dir,
+            self.source_window_id,
+            adapter_name,
+            focus_mode,
+        )
+    }
+}
+
 pub(crate) fn probe_in_place_target_for_adapter(
     wm: &mut ConfiguredWindowManager,
     outer_chain: &[Box<dyn AppAdapter>],
@@ -152,7 +200,10 @@ pub(crate) fn restore_in_place_target_focus(
 mod tests {
     use anyhow::{anyhow, Result};
 
-    use super::{focused_window_record, probe_directional_target, DirectionalProbeFocusMode};
+    use super::{
+        focused_window_record, probe_directional_target, DirectionalProbeFocusMode,
+        DirectionalWindowProbe,
+    };
     use crate::engine::runtime::ProcessId;
     use crate::engine::topology::Direction;
     use crate::engine::window_manager::{
@@ -266,5 +317,106 @@ mod tests {
         );
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), None, "no target when source == target");
+    }
+
+    // --- DirectionalWindowProbe tests ---
+
+    /// A FakeSession variant that switches focused_id to target_id when
+    /// focus_direction is called, simulating an actual directional focus move.
+    struct DirectionalFakeSession {
+        focused_id: u64,
+        target_id: u64,
+    }
+
+    impl WindowManagerSession for DirectionalFakeSession {
+        fn adapter_name(&self) -> &'static str {
+            "directional-fake"
+        }
+
+        fn capabilities(&self) -> WindowManagerCapabilities {
+            WindowManagerCapabilities::none()
+        }
+
+        fn focused_window(&mut self) -> Result<FocusedWindowRecord> {
+            Ok(FocusedWindowRecord {
+                id: self.focused_id,
+                app_id: Some("com.test.app".into()),
+                title: Some("Test Window".into()),
+                pid: ProcessId::new(1234),
+                original_tile_index: 0,
+            })
+        }
+
+        fn windows(&mut self) -> Result<Vec<WindowRecord>> {
+            Ok(Vec::new())
+        }
+
+        fn focus_direction(&mut self, _direction: Direction) -> Result<()> {
+            self.focused_id = self.target_id;
+            Ok(())
+        }
+
+        fn move_direction(&mut self, _direction: Direction) -> Result<()> {
+            Ok(())
+        }
+
+        fn resize_with_intent(&mut self, _intent: ResizeIntent) -> Result<()> {
+            Ok(())
+        }
+
+        fn spawn(&mut self, _command: Vec<String>) -> Result<()> {
+            Ok(())
+        }
+
+        fn focus_window_by_id(&mut self, id: u64) -> Result<()> {
+            self.focused_id = id;
+            Ok(())
+        }
+
+        fn close_window_by_id(&mut self, _id: u64) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    fn directional_fake_wm(source_id: u64, target_id: u64) -> ConfiguredWindowManager {
+        ConfiguredWindowManager::new(
+            Box::new(DirectionalFakeSession {
+                focused_id: source_id,
+                target_id,
+            }),
+            WindowManagerFeatures::default(),
+        )
+    }
+
+    #[test]
+    fn directional_probe_restore_source_returns_focus_to_source_window() {
+        let source_id = 10;
+        let target_id = 20;
+        let mut wm = directional_fake_wm(source_id, target_id);
+        let mut probe = DirectionalWindowProbe::new(&mut wm, source_id);
+        let result = probe
+            .window(Direction::East, DirectionalProbeFocusMode::RestoreSource)
+            .expect("probe should succeed");
+        assert!(result.is_some(), "should find a target window");
+        assert_eq!(result.unwrap().id, target_id);
+        // RestoreSource: focus must be restored to source after the probe
+        let focused = wm.focused_window().expect("focused_window should succeed");
+        assert_eq!(focused.id, source_id, "focus should be restored to source");
+    }
+
+    #[test]
+    fn directional_probe_keep_target_leaves_focus_on_target_window() {
+        let source_id = 10;
+        let target_id = 20;
+        let mut wm = directional_fake_wm(source_id, target_id);
+        let mut probe = DirectionalWindowProbe::new(&mut wm, source_id);
+        let result = probe
+            .window(Direction::East, DirectionalProbeFocusMode::KeepTarget)
+            .expect("probe should succeed");
+        assert!(result.is_some(), "should find a target window");
+        assert_eq!(result.unwrap().id, target_id);
+        // KeepTarget: focus must remain on the target window
+        let focused = wm.focused_window().expect("focused_window should succeed");
+        assert_eq!(focused.id, target_id, "focus should remain on target");
     }
 }
