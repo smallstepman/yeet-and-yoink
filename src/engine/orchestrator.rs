@@ -1,5 +1,4 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::time::Duration;
 
 use anyhow::{Context, Result};
 
@@ -13,13 +12,14 @@ use crate::engine::runtime::ProcessId;
 use crate::engine::topology::Direction;
 use crate::engine::topology::{DomainId, GlobalLeaf, Rect};
 use crate::engine::window_manager::{
-    plan_tear_out, CapabilitySupport, ConfiguredWindowManager, ResizeIntent, ResizeKind,
+    ConfiguredWindowManager, ResizeIntent, ResizeKind,
     WindowRecord,
 };
 use crate::engine::actions::{
-    focused_window_record, probe_directional_target, probe_directional_target_for_adapter,
+    execute_app_tear_out, focus_tearout_window, focused_window_record, place_tearout_window,
+    probe_directional_target, probe_directional_target_for_adapter,
     probe_in_place_target_for_adapter, resolve_adapter_for_window, restore_in_place_target_focus,
-    DirectionalProbeFocusMode,
+    select_tearout_window_id, DirectionalProbeFocusMode,
 };
 use crate::logging;
 
@@ -315,57 +315,20 @@ impl Orchestrator {
         app_id: &str,
         decision_label: &str,
     ) -> Result<()> {
-        let adapter_name = app.adapter_name();
-        let pre_window_ids: BTreeSet<u64> = match wm.windows() {
-            Ok(windows) => windows.into_iter().map(|window| window.id).collect(),
-            Err(err) => {
-                logging::debug(format!(
-                    "orchestrator: unable to snapshot pre-tearout windows err={:#}",
-                    err
-                ));
-                BTreeSet::new()
-            }
-        };
-        let tear = TopologyHandler::move_out(app, dir, owner_pid)
-            .with_context(|| format!("{adapter_name} move_out failed"))?;
-        if let Some(command) = tear.spawn_command {
-            wm.spawn(command)
-                .with_context(|| format!("{adapter_name} tear-out spawn via wm failed"))?;
-        }
-        let tearout_window_id = match self.focus_tearout_window(
+        execute_app_tear_out(
             wm,
-            &pre_window_ids,
-            source_window_id,
-            source_pid,
-            app_id,
-        ) {
-            Ok(window_id) => window_id,
-            Err(err) => {
-                logging::debug(format!(
-                    "orchestrator: unable to focus tear-out window adapter={} err={:#}",
-                    adapter_name, err
-                ));
-                None
-            }
-        };
-        if let Err(err) = self.place_tearout_window(
-            wm,
+            app,
             dir,
+            owner_pid,
             source_window_id,
             source_tile_index,
-            tearout_window_id,
-        ) {
-            logging::debug(format!(
-                "orchestrator: tear-out placement fallback failed adapter={} err={:#}",
-                adapter_name, err
-            ));
-        }
-        logging::debug(format!(
-            "orchestrator: app move handled by {adapter_name} decision={decision_label}"
-        ));
-        Ok(())
+            source_pid,
+            app_id,
+            decision_label,
+        )
     }
 
+    #[allow(dead_code)]
     fn focus_tearout_window(
         &self,
         wm: &mut ConfiguredWindowManager,
@@ -374,65 +337,10 @@ impl Orchestrator {
         source_pid: Option<ProcessId>,
         source_app_id: &str,
     ) -> Result<Option<u64>> {
-        let target_window_id = self.wait_for_tearout_window_id(
-            wm,
-            pre_window_ids,
-            source_window_id,
-            source_pid,
-            source_app_id,
-        )?;
-        if let Some(target_window_id) = target_window_id {
-            if target_window_id != source_window_id {
-                wm.focus_window_by_id(target_window_id)?;
-                return Ok(Some(target_window_id));
-            }
-        }
-        Ok(None)
+        focus_tearout_window(wm, pre_window_ids, source_window_id, source_pid, source_app_id)
     }
 
-    fn wait_for_tearout_window_id(
-        &self,
-        wm: &mut ConfiguredWindowManager,
-        pre_window_ids: &BTreeSet<u64>,
-        source_window_id: u64,
-        source_pid: Option<ProcessId>,
-        source_app_id: &str,
-    ) -> Result<Option<u64>> {
-        const ATTEMPTS: usize = 25;
-        const DELAY: Duration = Duration::from_millis(40);
-
-        for attempt in 0..ATTEMPTS {
-            match wm.windows() {
-                Ok(windows) => {
-                    if let Some(target_window_id) = Self::select_tearout_window_id(
-                        pre_window_ids,
-                        &windows,
-                        source_window_id,
-                        source_pid,
-                        source_app_id,
-                    ) {
-                        if target_window_id != source_window_id {
-                            return Ok(Some(target_window_id));
-                        }
-                    }
-                }
-                Err(err) => {
-                    logging::debug(format!(
-                        "orchestrator: tear-out post-window snapshot failed attempt={} err={:#}",
-                        attempt + 1,
-                        err
-                    ));
-                }
-            }
-
-            if attempt + 1 < ATTEMPTS {
-                std::thread::sleep(DELAY);
-            }
-        }
-
-        Ok(None)
-    }
-
+    #[allow(dead_code)]
     fn select_tearout_window_id(
         pre_window_ids: &BTreeSet<u64>,
         windows: &[WindowRecord],
@@ -440,45 +348,10 @@ impl Orchestrator {
         source_pid: Option<ProcessId>,
         source_app_id: &str,
     ) -> Option<u64> {
-        let mut new_windows: Vec<&WindowRecord> = windows
-            .iter()
-            .filter(|window| !pre_window_ids.contains(&window.id))
-            .collect();
-        if new_windows.is_empty() {
-            return windows
-                .iter()
-                .find(|window| window.is_focused && window.id != source_window_id)
-                .map(|window| window.id);
-        }
-        new_windows.sort_by_key(|window| window.id);
-
-        new_windows
-            .iter()
-            .find(|window| {
-                window.pid == source_pid && window.app_id.as_deref() == Some(source_app_id)
-            })
-            .map(|window| window.id)
-            .or_else(|| {
-                new_windows
-                    .iter()
-                    .find(|window| window.pid == source_pid)
-                    .map(|window| window.id)
-            })
-            .or_else(|| {
-                new_windows
-                    .iter()
-                    .find(|window| window.app_id.as_deref() == Some(source_app_id))
-                    .map(|window| window.id)
-            })
-            .or_else(|| {
-                new_windows
-                    .iter()
-                    .find(|window| window.is_focused)
-                    .map(|window| window.id)
-            })
-            .or_else(|| new_windows.first().map(|window| window.id))
+        select_tearout_window_id(pre_window_ids, windows, source_window_id, source_pid, source_app_id)
     }
 
+    #[allow(dead_code)]
     fn place_tearout_window(
         &self,
         wm: &mut ConfiguredWindowManager,
@@ -487,30 +360,7 @@ impl Orchestrator {
         source_tile_index: usize,
         target_window_id: Option<u64>,
     ) -> Result<()> {
-        if let Some(target_window_id) = target_window_id.filter(|id| *id != source_window_id) {
-            wm.focus_window_by_id(target_window_id)?;
-        }
-
-        let focused_window_id = wm.focused_window()?.id;
-        if focused_window_id == source_window_id {
-            return Ok(());
-        }
-
-        match plan_tear_out(wm.capabilities(), dir) {
-            CapabilitySupport::Native => wm.move_direction(dir),
-            CapabilitySupport::Unsupported => Ok(()),
-            CapabilitySupport::Composed => {
-                let adapter_name = wm.adapter_name();
-                wm.tear_out_composer_mut()
-                    .with_context(|| {
-                        format!(
-                            "configured wm '{}' is missing a tear-out composer for {dir}",
-                            adapter_name
-                        )
-                    })?
-                    .compose_tear_out(dir, source_tile_index)
-            }
-        }
+        place_tearout_window(wm, dir, source_window_id, source_tile_index, target_window_id)
     }
 
     fn leaf_from_window(window: &WindowRecord, leaf_id: u64) -> GlobalLeaf {
