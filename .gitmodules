@@ -1,0 +1,16 @@
+[submodule "plugins/firefox"]
+	path = plugins/firefox
+	url = https://github.com/smallstepman/yeet-and-yoink.git
+	branch = plugin/firefox
+[submodule "plugins/chrome"]
+	path = plugins/chrome
+	url = https://github.com/smallstepman/yeet-and-yoink.git
+	branch = plugin/chrome
+[submodule "plugins/kitty"]
+	path = plugins/kitty
+	url = https://github.com/smallstepman/yeet-and-yoink.git
+	branch = plugin/kitty
+[submodule "plugins/wezterm"]
+	path = plugins/wezterm
+	url = https://github.com/smallstepman/yeet-and-yoink.git
+	branch = plugin/wezterm

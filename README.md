@@ -75,6 +75,28 @@ allow_remote_control socket-only
 listen_on unix:@kitty-{kitty_pid}
 ```
 
+## Plugin packages
+
+App-facing integration assets now live under `plugins/` as git submodules that track dedicated
+plugin branches of this repository:
+
+- `plugins/firefox`: Firefox-family WebExtension source plus native-host installer template
+- `plugins/chrome`: Chromium-family unpacked extension plus native-host installer template
+- `plugins/wezterm`: WezTerm plugin repository with `plugin/init.lua`
+- `plugins/kitty`: kitty config snippet package for remote-control setup
+
+Clone with submodules enabled:
+
+```sh
+git clone --recurse-submodules https://github.com/smallstepman/yeet-and-yoink.git
+```
+
+Or initialize them after cloning:
+
+```sh
+git submodule update --init --recursive
+```
+
 ## Runtime architecture
 
 - Command entrypoints: `src/commands/{focus,move_win,resize}.rs`
