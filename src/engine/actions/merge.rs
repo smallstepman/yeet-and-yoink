@@ -28,7 +28,7 @@ pub(crate) fn attempt_passthrough_merge(
         Ok(value) => value,
         Err(err) => {
             logging::debug(format!(
-                "orchestrator: app passthrough merge prepare failed adapter={} err={:#}",
+                "actions::merge: app passthrough merge prepare failed adapter={} err={:#}",
                 adapter_name, err
             ));
             return Ok(false);
@@ -68,13 +68,13 @@ pub(crate) fn attempt_passthrough_merge(
                         adapter_name,
                     );
                     logging::debug(format!(
-                        "orchestrator: app move handled by {adapter_name} decision=MergeSourceFocused"
+                        "actions::merge: app move handled by {adapter_name} decision=MergeSourceFocused"
                     ));
                     Ok(true)
                 }
                 Err(err) => {
                     logging::debug(format!(
-                        "orchestrator: app passthrough merge failed adapter={} err={:#}",
+                        "actions::merge: app passthrough merge failed adapter={} err={:#}",
                         adapter_name, err
                     ));
                     Ok(false)
@@ -108,14 +108,14 @@ pub(crate) fn attempt_passthrough_merge(
                     ) {
                         Ok(()) => {
                             logging::debug(format!(
-                                "orchestrator: app move handled by {adapter_name} decision=MergeTargetFocusedInPlace"
+                                "actions::merge: app move handled by {adapter_name} decision=MergeTargetFocusedInPlace"
                             ));
                             return Ok(true);
                         }
                         Err(err) => {
                             restore_in_place_target_focus(outer_chain, dir, owner_pid);
                             logging::debug(format!(
-                                "orchestrator: app passthrough merge failed adapter={} err={:#}",
+                                "actions::merge: app passthrough merge failed adapter={} err={:#}",
                                 adapter_name, err
                             ));
                             return Ok(false);
@@ -161,14 +161,14 @@ pub(crate) fn attempt_passthrough_merge(
                         adapter_name,
                     );
                     logging::debug(format!(
-                        "orchestrator: app move handled by {adapter_name} decision=MergeTargetFocused"
+                        "actions::merge: app move handled by {adapter_name} decision=MergeTargetFocused"
                     ));
                     Ok(true)
                 }
                 Err(err) => {
                     let _ = wm.focus_window_by_id(source_window_id);
                     logging::debug(format!(
-                        "orchestrator: app passthrough merge failed adapter={} err={:#}",
+                        "actions::merge: app passthrough merge failed adapter={} err={:#}",
                         adapter_name, err
                     ));
                     Ok(false)
@@ -189,13 +189,13 @@ pub(crate) fn cleanup_merged_source_window(
     }
     if let Err(err) = wm.focus_window_by_id(target_window_id) {
         logging::debug(format!(
-            "orchestrator: merge cleanup focus failed adapter={} target_window_id={} err={:#}",
+            "actions::merge: merge cleanup focus failed adapter={} target_window_id={} err={:#}",
             adapter_name, target_window_id, err
         ));
     }
     if let Err(err) = wm.close_window_by_id(source_window_id) {
         logging::debug(format!(
-            "orchestrator: merge cleanup close failed adapter={} source_window_id={} err={:#}",
+            "actions::merge: merge cleanup close failed adapter={} source_window_id={} err={:#}",
             adapter_name, source_window_id, err
         ));
     }

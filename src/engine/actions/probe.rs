@@ -51,7 +51,7 @@ pub(crate) fn probe_directional_target(
 ) -> Result<Option<WindowRecord>> {
     if let Err(err) = wm.focus_direction(dir) {
         logging::debug(format!(
-            "orchestrator: directional target probe failed dir={} err={:#}",
+            "actions::probe: directional target probe failed dir={} err={:#}",
             dir, err
         ));
         return Ok(None);

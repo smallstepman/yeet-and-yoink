@@ -27,7 +27,7 @@ pub(crate) fn execute_app_tear_out(
         Ok(windows) => windows.into_iter().map(|window| window.id).collect(),
         Err(err) => {
             logging::debug(format!(
-                "orchestrator: unable to snapshot pre-tearout windows err={:#}",
+                "actions::tearout: unable to snapshot pre-tearout windows err={:#}",
                 err
             ));
             BTreeSet::new()
@@ -49,7 +49,7 @@ pub(crate) fn execute_app_tear_out(
         Ok(window_id) => window_id,
         Err(err) => {
             logging::debug(format!(
-                "orchestrator: unable to focus tear-out window adapter={} err={:#}",
+                "actions::tearout: unable to focus tear-out window adapter={} err={:#}",
                 adapter_name, err
             ));
             None
@@ -63,12 +63,12 @@ pub(crate) fn execute_app_tear_out(
         tearout_window_id,
     ) {
         logging::debug(format!(
-            "orchestrator: tear-out placement fallback failed adapter={} err={:#}",
+            "actions::tearout: tear-out placement fallback failed adapter={} err={:#}",
             adapter_name, err
         ));
     }
     logging::debug(format!(
-        "orchestrator: app move handled by {adapter_name} decision={decision_label}"
+        "actions::tearout: app move handled by {adapter_name} decision={decision_label}"
     ));
     Ok(())
 }
@@ -123,7 +123,7 @@ pub(crate) fn wait_for_tearout_window_id(
             }
             Err(err) => {
                 logging::debug(format!(
-                    "orchestrator: tear-out post-window snapshot failed attempt={} err={:#}",
+                    "actions::tearout: tear-out post-window snapshot failed attempt={} err={:#}",
                     attempt + 1,
                     err
                 ));
