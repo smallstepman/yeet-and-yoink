@@ -6,10 +6,11 @@ use anyhow::Result as AnyResult;
 use anyhow::{anyhow, Context, Result};
 
 use crate::engine::contract::{
-    AppAdapter, AppKind, MergePreparation, TopologyHandler as AppTopologyHandler,
+    AppAdapter, MergePreparation, TopologyHandler as AppTopologyHandler,
 };
 use crate::engine::runtime::ProcessId;
 use crate::engine::topology::{Direction, DomainId, LeafId, Rect};
+use crate::engine::resolution::domain::domain_id_for_app_kind;
 use crate::engine::window_manager::ConfiguredWindowManager;
 
 pub const WM_DOMAIN_ID: DomainId = 1;
@@ -326,13 +327,6 @@ fn pick_target_type(
         .find(|candidate| registry.can_convert(source_type, *candidate))
 }
 
-fn domain_id_for_app_kind(kind: AppKind) -> DomainId {
-    match kind {
-        AppKind::Terminal => TERMINAL_DOMAIN_ID,
-        AppKind::Editor => EDITOR_DOMAIN_ID,
-        AppKind::Browser => WM_DOMAIN_ID,
-    }
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NativeWindowRef {
