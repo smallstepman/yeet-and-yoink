@@ -1459,31 +1459,110 @@ enabled = true
     }
 
     /// Verifies that the `PassthroughMergeContext` type is defined in `merge.rs`
-    /// and that the move action routes through merge before ever reaching tear-out
-    /// or the wm fallback.  With a single focused window (no directional neighbor),
-    /// `attempt_focused_app_move` must return `false` — the move session in
-    /// `execute_move_session` then falls through to `wm.move_direction`, giving
-    /// `move_calls == 1`.  What must NOT happen is a tear-out being executed or
-    /// the merge short-circuit being bypassed.  Compile-fails until
-    /// `PassthroughMergeContext` exists in `merge.rs`.
+    /// and that when a matching adapter neighbor exists the merge path wins —
+    /// `PassthroughMergeContext::run` returns `true`, the source window is closed
+    /// (merge cleanup), and the wm fallback move is never called.
+    ///
+    /// Compile-fails until `PassthroughMergeContext` exists in `merge.rs`.
     #[test]
     fn passthrough_move_prefers_merge_before_tear_out_or_wm_fallback() {
+        use crate::engine::actions::context::FocusedAppSession;
         use crate::engine::actions::merge::PassthroughMergeContext;
+        use crate::engine::contract::{
+            AppAdapter, AppCapabilities, AppKind, MergePreparation, TearResult, TopologyHandler,
+        };
+
         // Structural compile guard — fails until PassthroughMergeContext is defined.
         fn _assert_exists<'a>(_: std::marker::PhantomData<PassthroughMergeContext<'a>>) {}
 
-        // Behavioral: single focused window, no neighbor in East direction.
-        // The move session should fall through to the wm fallback (move_calls == 1)
-        // and must NOT trigger close_calls > 0 (tear-out) or panic.
+        // A minimal adapter whose adapter_name matches what window_matches_adapter
+        // will resolve for "org.wezfurlong.wezterm" windows — the WeztermBackend
+        // adapter_name constant is "terminal" (requires wezterm config enabled below),
+        // and whose merge_into_target always succeeds.
+        struct MergeableAdapter;
+
+        impl TopologyHandler for MergeableAdapter {
+            fn can_focus(&self, _: Direction, _: u32) -> anyhow::Result<bool> {
+                Ok(false)
+            }
+            fn focus(&self, _: Direction, _: u32) -> anyhow::Result<()> {
+                Ok(())
+            }
+            fn move_internal(&self, _: Direction, _: u32) -> anyhow::Result<()> {
+                Ok(())
+            }
+            fn move_out(&self, _: Direction, _: u32) -> anyhow::Result<TearResult> {
+                Ok(TearResult { spawn_command: None })
+            }
+            fn merge_into_target(
+                &self,
+                _dir: Direction,
+                _source_pid: Option<crate::engine::runtime::ProcessId>,
+                _target_pid: Option<crate::engine::runtime::ProcessId>,
+                _preparation: MergePreparation,
+            ) -> anyhow::Result<()> {
+                Ok(()) // always succeed — merge wins
+            }
+        }
+
+        impl AppAdapter for MergeableAdapter {
+            fn adapter_name(&self) -> &'static str {
+                "terminal" // matches the WeztermBackend adapter_name (ADAPTER_NAME = "terminal")
+            }
+            fn kind(&self) -> AppKind {
+                AppKind::Terminal
+            }
+            fn capabilities(&self) -> AppCapabilities {
+                AppCapabilities {
+                    probe: false,
+                    focus: false,
+                    move_internal: false,
+                    resize_internal: false,
+                    rearrange: false,
+                    tear_out: false,
+                    merge: true, // merge capability enabled
+                }
+            }
+        }
+
+        // Enable wezterm in config so that window_matches_adapter("wezterm", ...)
+        // recognises the neighbor window correctly.
+        let _guard = crate::utils::env_guard();
+        let root = unique_temp_dir("merge-wins");
+        let config_dir = root.join("yeet-and-yoink");
+        std::fs::create_dir_all(&config_dir).expect("config dir should be created");
+        std::fs::write(
+            config_dir.join("config.toml"),
+            r#"
+[app.terminal.wezterm]
+enabled = true
+"#,
+        )
+        .expect("config file should be writable");
+        let old_config = load_config(&config_dir.join("config.toml"));
+
+        let source_pid_opt = ProcessId::new(100);
+        let source_pid = source_pid_opt.expect("100 is a valid non-zero pid");
+        // Two wezterm windows: source (focused) and target neighbor (not focused).
         let mut wm = fake_wm(FakeWindowManagerState {
-            windows: vec![WindowRecord {
-                id: 10,
-                app_id: Some("org.wezfurlong.wezterm".into()),
-                title: Some("zsh".into()),
-                pid: ProcessId::new(100),
-                is_focused: true,
-                original_tile_index: 0,
-            }],
+            windows: vec![
+                WindowRecord {
+                    id: 10,
+                    app_id: Some("org.wezfurlong.wezterm".into()),
+                    title: Some("source".into()),
+                    pid: source_pid_opt,
+                    is_focused: true,
+                    original_tile_index: 0,
+                },
+                WindowRecord {
+                    id: 11,
+                    app_id: Some("org.wezfurlong.wezterm".into()),
+                    title: Some("target".into()),
+                    pid: ProcessId::new(101),
+                    is_focused: false,
+                    original_tile_index: 1,
+                },
+            ],
             window_snapshots: Vec::new(),
             windows_call_count: 0,
             capabilities: WindowManagerCapabilities::none(),
@@ -1492,21 +1571,34 @@ enabled = true
             closed_window_ids: Vec::new(),
         });
 
-        let mut orchestrator = Orchestrator::default();
-        orchestrator
-            .execute(
-                &mut wm.wm,
-                ActionRequest {
-                    kind: ActionKind::Move,
-                    direction: Direction::East,
-                },
-            )
-            .expect("move action should succeed even with no neighbor");
+        let session = FocusedAppSession {
+            source_window_id: 10,
+            source_tile_index: 0,
+            pid: source_pid,
+            app_id: "org.wezfurlong.wezterm".into(),
+            title: "source".into(),
+            chain: vec![],
+        };
+
+        let adapter = MergeableAdapter;
+        let merged = PassthroughMergeContext {
+            app: &adapter,
+            session: &session,
+            outer_chain: &[],
+            dir: Direction::East,
+        }
+        .run(&mut wm.wm)
+        .expect("PassthroughMergeContext should not error when merge succeeds");
+
+        assert!(merged, "merge should win when a matching adapter neighbor exists");
 
         let state = wm.snapshot();
-        // No tear-out should have run (no window closed).
-        assert_eq!(state.close_calls, 0, "tear-out must not execute before merge is tried");
-        // The wm fallback ran once (no app or domain handler succeeded).
-        assert_eq!(state.move_calls, 1, "wm fallback should run when no merge neighbor exists");
+        // Source window must have been closed by cleanup_merged_source_window.
+        assert_eq!(state.close_calls, 1, "source window should be closed after merge");
+        // The wm move fallback must never run when merge wins.
+        assert_eq!(state.move_calls, 0, "wm move fallback must not run when merge succeeds");
+
+        restore_config(old_config);
+        let _ = std::fs::remove_dir_all(root);
     }
 }

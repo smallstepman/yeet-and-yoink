@@ -250,7 +250,7 @@ mod tests {
     use std::collections::BTreeSet;
     use std::sync::{Arc, Mutex};
 
-    use super::{select_tearout_window_id, wait_for_tearout_window_id, TearOutRequest};
+    use super::{focus_tearout_window, select_tearout_window_id, wait_for_tearout_window_id, TearOutRequest};
     use crate::engine::runtime::ProcessId;
     use crate::engine::window_manager::{
         ConfiguredWindowManager, FocusedWindowRecord, ResizeIntent, WindowManagerCapabilities,
@@ -384,9 +384,9 @@ mod tests {
         )
     }
 
-    /// Verifies that `wait_for_tearout_window_id` (exercised via the
-    /// `TearOutRequest` abstraction) resolves a new window that does not appear
-    /// in the first snapshot poll but becomes visible on the third attempt.
+    /// Verifies that `focus_tearout_window` resolves a new window that does not
+    /// appear in the first snapshot poll but becomes visible on the third attempt,
+    /// and that focus is actually moved to the late-appearing window.
     ///
     /// Compile-fails until `TearOutRequest` is defined in this module.
     #[test]
@@ -418,25 +418,39 @@ mod tests {
         let pre_ids: BTreeSet<u64> = [source_window_id].into_iter().collect();
 
         // Three snapshot rounds: source only, source only, then new_window appears.
+        // The WM starts focused on the source window.
         let mut wm = snapshot_wm(source_window_id, vec![
             vec![source.clone()],
             vec![source.clone()],
             vec![source.clone(), new_window.clone()],
         ]);
 
-        let result = wait_for_tearout_window_id(
+        // Exercise focus_tearout_window (not just wait_for_tearout_window_id) to
+        // verify that the wait-and-focus path actually moves focus to the new window.
+        let result = focus_tearout_window(
             &mut wm,
             &pre_ids,
             source_window_id,
             source_pid,
             app_id,
         )
-        .expect("wait_for_tearout_window_id should not error");
+        .expect("focus_tearout_window should not error");
 
         assert_eq!(
             result,
             Some(2),
-            "new window should be resolved even when it appears on the third poll attempt"
+            "new window should be returned even when it appears on the third poll attempt"
+        );
+
+        // The key behavioral assertion: focus must have moved to the new window.
+        let focused_after = wm
+            .focused_window()
+            .expect("focused_window should not fail after focus_tearout_window")
+            .id;
+        assert_eq!(
+            focused_after,
+            2,
+            "focus should have moved to the late-appearing window"
         );
     }
 }
