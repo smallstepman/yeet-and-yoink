@@ -124,17 +124,6 @@ impl<'a> DirectionalWindowProbe<'a> {
     }
 }
 
-/// Thin delegator kept for backward compatibility.  All semantics live in
-/// [`DirectionalWindowProbe::window`].
-pub(crate) fn probe_directional_target(
-    wm: &mut ConfiguredWindowManager,
-    dir: Direction,
-    source_window_id: u64,
-    focus_mode: DirectionalProbeFocusMode,
-) -> Result<Option<WindowRecord>> {
-    DirectionalWindowProbe::new(wm, source_window_id).window(dir, focus_mode)
-}
-
 
 pub(crate) fn probe_in_place_target_for_adapter(
     wm: &mut ConfiguredWindowManager,
@@ -190,10 +179,7 @@ pub(crate) fn restore_in_place_target_focus(
 mod tests {
     use anyhow::{anyhow, Result};
 
-    use super::{
-        focused_window_record, probe_directional_target, DirectionalProbeFocusMode,
-        DirectionalWindowProbe,
-    };
+    use super::{focused_window_record, DirectionalProbeFocusMode, DirectionalWindowProbe};
     use crate::engine::runtime::ProcessId;
     use crate::engine::topology::Direction;
     use crate::engine::window_manager::{
@@ -282,29 +268,21 @@ mod tests {
     }
 
     #[test]
-    fn probe_directional_target_returns_none_when_focus_direction_fails() {
+    fn directional_probe_returns_none_when_focus_direction_fails() {
         let mut wm = fake_wm(10, false); // focus_direction returns Err
-        let result = probe_directional_target(
-            &mut wm,
-            Direction::East,
-            10,
-            DirectionalProbeFocusMode::RestoreSource,
-        );
+        let mut probe = DirectionalWindowProbe::new(&mut wm, 10);
+        let result = probe.window(Direction::East, DirectionalProbeFocusMode::RestoreSource);
         // focus failure is treated as no target (returns Ok(None), not Err)
         assert!(result.is_ok(), "should not propagate focus error");
         assert_eq!(result.unwrap(), None);
     }
 
     #[test]
-    fn probe_directional_target_returns_none_when_target_equals_source_window() {
+    fn directional_probe_returns_none_when_target_equals_source_window() {
         // focus_direction succeeds but focused_window still returns the source id
         let mut wm = fake_wm(99, true); // after focus_direction, focused_id stays 99
-        let result = probe_directional_target(
-            &mut wm,
-            Direction::East,
-            99, // source_window_id matches the focused id
-            DirectionalProbeFocusMode::RestoreSource,
-        );
+        let mut probe = DirectionalWindowProbe::new(&mut wm, 99);
+        let result = probe.window(Direction::East, DirectionalProbeFocusMode::RestoreSource);
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), None, "no target when source == target");
     }
@@ -408,5 +386,57 @@ mod tests {
         // KeepTarget: focus must remain on the target window
         let focused = wm.focused_window().expect("focused_window should succeed");
         assert_eq!(focused.id, target_id, "focus should remain on target");
+    }
+
+    /// `window_matching_adapter` with `KeepTarget` and a non-matching adapter:
+    /// the target window is found, focus was left on it by `window()`, but the
+    /// adapter check fails so `window_matching_adapter` must restore focus to
+    /// the source before returning `None`.
+    #[test]
+    fn window_matching_adapter_keep_target_mismatch_restores_focus_to_source() {
+        let source_id = 10;
+        let target_id = 20;
+        let mut wm = directional_fake_wm(source_id, target_id);
+        let mut probe = DirectionalWindowProbe::new(&mut wm, source_id);
+        // "nonexistent-adapter" will never match the fake window's app chain
+        let result = probe
+            .window_matching_adapter(
+                Direction::East,
+                "nonexistent-adapter",
+                DirectionalProbeFocusMode::KeepTarget,
+            )
+            .expect("window_matching_adapter should not error");
+        assert_eq!(result, None, "mismatched adapter should yield None");
+        // Focus must have been restored to source, not left on the target
+        let focused = wm.focused_window().expect("focused_window should succeed");
+        assert_eq!(
+            focused.id, source_id,
+            "KeepTarget+mismatch must restore focus to source"
+        );
+    }
+
+    /// `window_matching_adapter` with `RestoreSource` and a non-matching adapter:
+    /// `window()` already restored focus to source; the adapter check fails but
+    /// focus is already correct.  Returns `None` with focus on source.
+    #[test]
+    fn window_matching_adapter_restore_source_mismatch_leaves_focus_on_source() {
+        let source_id = 10;
+        let target_id = 20;
+        let mut wm = directional_fake_wm(source_id, target_id);
+        let mut probe = DirectionalWindowProbe::new(&mut wm, source_id);
+        let result = probe
+            .window_matching_adapter(
+                Direction::East,
+                "nonexistent-adapter",
+                DirectionalProbeFocusMode::RestoreSource,
+            )
+            .expect("window_matching_adapter should not error");
+        assert_eq!(result, None, "mismatched adapter should yield None");
+        // Focus was already restored to source by window(); must still be there
+        let focused = wm.focused_window().expect("focused_window should succeed");
+        assert_eq!(
+            focused.id, source_id,
+            "RestoreSource+mismatch must leave focus on source"
+        );
     }
 }
