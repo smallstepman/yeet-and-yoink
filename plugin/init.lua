@@ -1,4 +1,12 @@
-local function yny_deep_mux_bridge_dir()
+local wezterm = require 'wezterm'
+local mux = wezterm.mux
+
+local M = {}
+
+local bridge_dir_initialized = false
+local handler_registered = false
+
+local function mux_bridge_dir()
   local runtime_dir = os.getenv('XDG_RUNTIME_DIR')
   if runtime_dir == nil or runtime_dir == '' then
     runtime_dir = '/tmp'
@@ -6,20 +14,18 @@ local function yny_deep_mux_bridge_dir()
   return runtime_dir .. '/yny-wezterm-mux'
 end
 
-local yny_deep_bridge_dir_initialized = false
-
-local function yny_deep_ensure_mux_bridge_dir()
-  if yny_deep_bridge_dir_initialized then
+local function ensure_mux_bridge_dir()
+  if bridge_dir_initialized then
     return true
   end
 
   local success, _, stderr = wezterm.run_child_process {
     'mkdir',
     '-p',
-    yny_deep_mux_bridge_dir(),
+    mux_bridge_dir(),
   }
   if success then
-    yny_deep_bridge_dir_initialized = true
+    bridge_dir_initialized = true
     return true
   end
 
@@ -29,12 +35,12 @@ local function yny_deep_ensure_mux_bridge_dir()
   return false
 end
 
-local function yny_deep_touch_bridge_ready(pane_id)
-  if not yny_deep_ensure_mux_bridge_dir() then
+local function touch_bridge_ready(pane_id)
+  if not ensure_mux_bridge_dir() then
     return
   end
 
-  local handle = io.open(string.format('%s/ready', yny_deep_mux_bridge_dir()), 'w')
+  local handle = io.open(string.format('%s/ready', mux_bridge_dir()), 'w')
   if handle == nil then
     return
   end
@@ -42,7 +48,7 @@ local function yny_deep_touch_bridge_ready(pane_id)
   handle:close()
 end
 
-local function yny_deep_merge_split_flag(dir)
+local function merge_split_flag(dir)
   if dir == 'west' then
     return '--right'
   elseif dir == 'east' then
@@ -55,15 +61,15 @@ local function yny_deep_merge_split_flag(dir)
   return nil
 end
 
-local function yny_deep_bridge_command_path()
-  return string.format('%s/merge.cmd', yny_deep_mux_bridge_dir())
+local function bridge_command_path()
+  return string.format('%s/merge.cmd', mux_bridge_dir())
 end
 
-local function yny_deep_claim_bridge_command(pane_id)
-  if not yny_deep_ensure_mux_bridge_dir() then
+local function claim_bridge_command(pane_id)
+  if not ensure_mux_bridge_dir() then
     return nil, nil
   end
-  local cmd_path = yny_deep_bridge_command_path()
+  local cmd_path = bridge_command_path()
   local claimed_path = string.format('%s.processing.%d', cmd_path, pane_id)
   local ok = os.rename(cmd_path, claimed_path)
   if not ok then
@@ -72,7 +78,7 @@ local function yny_deep_claim_bridge_command(pane_id)
   return cmd_path, claimed_path
 end
 
-local function yny_deep_restore_bridge_command(claimed_path, cmd_path)
+local function restore_bridge_command(claimed_path, cmd_path)
   local ok = os.rename(claimed_path, cmd_path)
   if ok then
     return
@@ -81,15 +87,15 @@ local function yny_deep_restore_bridge_command(claimed_path, cmd_path)
   os.remove(claimed_path)
 end
 
-local function yny_deep_process_mux_bridge(window, pane)
+local function process_mux_bridge(window, pane)
   local pane_id = pane:pane_id()
-  yny_deep_touch_bridge_ready(pane_id)
+  touch_bridge_ready(pane_id)
 
   if not window:is_focused() then
     return
   end
 
-  local cmd_path, claimed_path = yny_deep_claim_bridge_command(pane_id)
+  local cmd_path, claimed_path = claim_bridge_command(pane_id)
   if claimed_path == nil then
     return
   end
@@ -118,11 +124,11 @@ local function yny_deep_process_mux_bridge(window, pane)
   end
 
   if source_pane_id == pane_id then
-    yny_deep_restore_bridge_command(claimed_path, cmd_path)
+    restore_bridge_command(claimed_path, cmd_path)
     return
   end
 
-  local split_flag = yny_deep_merge_split_flag(dir)
+  local split_flag = merge_split_flag(dir)
   if split_flag == nil then
     wezterm.log_warn('yny mux bridge: invalid direction in payload=' .. payload)
     os.remove(claimed_path)
@@ -149,7 +155,7 @@ local function yny_deep_process_mux_bridge(window, pane)
 
   if not success then
     wezterm.log_error('yny mux bridge: split-pane failed stderr=' .. (stderr or ''))
-    yny_deep_restore_bridge_command(claimed_path, cmd_path)
+    restore_bridge_command(claimed_path, cmd_path)
     return
   end
 
@@ -169,4 +175,17 @@ local function yny_deep_process_mux_bridge(window, pane)
   )
 end
 
-wezterm.on('update-right-status', yny_deep_process_mux_bridge)
+local function register_handlers()
+  if handler_registered then
+    return
+  end
+  wezterm.on('update-right-status', process_mux_bridge)
+  handler_registered = true
+end
+
+function M.apply_to_config(config, opts)
+  register_handlers()
+  return config
+end
+
+return M
