@@ -259,11 +259,7 @@ impl ErasedDomain for AppDomainPlugin {
     }
 
     fn supported_payload_types(&self) -> Vec<TypeId> {
-        if self.adapter.capabilities().merge {
-            vec![TypeId::of::<AppMergePayload>()]
-        } else {
-            vec![]
-        }
+        TilingDomain::supported_payload_types(self).to_vec()
     }
 
     fn tear_off(&mut self, native_id: &[u8]) -> Result<Box<dyn PaneState>> {

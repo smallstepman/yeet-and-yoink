@@ -1,13 +1,12 @@
 use std::any::TypeId;
 
-use anyhow::Result as AnyResult;
 use anyhow::Result;
 
 use crate::engine::topology::{Direction, DomainId, LeafId, Rect};
 
 use super::registry::{PaneState, PayloadRegistry, TransferError};
 
-pub mod sealed {
+pub(crate) mod sealed {
     use std::marker::PhantomData;
 
     #[must_use = "topology is stale until a fresh layout snapshot is fetched"]
@@ -103,15 +102,15 @@ pub trait ErasedDomain: Send {
     fn domain_id(&self) -> DomainId;
     fn domain_name(&self) -> &'static str;
     fn rect(&self) -> Rect;
-    fn fetch_snapshot(&mut self) -> AnyResult<DomainSnapshot>;
+    fn fetch_snapshot(&mut self) -> Result<DomainSnapshot>;
     fn supported_payload_types(&self) -> Vec<TypeId>;
-    fn tear_off(&mut self, native_id: &[u8]) -> AnyResult<Box<dyn PaneState>>;
+    fn tear_off(&mut self, native_id: &[u8]) -> Result<Box<dyn PaneState>>;
     fn merge_in(
         &mut self,
         target_native_id: &[u8],
         dir: Direction,
         payload: Box<dyn PaneState>,
-    ) -> AnyResult<Vec<u8>>;
+    ) -> Result<Vec<u8>>;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
