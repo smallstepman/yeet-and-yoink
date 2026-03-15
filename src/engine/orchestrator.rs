@@ -16,6 +16,11 @@ use crate::engine::window_manager::{
     plan_tear_out, CapabilitySupport, ConfiguredWindowManager, ResizeIntent, ResizeKind,
     WindowRecord,
 };
+use crate::engine::actions::probe::{
+    focused_window_record, probe_directional_target, probe_directional_target_for_adapter,
+    probe_in_place_target_for_adapter, resolve_adapter_for_window, restore_in_place_target_focus,
+    DirectionalProbeFocusMode,
+};
 use crate::logging;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -54,12 +59,6 @@ pub enum RoutingError {
 pub struct Orchestrator {
     payload_registry: PayloadRegistry,
     domains: BTreeMap<DomainId, Box<dyn ErasedDomain>>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum DirectionalProbeFocusMode {
-    RestoreSource,
-    KeepTarget,
 }
 
 impl Default for Orchestrator {
@@ -166,8 +165,8 @@ impl Orchestrator {
             return Ok(());
         }
 
-        let focused = Self::focused_window_record(wm)?;
-        let Some(target_window) = self.probe_directional_target(
+        let focused = focused_window_record(wm)?;
+        let Some(target_window) = probe_directional_target(
             wm,
             dir,
             focused.id,
@@ -245,8 +244,7 @@ impl Orchestrator {
                     }
                     if matches!(app.kind(), AppKind::Terminal)
                         && app.capabilities().tear_out
-                        && self
-                            .probe_directional_target_for_adapter(
+                        && probe_directional_target_for_adapter(
                                 wm,
                                 dir,
                                 source_window_id,
@@ -515,145 +513,6 @@ impl Orchestrator {
         }
     }
 
-    fn focused_window_record(wm: &mut ConfiguredWindowManager) -> Result<WindowRecord> {
-        let window = wm.focused_window()?;
-        Ok(WindowRecord {
-            id: window.id,
-            app_id: window.app_id,
-            title: window.title,
-            pid: window.pid,
-            is_focused: true,
-            original_tile_index: window.original_tile_index,
-        })
-    }
-
-    fn probe_directional_target(
-        &self,
-        wm: &mut ConfiguredWindowManager,
-        dir: Direction,
-        source_window_id: u64,
-        focus_mode: DirectionalProbeFocusMode,
-    ) -> Result<Option<WindowRecord>> {
-        if let Err(err) = wm.focus_direction(dir) {
-            logging::debug(format!(
-                "orchestrator: directional target probe failed dir={} err={:#}",
-                dir, err
-            ));
-            return Ok(None);
-        }
-
-        let target = match Self::focused_window_record(wm) {
-            Ok(window) => window,
-            Err(err) => {
-                let _ = wm.focus_window_by_id(source_window_id);
-                return Err(err.context("failed to read target window during directional probe"));
-            }
-        };
-
-        if target.id == source_window_id {
-            return Ok(None);
-        }
-
-        if matches!(focus_mode, DirectionalProbeFocusMode::RestoreSource) {
-            wm.focus_window_by_id(source_window_id).with_context(|| {
-                format!("failed to restore focus to window {}", source_window_id)
-            })?;
-        }
-        Ok(Some(target))
-    }
-
-    fn probe_directional_target_for_adapter(
-        &self,
-        wm: &mut ConfiguredWindowManager,
-        dir: Direction,
-        source_window_id: u64,
-        adapter_name: &str,
-        focus_mode: DirectionalProbeFocusMode,
-    ) -> Result<Option<WindowRecord>> {
-        let Some(target_window) =
-            self.probe_directional_target(wm, dir, source_window_id, focus_mode)?
-        else {
-            return Ok(None);
-        };
-        if Self::window_matches_adapter(adapter_name, &target_window) {
-            return Ok(Some(target_window));
-        }
-        if matches!(focus_mode, DirectionalProbeFocusMode::KeepTarget) {
-            let _ = wm.focus_window_by_id(source_window_id);
-        }
-        Ok(None)
-    }
-
-    fn probe_in_place_target_for_adapter(
-        &self,
-        wm: &mut ConfiguredWindowManager,
-        outer_chain: &[Box<dyn AppAdapter>],
-        dir: Direction,
-        source_window_id: u64,
-        owner_pid: u32,
-        app_id: &str,
-        title: &str,
-        adapter_name: &str,
-    ) -> Result<Option<Box<dyn AppAdapter>>> {
-        for outer in outer_chain {
-            if !outer.capabilities().focus
-                || !TopologyHandler::can_focus(outer.as_ref(), dir, owner_pid)?
-            {
-                continue;
-            }
-            TopologyHandler::focus(outer.as_ref(), dir, owner_pid)?;
-            let focused_window_id = wm.focused_window()?.id;
-            if focused_window_id != source_window_id {
-                let _ = wm.focus_window_by_id(source_window_id);
-                continue;
-            }
-            let target_app =
-                crate::engine::chain_resolver::resolve_app_chain(app_id, owner_pid, title)
-                    .into_iter()
-                    .find(|candidate| candidate.adapter_name() == adapter_name);
-            if target_app.is_some() {
-                return Ok(target_app);
-            }
-            let _ = TopologyHandler::focus(outer.as_ref(), dir.opposite(), owner_pid);
-        }
-        Ok(None)
-    }
-
-    fn restore_in_place_target_focus(
-        &self,
-        outer_chain: &[Box<dyn AppAdapter>],
-        dir: Direction,
-        owner_pid: u32,
-    ) {
-        for outer in outer_chain {
-            if outer.capabilities().focus
-                && TopologyHandler::can_focus(outer.as_ref(), dir.opposite(), owner_pid)
-                    .unwrap_or(false)
-            {
-                let _ = TopologyHandler::focus(outer.as_ref(), dir.opposite(), owner_pid);
-                break;
-            }
-        }
-    }
-
-    fn resolve_adapter_for_window(
-        adapter_name: &str,
-        window: &WindowRecord,
-    ) -> Option<Box<dyn AppAdapter>> {
-        let owner_pid = window.pid.map(ProcessId::get).unwrap_or(0);
-        crate::engine::chain_resolver::resolve_app_chain(
-            window.app_id.as_deref().unwrap_or_default(),
-            owner_pid,
-            window.title.as_deref().unwrap_or_default(),
-        )
-        .into_iter()
-        .find(|adapter| adapter.adapter_name() == adapter_name)
-    }
-
-    fn window_matches_adapter(adapter_name: &str, window: &WindowRecord) -> bool {
-        Self::resolve_adapter_for_window(adapter_name, window).is_some()
-    }
-
     fn leaf_from_window(window: &WindowRecord, leaf_id: u64) -> GlobalLeaf {
         let domain = domain_id_for_window(
             window.app_id.as_deref(),
@@ -701,7 +560,7 @@ impl Orchestrator {
 
         match TopologyHandler::merge_execution_mode(app) {
             MergeExecutionMode::SourceFocused => {
-                let Some(target_window) = self.probe_directional_target_for_adapter(
+                let Some(target_window) = probe_directional_target_for_adapter(
                     wm,
                     dir,
                     source_window_id,
@@ -747,7 +606,7 @@ impl Orchestrator {
             }
             MergeExecutionMode::TargetFocused => {
                 if let Some(owner_pid) = source_pid.map(ProcessId::get) {
-                    if let Some(target_app) = self.probe_in_place_target_for_adapter(
+                    if let Some(target_app) = probe_in_place_target_for_adapter(
                         wm,
                         outer_chain,
                         dir,
@@ -777,7 +636,7 @@ impl Orchestrator {
                                 return Ok(true);
                             }
                             Err(err) => {
-                                self.restore_in_place_target_focus(outer_chain, dir, owner_pid);
+                                restore_in_place_target_focus(outer_chain, dir, owner_pid);
                                 logging::debug(format!(
                                     "orchestrator: app passthrough merge failed adapter={} err={:#}",
                                     adapter_name, err
@@ -788,7 +647,7 @@ impl Orchestrator {
                     }
                 }
 
-                let Some(target_window) = self.probe_directional_target_for_adapter(
+                let Some(target_window) = probe_directional_target_for_adapter(
                     wm,
                     dir,
                     source_window_id,
@@ -799,7 +658,7 @@ impl Orchestrator {
                     return Ok(false);
                 };
                 let Some(target_app) =
-                    Self::resolve_adapter_for_window(adapter_name, &target_window)
+                    resolve_adapter_for_window(adapter_name, &target_window)
                 else {
                     let _ = wm.focus_window_by_id(source_window_id);
                     return Ok(false);
