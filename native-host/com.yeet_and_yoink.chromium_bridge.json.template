@@ -1,0 +1,9 @@
+{
+  "name": "com.yeet_and_yoink.chromium_bridge",
+  "description": "Native host for the yeet-and-yoink Chromium bridge",
+  "path": "__YNY_BINARY__",
+  "type": "stdio",
+  "allowed_origins": [
+    "chrome-extension://oigofebnnajpegmncnciacecfhlokkbp/"
+  ]
+}
